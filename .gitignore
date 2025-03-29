@@ -1,0 +1,6 @@
+*.swp
+*.ll
+*.o
+/ipx_wrap_set_prefix
+/vmlinux.h
+/vmlinux.btf
