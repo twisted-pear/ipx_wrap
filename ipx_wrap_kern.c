@@ -4,6 +4,7 @@
 #include <bpf/bpf_endian.h>
 
 #define ETH_ALEN 6
+#define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define ETH_P_IPX 0x8137
 #define IPPROTO_ICMPV6 58
@@ -197,7 +198,6 @@ static __always_inline int mk_nd_adv(struct __sk_buff *ctx, struct ethhdr *eth,
 	if (opt_lladdr->length != 1) {
 		return -1;
 	}
-	bpf_printk("have lladdr opt");
 
 	/* overwrite dst MAC with solicitation's src MAC */
 	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
@@ -333,17 +333,14 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 
 	struct ethhdr *eth;
 	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
-		bpf_printk("ethparse fail");
 		return TC_ACT_SHOT;
 	}
 	if (bpf_ntohs(eth->h_proto) != ETH_P_IPX) {
-		bpf_printk("no ipx");
 		return TC_ACT_SHOT;
 	}
 
 	struct ipxhdr *ipxh;
 	if (parse_ipxhdr(&cur, data_end, &ipxh) < 0) {
-		bpf_printk("ipxparse fail");
 		return TC_ACT_SHOT;
 	}
 
@@ -384,13 +381,10 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 
 	eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-	bpf_printk("preinstall");
-
 	/* install new IPv6 header */
 
 	__s32 hlen_diff = sizeof(struct ipv6hdr) - sizeof(struct ipxhdr); // 10
 	if (bpf_skb_change_head(ctx, hlen_diff, 0) < 0) {
-		bpf_printk("failinstall");
 		return TC_ACT_SHOT;
 	}
 
@@ -399,23 +393,19 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	data = (void *)(long)ctx->data;
 
 	if (data + hlen_diff + sizeof(struct ethhdr) > data_end) {
-		bpf_printk("no data");
 		return TC_ACT_SHOT;
 	}
 	__builtin_memmove(data, data + hlen_diff, sizeof(struct ethhdr));
 
 	cur.pos = data;
 	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
-		bpf_printk("ethparse2 fail");
 		return TC_ACT_SHOT;
 	}
 	if (cur.pos + sizeof(struct ipv6hdr) > data_end) {
-		bpf_printk("no room");
 		return TC_ACT_SHOT;
 	}
 
 	__builtin_memcpy(cur.pos, &newhdr, sizeof(newhdr));
-	bpf_printk("postinstall");
 
 	/* mark and reinject the packet to trick the network stack */
 	ctx->cb[0] = IPX_TO_IPV6_REINJECT_MARK;
@@ -439,34 +429,27 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 
 	struct ethhdr *eth;
 	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
-		bpf_printk("ethparse fail");
 		return TC_ACT_SHOT;
 	}
 	if (bpf_ntohs(eth->h_proto) != ETH_P_IPV6) {
-		bpf_printk("no ipv6");
 		return TC_ACT_SHOT;
 	}
 
 	struct ipv6hdr *ip6h;
 	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
-		bpf_printk("ipv6parse fail");
 		return TC_ACT_SHOT;
 	}
 
 	/* TODO: handle extension headers */
 
 	if (ip6h->nexthdr == IPPROTO_ICMPV6) {
-		bpf_printk("have ICMPv6");
 		struct icmp6hdr *icmp6h;
 		/* check for neighbor solicitations */
 		if (is_nd_sol(ip6h, data_end, &icmp6h)) {
-			bpf_printk("have ND sol");
 			/* rewrite the packet into a neighbor advertisement */
 			if (mk_nd_adv(ctx, eth, ip6h, icmp6h) < 0) {
 				return TC_ACT_SHOT;
 			}
-
-			bpf_printk("made ND adv");
 
 			/* reinject the packet on ingress */
 			ctx->cb[0] = IPX_TO_IPV6_REINJECT_MARK;
@@ -509,15 +492,32 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 
 	eth->h_proto = bpf_htons(ETH_P_IPX);
 
-	bpf_printk("preinstall");
 	/* install new IPX header */
-	__s32 hlen_diff = sizeof(struct ipv6hdr) - sizeof(struct ipxhdr); // 10
-	__builtin_memcpy(((void *)ip6h) + hlen_diff, &newhdr, sizeof(newhdr));
-	if (bpf_skb_adjust_room(ctx, -hlen_diff, BPF_ADJ_ROOM_MAC, 0) < 0) {
-		bpf_printk("failinstall");
+
+	/* linux won't allow us to make the packet shorter than the protocol
+	 * (IPv4 or IPv6) header, so we first convert to IPv4 so that we can
+	 * send smaller packets */
+	if (bpf_skb_change_proto(ctx, bpf_htons(ETH_P_IP), 0) < 0) {
 		return TC_ACT_SHOT;
 	}
-	bpf_printk("postinstall");
+	__s32 hlen_diff = (sizeof(struct ipxhdr) - sizeof(struct iphdr)); // 10
+
+	/* adjust packet room so that an IPX header fits, instead of an IPv4
+	 * header */
+	if (bpf_skb_adjust_room(ctx, hlen_diff, BPF_ADJ_ROOM_MAC, 0) < 0) {
+		return TC_ACT_SHOT;
+	}
+
+	bpf_skb_pull_data(ctx, 0);
+	data_end = (void *)(long)ctx->data_end;
+	data = (void *)(long)ctx->data;
+
+	/* actually copy the IPX header */
+	struct ipxhdr *ipx_hdr_pos = data + sizeof(struct ethhdr);
+	if (ipx_hdr_pos + 1 > data_end) {
+		return TC_ACT_SHOT;
+	}
+	__builtin_memcpy(ipx_hdr_pos, &newhdr, sizeof(newhdr));
 
 	return TC_ACT_OK;
 }
