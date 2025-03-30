@@ -25,7 +25,6 @@
 #define IPPROTO_SHIM6 140
 #define MAX_EXT_HEADERS 9
 
-#define IPV6_PREFIX_LEN 4
 /* according to Novell docs this is the type for "NetBIOS and other propagated
  * packets" */
 #define IPX_PKT_TYPE 0x14
@@ -107,7 +106,7 @@ struct ipxhdr {
 } __attribute__((packed));
 
 struct ipv6_eui64_addr {
-	__u8 prefix[IPV6_PREFIX_LEN];
+	__be32 prefix;
 	__be32 ipx_net;
 	__u8 ipx_node_fst[3];
 	__be16 fffe;
@@ -270,6 +269,142 @@ static __always_inline int parse_icmp6hdr(struct hdr_cursor *cur, void
 	return icmp6h->icmp6_type;
 }
 
+static __always_inline int mk_nd_adv(struct __sk_buff *ctx, struct ethhdr *eth,
+		struct ipv6hdr *ip6h, struct icmp6hdr *icmp6h)
+{
+	void *data_end = (void *)(long)ctx->data_end;
+
+	/* check that we have a full ND packet */
+	struct icmpv6_nd *nd = (void *)(icmp6h + 1);
+	if (nd + 1 > data_end) {
+		return -1;
+	}
+
+	/* check that we have a src lladdr option */
+	struct icmpv6_opt_lladdr_eth *opt_lladdr = (void *) (nd + 1);
+	if (opt_lladdr + 1 > data_end) {
+		return -1;
+	}
+	if (opt_lladdr->type != ICMPV6_OPT_SRC_LLADDR) {
+		return -1;
+	}
+	if (opt_lladdr->length != 1) {
+		return -1;
+	}
+	bpf_printk("have lladdr opt");
+
+	/* overwrite dst MAC with solicitation's src MAC */
+	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+
+	/* create src MAC from target addr */
+	struct ipv6_eui64_addr *tgt_addr = (void *) &nd->tgt_addr;
+	__builtin_memcpy(eth->h_source, tgt_addr->ipx_node_fst,
+			sizeof(tgt_addr->ipx_node_fst));
+	__builtin_memcpy(eth->h_source + sizeof(tgt_addr->ipx_node_fst),
+			tgt_addr->ipx_node_snd,
+			sizeof(tgt_addr->ipx_node_snd));
+
+	/* back up original IPv6 addrs */
+	struct __attribute__((packed)) {
+		struct in6_addr src;
+		struct in6_addr dst;
+	} ip6addr_orig;
+	__builtin_memcpy(&ip6addr_orig, &ip6h->saddr, sizeof(ip6addr_orig));
+
+	/* set dst IP from src IP */
+	__builtin_memcpy(&ip6h->daddr, &ip6h->saddr, sizeof(ip6h->daddr));
+
+	/* set source IP from tgt_IP, retain the link-local address part */
+	__builtin_memcpy(((__u8 *) &ip6h->saddr) + 8, ((__u8 *) tgt_addr) + 8,
+			sizeof(ip6h->saddr) / 2);
+
+	/* calculate checksum update */
+	__s64 csum_diff = bpf_csum_diff((__be32 *) &ip6addr_orig,
+			sizeof(ip6addr_orig), (__be32 *) &ip6h->saddr,
+			sizeof(ip6addr_orig), 0);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	/* back up original lladdr option */
+	struct icmpv6_opt_lladdr_eth opt_lladdr_orig;
+	__builtin_memcpy(&opt_lladdr_orig, opt_lladdr,
+			sizeof(opt_lladdr_orig));
+
+	/* change src lladdr opt to tgt lladdr opt */
+	opt_lladdr->type = ICMPV6_OPT_TGT_LLADDR;
+
+	/* change src lladdr to tgt lladdr */
+	__builtin_memcpy(opt_lladdr->lladdr_eth, tgt_addr->ipx_node_fst,
+			sizeof(tgt_addr->ipx_node_fst));
+	__builtin_memcpy(opt_lladdr->lladdr_eth +
+			sizeof(tgt_addr->ipx_node_fst), tgt_addr->ipx_node_snd,
+			sizeof(tgt_addr->ipx_node_snd));
+
+	/* calculate checksum update */
+	csum_diff = bpf_csum_diff((__be32 *) &opt_lladdr_orig,
+			sizeof(opt_lladdr_orig), (__be32 *) opt_lladdr,
+			sizeof(opt_lladdr_orig), csum_diff);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	/* original flags in ND sol (has no flags) */
+	__be32 nothing = 0;
+
+	/* set flags for ND adv */
+	icmp6h->icmp6_dataun.u_nd_advt.override = 1;
+	icmp6h->icmp6_dataun.u_nd_advt.solicited = 1;
+
+	/* calculate checksum update */
+	csum_diff = bpf_csum_diff(&nothing, sizeof(nothing), (__be32 *)
+			&icmp6h->icmp6_dataun.u_nd_advt, sizeof(nothing),
+			csum_diff);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	/* change ICMP type to ND adv */
+	icmp6h->icmp6_type = ICMPV6_ND_ADV;
+
+	/* update the checksum in the ICMPv6 header */
+	__u32 csum_offset = sizeof(struct ethhdr) + sizeof(struct ipv6hdr) +
+		offsetof(struct icmp6hdr, icmp6_cksum);
+	if (bpf_l4_csum_replace(ctx, csum_offset, 0, csum_diff,
+				BPF_F_PSEUDO_HDR) < 0) {
+		return -1;
+	}
+
+	/* update the checksum again for the ICMPv6 type */
+	if (bpf_l4_csum_replace(ctx, csum_offset, ICMPV6_ND_SOL, ICMPV6_ND_ADV,
+				2 | BPF_F_PSEUDO_HDR) < 0) {
+		return -1;
+	}
+
+	return 0;
+}
+
+static __always_inline bool is_nd_sol(struct ipv6hdr *ip6h, void *data_end,
+		struct icmp6hdr **icmp6h)
+{
+	struct hdr_cursor cur;
+	cur.pos = ip6h + 1;
+
+	if (parse_icmp6hdr(&cur, data_end, icmp6h) < 0) {
+		return false;
+	}
+
+	if ((*icmp6h)->icmp6_type != ICMPV6_ND_SOL) {
+		return false;
+	}
+
+	if ((*icmp6h)->icmp6_code != 0) {
+		return false;
+	}
+
+	return true;
+}
+
 SEC("tc/ingress")
 int ipx_wrap_in(struct __sk_buff *ctx)
 {
@@ -323,7 +458,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	struct ipv6_eui64_addr *saddr6 = (void *) &newhdr.saddr;
 	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr.daddr;
 
-	__builtin_memcpy(saddr6->prefix, prefix, sizeof(saddr6->prefix));
+	saddr6->prefix = *prefix;
 	saddr6->ipx_net = ipxh->saddr.net;
 	__builtin_memcpy(saddr6->ipx_node_fst, ipxh->saddr.node,
 			sizeof(saddr6->ipx_node_fst));
@@ -332,7 +467,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 			sizeof(saddr6->ipx_node_fst),
 			sizeof(saddr6->ipx_node_snd));
 
-	__builtin_memcpy(daddr6->prefix, prefix, sizeof(daddr6->prefix));
+	daddr6->prefix = *prefix;
 	daddr6->ipx_net = ipxh->daddr.net;
 	__builtin_memcpy(daddr6->ipx_node_fst, ipxh->daddr.node,
 			sizeof(daddr6->ipx_node_fst));
@@ -384,11 +519,11 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 SEC("tc/egress")
 int ipx_wrap_out(struct __sk_buff *ctx)
 {
-	/*__u8 key = 0;
-	__u8 *rec = bpf_map_lookup_elem(&ipx_wrap_prefix, &key);
-	if (rec == NULL) {
+	__u32 key = 0;
+	__u32 *prefix = bpf_map_lookup_elem(&ipx_wrap_prefix, &key);
+	if (prefix == NULL) {
 		return TC_ACT_SHOT;
-	}*/
+	}
 
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
@@ -414,6 +549,33 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 
 	/* TODO: handle extension headers */
 
+	if (ip6h->nexthdr == IPPROTO_ICMPV6) {
+		bpf_printk("have ICMPv6");
+		struct icmp6hdr *icmp6h;
+		/* check for neighbor solicitations */
+		if (is_nd_sol(ip6h, data_end, &icmp6h)) {
+			bpf_printk("have ND sol");
+			/* rewrite the packet into a neighbor advertisement */
+			if (mk_nd_adv(ctx, eth, ip6h, icmp6h) < 0) {
+				return TC_ACT_SHOT;
+			}
+
+			bpf_printk("made ND adv");
+
+			/* reinject the packet on ingress */
+			ctx->cb[0] = IPX_TO_IPV6_REINJECT_MARK;
+			return bpf_redirect(ctx->ifindex, BPF_F_INGRESS);
+		}
+	}
+
+	struct ipv6_eui64_addr *daddr6 = (void *) &ip6h->daddr;
+	struct ipv6_eui64_addr *saddr6 = (void *) &ip6h->saddr;
+
+	/* discard packets from another prefix */
+	if (daddr6->prefix != *prefix || saddr6->prefix != *prefix) {
+		return TC_ACT_SHOT;
+	}
+
 	/* build new IPX header */
 	struct ipxhdr newhdr;
 	newhdr.csum = 0xFFFF;
@@ -421,9 +583,6 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 				ipxhdr));
 	newhdr.tc = 0; // TODO: calculate TC from IPv6 hop limit
 	newhdr.type = IPX_PKT_TYPE;
-
-	struct ipv6_eui64_addr *daddr6 = (void *) &ip6h->daddr;
-	struct ipv6_eui64_addr *saddr6 = (void *) &ip6h->saddr;
 
 	newhdr.daddr.net = daddr6->ipx_net;
 	__builtin_memcpy(&newhdr.daddr.node, daddr6->ipx_node_fst,
