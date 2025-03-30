@@ -14,6 +14,11 @@ the IPv6 address.
 So to put an interface with MAC address `00:11:22:33:44:55` into IPX network
 `0xdeadcafe`, you would assign it an address of the form `<32-bit prefix>:dead:cafe:0011:22ff:fe33:4455`.
 
+Neighbor solicitations sent by the configured interface will be intercepted,
+modified into an appropriate neighbor advertisement and sent back to the
+interface. This is possible because the MAC address is always part of the IPX
+address.
+
 Currently the destination socket address is used to encode the protocol number
 (UDP, ICMPv6, TCP etc.).
 
