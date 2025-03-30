@@ -14,8 +14,8 @@ the IPv6 address.
 So to put an interface with MAC address `00:11:22:33:44:55` into IPX network
 `0xdeadcafe`, you would assign it an address of the form `<32-bit prefix>:dead:cafe:0011:22ff:fe33:4455`.
 
-Currently the destination socket is used to encode the protocol number (UDP,
-ICMPv6, TCP etc.).
+Currently the destination socket address is used to encode the protocol number
+(UDP, ICMPv6, TCP etc.).
 
 Load with:
 ```
@@ -37,6 +37,9 @@ ethtool -K <if> tx-ipxip6-segmentation off
 ethtool -K <if> tx-udp_tnl-segmentation off
 ethtool -K <if> tx-udp_tnl-csum-segmentation off
 ```
+
+The `install.sh` script will do both for you.
+You still need to set the prefix! See below.
 
 ## ipx_wrap_set_prefix
 
