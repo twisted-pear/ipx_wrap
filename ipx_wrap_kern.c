@@ -12,6 +12,9 @@
 #define ICMPV6_OPT_SRC_LLADDR 1
 #define ICMPV6_OPT_TGT_LLADDR 2
 
+/* based on the maximum IPX TC when using RIP */
+#define IPV6_HOP_LIMIT_MAX 15
+#define IPX_TC_MAX 15
 /* according to Novell docs this is the type for "NetBIOS and other propagated
  * packets" */
 #define IPX_PKT_TYPE 0x14
@@ -356,7 +359,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	newhdr.payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) - sizeof(struct
 				ipxhdr));
 	newhdr.nexthdr = bpf_ntohs(ipxh->daddr.sock) & 0xff;
-	newhdr.hop_limit = 255; // TODO: calculate IPv6 hop limit from TC
+	newhdr.hop_limit = (ipxh->tc > IPX_TC_MAX) ? 0 : IPX_TC_MAX - ipxh->tc;
 
 	struct ipv6_eui64_addr *saddr6 = (void *) &newhdr.saddr;
 	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr.daddr;
@@ -484,7 +487,8 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	newhdr.csum = 0xFFFF;
 	newhdr.pktlen = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(struct
 				ipxhdr));
-	newhdr.tc = 0; // TODO: calculate TC from IPv6 hop limit
+	newhdr.tc = (ip6h->hop_limit > IPV6_HOP_LIMIT_MAX) ? 0 :
+		IPV6_HOP_LIMIT_MAX - ip6h->hop_limit;
 	newhdr.type = IPX_PKT_TYPE;
 
 	newhdr.daddr.net = daddr6->ipx_net;
