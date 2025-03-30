@@ -488,7 +488,7 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	__builtin_memcpy(((__u8 *) &newhdr.saddr.node) +
 			(sizeof(newhdr.saddr.node) / 2), saddr6->ipx_node_snd,
 			sizeof(newhdr.saddr.node) / 2);
-	newhdr.saddr.sock = bpf_htons(IPX_DST_SOCK_BASE | ip6h->nexthdr);
+	newhdr.saddr.sock = bpf_htons(IPX_SRC_SOCK_BASE | ip6h->nexthdr);
 
 	eth->h_proto = bpf_htons(ETH_P_IPX);
 
