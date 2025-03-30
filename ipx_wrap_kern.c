@@ -12,19 +12,6 @@
 #define ICMPV6_OPT_SRC_LLADDR 1
 #define ICMPV6_OPT_TGT_LLADDR 2
 
-/* IPv6 extension headers */
-#define IPPROTO_HOPOPTS 0
-#define IPPROTO_ROUTING 43
-#define IPPROTO_FRAGMENT 44
-#define IPPROTO_ESP 50
-#define IPPROTO_AH 51
-#define IPPROTO_NONE 59
-#define IPPROTO_DSTOPTS 60
-#define IPPROTO_MH 135
-#define IPPROTO_HOSTID 139
-#define IPPROTO_SHIM6 140
-#define MAX_EXT_HEADERS 9
-
 /* according to Novell docs this is the type for "NetBIOS and other propagated
  * packets" */
 #define IPX_PKT_TYPE 0x14
@@ -128,90 +115,6 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *cur, void *data_end, 
 	*ethhdr = eth;
 
 	return eth->h_proto;
-}
-
-static __always_inline int skip_ext_headers(struct hdr_cursor *cur, void
-		*data_end, __u8 nexthdr, bool *can_mangle)
-{
-	struct ext_hdr_def *normalh;
-	struct ext_hdr_frag *fragh;
-	struct ext_hdr_ah *ah;
-	void *hdrend;
-	size_t hdrlen;
-
-	*can_mangle = true;
-
-	int i;
-	for (i = 0; i < MAX_EXT_HEADERS; i++) {
-		switch (nexthdr) {
-			/* regular headers */
-			case IPPROTO_HOPOPTS:
-			case IPPROTO_ROUTING:
-			case IPPROTO_DSTOPTS:
-			case IPPROTO_MH:
-			case IPPROTO_HOSTID:
-			case IPPROTO_SHIM6:
-				normalh = cur->pos;
-				if (normalh + 1 > data_end) {
-					return -1;
-				}
-
-				hdrend = ((void *)(normalh + 1)) +
-					(normalh->hdrlen * 8);
-				if (hdrend > data_end) {
-					return -1;
-				}
-
-				cur->pos = hdrend;
-				nexthdr = normalh->nexthdr;
-				break;
-
-			/* fragment header */
-			case IPPROTO_FRAGMENT:
-				fragh = cur->pos;
-				if (fragh + 1 > data_end) {
-					return -1;
-				}
-
-				cur->pos = fragh + 1;
-				nexthdr = fragh->nexthdr;
-				break;
-
-			/* AH is extra */
-			case IPPROTO_AH:
-				ah = cur->pos;
-				if (ah + 1 > data_end) {
-					return -1;
-				}
-
-				hdrlen = (ah->ahlen + 2) * 4;
-				if (hdrlen % 8 != 0) {
-					return -1;
-				}
-
-				hdrend = ((void *) ah) + hdrlen;
-				if (hdrend > data_end) {
-					return -1;
-				}
-
-				cur->pos = hdrend;
-				nexthdr = ah->nexthdr;
-
-				/* further processing cannot change the packet,
-				 * because it is authenticated */
-				*can_mangle = false;
-				break;
-
-			/* None, ESP, or some L4 proto */
-			case IPPROTO_ESP:
-			case IPPROTO_NONE:
-			default:
-				return nexthdr;
-		}
-	}
-
-	/* too many headers, give up */
-	return nexthdr;
 }
 
 static __always_inline int parse_ip6hdr(struct hdr_cursor *cur, void *data_end,

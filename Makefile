@@ -28,8 +28,6 @@ $(TC_OBJ): %.o: %.c vmlinux.h
 	    -D __KERNEL_VERSION_MINOR__=$(KERNEL_VERSION_MINOR) \
 	    -I $(LIBBPF_PREFIX)/include/ \
 	    -Wall \
-	    -Wno-unused-function \
-	    -Wno-unused-value \
 	    -Wno-pointer-sign \
 	    -Wno-compare-distinct-pointer-types \
 	    -Wno-address-of-packed-member \
