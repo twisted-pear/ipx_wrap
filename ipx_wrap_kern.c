@@ -36,43 +36,9 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } ipx_wrap_prefix SEC(".maps");
 
-struct ext_hdr_def {
-	__u8 nexthdr;
-	__u8 hdrlen; /* Length of the header in 8-octet units, not including
-			the first 8 octets. */
-	__be16 unspec1;
-	__be32 unspec2;
-} __attribute__((packed));
-
-struct ext_hdr_frag {
-	__u8 nexthdr;
-	__u8 unspec1;
-	__be16 unspec2;
-	__be32 unspec3;
-} __attribute__((packed));
-
-struct ext_hdr_ah {
-	__u8 nexthdr;
-	__u8 ahlen; /* This 8-bit field specifies the length of AH in 32-bit
-		       words (4-byte units), minus "2". For IPv6, the total
-		       length of the header must be a multiple of 8-octet
-		       units. */
-	__be16 reserved;
-	__be32 spi;
-	__be32 seq;
-	__be32 unspec1;
-} __attribute__((packed));
-
 struct icmpv6_nd {
 	/* the reserved bits are already part of the ICMPv6 header struct */
 	struct in6_addr tgt_addr;
-} __attribute__((packed));
-
-struct icmpv6_nd_opt {
-	__u8 type;
-	__u8 length;
-	__be16 unspec1;
-	__be32 unspec2;
 } __attribute__((packed));
 
 struct icmpv6_opt_lladdr_eth {
