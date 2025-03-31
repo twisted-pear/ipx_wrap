@@ -13,15 +13,15 @@
 #define ICMPV6_OPT_SRC_LLADDR 1
 #define ICMPV6_OPT_TGT_LLADDR 2
 
+#define IPV6_IN_IPX_PKT_TYPE 0x11
+#define IPV6_IN_IPX_SOCK_BASE 0xD600
+
+#define IPX_IN_IPV6_PORT 213
+
 /* based on the maximum IPX TC when using RIP */
 #define IPV6_HOP_LIMIT_MAX 15
 #define IPX_TC_MAX 15
-/* according to Novell docs this is the type for "NetBIOS and other propagated
- * packets" */
-#define IPX_PKT_TYPE 0x14
-/* Socket numbers between 0x4000 and 0x7FFF are dynamic sockets */
-#define IPX_DST_SOCK_BASE 0x4700
-#define IPX_SRC_SOCK_BASE 0x7400
+
 #define IPX_TO_IPV6_REINJECT_MARK 0xdead4774
 
 #define TC_ACT_OK 0
@@ -277,6 +277,102 @@ static __always_inline bool is_nd_sol(struct ipv6hdr *ip6h, void *data_end,
 	return true;
 }
 
+static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, __u32
+		prefix, struct ipv6hdr *newhdr)
+{
+	/* build new IPv6 header */
+	newhdr->version = 6;
+	newhdr->priority = 0;
+	newhdr->flow_lbl[0] = 0;
+	newhdr->flow_lbl[1] = 0;
+	newhdr->flow_lbl[2] = 0;
+	newhdr->payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) - sizeof(struct
+				ipxhdr));
+	newhdr->nexthdr = bpf_ntohs(ipxh->daddr.sock) & 0xFF;
+	newhdr->hop_limit = (ipxh->tc > IPX_TC_MAX) ? 0 : IPX_TC_MAX -
+		ipxh->tc;
+
+	struct ipv6_eui64_addr *saddr6 = (void *) &newhdr->saddr;
+	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr->daddr;
+
+	saddr6->prefix = prefix;
+	saddr6->ipx_net = ipxh->saddr.net;
+	__builtin_memcpy(saddr6->ipx_node_fst, ipxh->saddr.node,
+			sizeof(saddr6->ipx_node_fst));
+	saddr6->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(saddr6->ipx_node_snd, ipxh->saddr.node +
+			sizeof(saddr6->ipx_node_fst),
+			sizeof(saddr6->ipx_node_snd));
+
+	daddr6->prefix = prefix;
+	daddr6->ipx_net = ipxh->daddr.net;
+	__builtin_memcpy(daddr6->ipx_node_fst, ipxh->daddr.node,
+			sizeof(daddr6->ipx_node_fst));
+	daddr6->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(daddr6->ipx_node_snd, ipxh->daddr.node +
+			sizeof(daddr6->ipx_node_fst),
+			sizeof(daddr6->ipx_node_snd));
+
+	return sizeof(struct ipv6hdr);
+}
+
+static __always_inline size_t mk_ipx_from_ipv6(struct ipv6hdr *ip6h, struct
+		ipxhdr *newhdr)
+{
+	struct ipv6_eui64_addr *daddr6 = (void *) &ip6h->daddr;
+	struct ipv6_eui64_addr *saddr6 = (void *) &ip6h->saddr;
+
+	/* build new IPX header */
+	newhdr->csum = 0xFFFF;
+	newhdr->pktlen = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(struct
+				ipxhdr));
+	newhdr->tc = (ip6h->hop_limit > IPV6_HOP_LIMIT_MAX) ? 0 :
+		IPV6_HOP_LIMIT_MAX - ip6h->hop_limit;
+	newhdr->type = IPV6_IN_IPX_PKT_TYPE;
+
+	newhdr->daddr.net = daddr6->ipx_net;
+	__builtin_memcpy(&newhdr->daddr.node, daddr6->ipx_node_fst,
+			sizeof(newhdr->daddr.node) / 2);
+	__builtin_memcpy(((__u8 *) &newhdr->daddr.node) +
+			(sizeof(newhdr->daddr.node) / 2), daddr6->ipx_node_snd,
+			sizeof(newhdr->daddr.node) / 2);
+	newhdr->daddr.sock = bpf_htons(IPV6_IN_IPX_SOCK_BASE | ip6h->nexthdr);
+
+	newhdr->saddr.net = saddr6->ipx_net;
+	__builtin_memcpy(&newhdr->saddr.node, saddr6->ipx_node_fst,
+			sizeof(newhdr->saddr.node) / 2);
+	__builtin_memcpy(((__u8 *) &newhdr->saddr.node) +
+			(sizeof(newhdr->saddr.node) / 2), saddr6->ipx_node_snd,
+			sizeof(newhdr->saddr.node) / 2);
+	newhdr->saddr.sock = bpf_htons(IPV6_IN_IPX_SOCK_BASE | ip6h->nexthdr);
+
+	return sizeof(struct ipxhdr);
+}
+
+static __always_inline bool is_ipv6_in_ipx(struct ipxhdr *ipxh)
+{
+	if (ipxh->type != IPV6_IN_IPX_PKT_TYPE) {
+		return false;
+	}
+
+	if ((bpf_ntohs(ipxh->daddr.sock) & 0xFF00) != IPV6_IN_IPX_SOCK_BASE) {
+		return false;
+	}
+	if ((bpf_ntohs(ipxh->saddr.sock) & 0xFF00) != IPV6_IN_IPX_SOCK_BASE) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool is_ipx_in_ipv6(struct ipv6hdr *ip6h, void
+		*data_end)
+{
+	/* TODO: check for a UDP header with port IPX_IN_IPV6_PORT */
+
+	return false;
+}
+
 SEC("tc/ingress")
 int ipx_wrap_in(struct __sk_buff *ctx)
 {
@@ -312,44 +408,19 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 
 	/* TODO: handle extension headers */
 
-	/* build new IPv6 header */
+	size_t newhdr_size;
 	struct ipv6hdr newhdr;
-	newhdr.version = 6;
-	newhdr.priority = 0;
-	newhdr.flow_lbl[0] = 0;
-	newhdr.flow_lbl[1] = 0;
-	newhdr.flow_lbl[2] = 0;
-	newhdr.payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) - sizeof(struct
-				ipxhdr));
-	newhdr.nexthdr = bpf_ntohs(ipxh->daddr.sock) & 0xff;
-	newhdr.hop_limit = (ipxh->tc > IPX_TC_MAX) ? 0 : IPX_TC_MAX - ipxh->tc;
-
-	struct ipv6_eui64_addr *saddr6 = (void *) &newhdr.saddr;
-	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr.daddr;
-
-	saddr6->prefix = *prefix;
-	saddr6->ipx_net = ipxh->saddr.net;
-	__builtin_memcpy(saddr6->ipx_node_fst, ipxh->saddr.node,
-			sizeof(saddr6->ipx_node_fst));
-	saddr6->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(saddr6->ipx_node_snd, ipxh->saddr.node +
-			sizeof(saddr6->ipx_node_fst),
-			sizeof(saddr6->ipx_node_snd));
-
-	daddr6->prefix = *prefix;
-	daddr6->ipx_net = ipxh->daddr.net;
-	__builtin_memcpy(daddr6->ipx_node_fst, ipxh->daddr.node,
-			sizeof(daddr6->ipx_node_fst));
-	daddr6->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(daddr6->ipx_node_snd, ipxh->daddr.node +
-			sizeof(daddr6->ipx_node_fst),
-			sizeof(daddr6->ipx_node_snd));
-
-	eth->h_proto = bpf_htons(ETH_P_IPV6);
+	if (is_ipv6_in_ipx(ipxh)) {
+		newhdr_size = mk_ipv6_from_ipx(ipxh, *prefix, &newhdr);
+	} else {
+		/* TODO: turn IPX packet into IPX-in-IPv6 */
+		return TC_ACT_SHOT;
+	}
 
 	/* install new IPv6 header */
+	eth->h_proto = bpf_htons(ETH_P_IPV6);
 
-	__s32 hlen_diff = sizeof(struct ipv6hdr) - sizeof(struct ipxhdr); // 10
+	__s32 hlen_diff = newhdr_size - sizeof(struct ipxhdr); // 10 for IPv6
 	if (bpf_skb_change_head(ctx, hlen_diff, 0) < 0) {
 		return TC_ACT_SHOT;
 	}
@@ -367,11 +438,11 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
 		return TC_ACT_SHOT;
 	}
-	if (cur.pos + sizeof(struct ipv6hdr) > data_end) {
+	if (cur.pos + newhdr_size > data_end) {
 		return TC_ACT_SHOT;
 	}
 
-	__builtin_memcpy(cur.pos, &newhdr, sizeof(newhdr));
+	__builtin_memcpy(cur.pos, &newhdr, newhdr_size);
 
 	/* mark and reinject the packet to trick the network stack */
 	ctx->cb[0] = IPX_TO_IPV6_REINJECT_MARK;
@@ -431,34 +502,19 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	/* build new IPX header */
+	size_t oldhdr_size;
+	size_t newhdr_size;
 	struct ipxhdr newhdr;
-	newhdr.csum = 0xFFFF;
-	newhdr.pktlen = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(struct
-				ipxhdr));
-	newhdr.tc = (ip6h->hop_limit > IPV6_HOP_LIMIT_MAX) ? 0 :
-		IPV6_HOP_LIMIT_MAX - ip6h->hop_limit;
-	newhdr.type = IPX_PKT_TYPE;
-
-	newhdr.daddr.net = daddr6->ipx_net;
-	__builtin_memcpy(&newhdr.daddr.node, daddr6->ipx_node_fst,
-			sizeof(newhdr.daddr.node) / 2);
-	__builtin_memcpy(((__u8 *) &newhdr.daddr.node) +
-			(sizeof(newhdr.daddr.node) / 2), daddr6->ipx_node_snd,
-			sizeof(newhdr.daddr.node) / 2);
-	newhdr.daddr.sock = bpf_htons(IPX_DST_SOCK_BASE | ip6h->nexthdr);
-
-	newhdr.saddr.net = saddr6->ipx_net;
-	__builtin_memcpy(&newhdr.saddr.node, saddr6->ipx_node_fst,
-			sizeof(newhdr.saddr.node) / 2);
-	__builtin_memcpy(((__u8 *) &newhdr.saddr.node) +
-			(sizeof(newhdr.saddr.node) / 2), saddr6->ipx_node_snd,
-			sizeof(newhdr.saddr.node) / 2);
-	newhdr.saddr.sock = bpf_htons(IPX_SRC_SOCK_BASE | ip6h->nexthdr);
-
-	eth->h_proto = bpf_htons(ETH_P_IPX);
+	if (is_ipx_in_ipv6(ip6h, data_end)) {
+		/* TODO: handle IPX in IPv6 */
+		return TC_ACT_SHOT;
+	} else {
+		oldhdr_size = sizeof(struct iphdr);
+		newhdr_size = mk_ipx_from_ipv6(ip6h, &newhdr);
+	}
 
 	/* install new IPX header */
+	eth->h_proto = bpf_htons(ETH_P_IPX);
 
 	/* linux won't allow us to make the packet shorter than the protocol
 	 * (IPv4 or IPv6) header, so we first convert to IPv4 so that we can
@@ -466,7 +522,7 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	if (bpf_skb_change_proto(ctx, bpf_htons(ETH_P_IP), 0) < 0) {
 		return TC_ACT_SHOT;
 	}
-	__s32 hlen_diff = (sizeof(struct ipxhdr) - sizeof(struct iphdr)); // 10
+	__s32 hlen_diff = (newhdr_size - oldhdr_size);
 
 	/* adjust packet room so that an IPX header fits, instead of an IPv4
 	 * header */
@@ -479,11 +535,11 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	data = (void *)(long)ctx->data;
 
 	/* actually copy the IPX header */
-	struct ipxhdr *ipx_hdr_pos = data + sizeof(struct ethhdr);
-	if (ipx_hdr_pos + 1 > data_end) {
+	void *newhdr_start = data + sizeof(struct ethhdr);
+	if (newhdr_start + newhdr_size > data_end) {
 		return TC_ACT_SHOT;
 	}
-	__builtin_memcpy(ipx_hdr_pos, &newhdr, sizeof(newhdr));
+	__builtin_memcpy(newhdr_start, &newhdr, newhdr_size);
 
 	return TC_ACT_OK;
 }
