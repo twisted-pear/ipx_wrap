@@ -22,6 +22,9 @@
 #define IPV6_HOP_LIMIT_MAX 15
 #define IPX_TC_MAX 15
 
+#define IPX_MAX_PKTLEN 8192 /* should be 65535 but then we can't handle the
+			       checksum calculation */
+
 #define IPX_TO_IPV6_REINJECT_MARK 0xdead4774
 
 #define TC_ACT_OK 0
@@ -122,6 +125,9 @@ static __always_inline int parse_ipxhdr(struct hdr_cursor *cur, void *data_end,
 		return -1;
 	}
 
+	if (pktsize > IPX_MAX_PKTLEN) {
+		return -1;
+	}
 	if (cur->pos + pktsize > data_end) {
 		return -1;
 	}
@@ -350,8 +356,130 @@ static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, __u32
 	return sizeof(struct ipv6hdr);
 }
 
+static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
+		ipv6hdr *ip6h, struct udphdr *udph, void *data_end)
+{
+	/* pseudo header */
+	__s64 diff = bpf_csum_diff(NULL, 0, (__be32*) &ip6h->saddr,
+			sizeof(ip6h->saddr), 0);
+	diff = bpf_csum_diff(NULL, 0, (__be32 *) &ip6h->daddr,
+			sizeof(ip6h->daddr), diff);
+	__be32 pktlen = bpf_htonl(bpf_ntohs(udph->len) & 0x0000FFFF);
+	diff = bpf_csum_diff(NULL, 0, &pktlen, sizeof(pktlen), diff);
+	__be32 nexthdr = bpf_htonl(IPPROTO_UDP & 0x000000FF);
+	diff = bpf_csum_diff(NULL, 0, &nexthdr, sizeof(nexthdr), diff);
+
+	/* UDP header */
+	udph->check = 0;
+	diff = bpf_csum_diff(NULL, 0, (__be32 *) udph, sizeof(udph), diff);
+
+	/* payload */
+	size_t payload_len = (__u16) bpf_ntohs(ipxh->pktlen);
+	/* hack so that the verifier knows this value's bounds */
+	asm volatile("%0 &= 0xffff" : "=r"(payload_len) : "0"(payload_len));
+
+	if (payload_len > IPX_MAX_PKTLEN) {
+		return 0;
+	}
+
+	__u8 *dataptr = (__u8 *) ipxh;
+	size_t i;
+	for (i = 0; i < IPX_MAX_PKTLEN; i+=4096) {
+		if (i + 4096 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 4096 > data_end) {
+			return 0;
+		}
+
+		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 4096, diff);
+	}
+
+	dataptr += i;
+	payload_len -= i;
+	for (i = 0; i < 4096; i+=1024) {
+		if (i + 1024 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 1024 > data_end) {
+			return 0;
+		}
+
+		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 1024, diff);
+	}
+
+	dataptr += i;
+	payload_len -= i;
+	for (i = 0; i < 1024; i+=256) {
+		if (i + 256 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 256 > data_end) {
+			return 0;
+		}
+
+		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 256, diff);
+	}
+
+	dataptr += i;
+	payload_len -= i;
+	for (i = 0; i < 256; i+=64) {
+		if (i + 64 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 64 > data_end) {
+			return 0;
+		}
+
+		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 64, diff);
+	}
+
+	dataptr += i;
+	payload_len -= i;
+	for (i = 0; i < 64; i+=16) {
+		if (i + 16 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 16 > data_end) {
+			return 0;
+		}
+
+		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 16, diff);
+	}
+
+	dataptr += i;
+	payload_len -= i;
+	for (i = 0; i < 16; i+=4) {
+		if (i + 4 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 4 > data_end) {
+			return 0;
+		}
+
+		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 4, diff);
+	}
+
+	__be32 rest = 0;
+	dataptr += i;
+	payload_len -= i;
+	for (i = 0; i < 4; i++) {
+		if (i + 1 > payload_len) {
+			break;
+		}
+		if (dataptr + i + 1 > data_end) {
+			return 0;
+		}
+
+		*(((__u8 *) &rest) + i) = *(dataptr + i);
+	}
+	diff = bpf_csum_diff(NULL, 0, &rest, 4, diff);
+
+	return ~diff;
+}
+
 static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, __u32
-		prefix, struct ipv6_and_udphdr *newhdr)
+		prefix, struct ipv6_and_udphdr *newhdr, void *data_end)
 {
 	/* build new IPv6 and UDP headers */
 	fill_ipv6_from_ipx_basic(ipxh, prefix, &newhdr->ip6h);
@@ -364,7 +492,10 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, __u32
 	newhdr->udph.dest = bpf_htons(IPX_IN_IPV6_PORT);
 	newhdr->udph.len = bpf_htons(bpf_ntohs(ipxh->pktlen) + sizeof(struct
 				udphdr));
-	// TODO: fill UDP checksum
+
+	/* fill the UDP checksum */
+	newhdr->udph.check = calc_ipx_in_ipv6_csum(ipxh, &newhdr->ip6h,
+			&newhdr->udph, data_end);
 
 	return sizeof(struct ipv6_and_udphdr);
 }
@@ -507,7 +638,8 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		newhdr_size = mk_ipv6_from_ipx(ipxh, *prefix, &newhdr.ip6h);
 	} else {
 		oldhdr_size = 0;
-		newhdr_size = pack_ipx_in_ipv6(ipxh, *prefix, &newhdr);
+		newhdr_size = pack_ipx_in_ipv6(ipxh, *prefix, &newhdr,
+				data_end);
 	}
 
 	/* install new IPv6 header */
