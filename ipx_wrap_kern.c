@@ -22,8 +22,8 @@
 #define IPV6_HOP_LIMIT_MAX 15
 #define IPX_TC_MAX 15
 
-#define IPX_MAX_PKTLEN 8192 /* should be 65535 but then we can't handle the
-			       checksum calculation */
+#define IPX_MAX_PKTLEN (65535-17) /* should be 65535 but this is the largest
+				     value I got past the verifier */
 
 #define IPX_TO_IPV6_REINJECT_MARK 0xdead4774
 
@@ -356,6 +356,36 @@ static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, __u32
 	return sizeof(struct ipv6hdr);
 }
 
+struct calc_ipx_in_ipv6_csum_loopctx {
+	__u8 *dataptr;
+	__s32 diff;
+	size_t payload_len;
+	void *data_end;
+};
+
+static long calc_ipx_in_ipv6_csum_loopfn(__u64 index, void* ctx)
+{
+	struct calc_ipx_in_ipv6_csum_loopctx *c = ctx;
+
+	if (index > IPX_MAX_PKTLEN / 4) {
+		c->diff = -1;
+		return 1;
+	}
+
+	if ((index * 4) + 4 > c->payload_len) {
+		return 1;
+	}
+	if (c->dataptr + (index * 4) + 4 > c->data_end) {
+		c->diff = -1;
+		return 1;
+	}
+
+	c->diff = bpf_csum_diff(NULL, 0, (__be32 *) (c->dataptr + (index * 4)),
+			4, c->diff);
+
+	return 0;
+}
+
 static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 		ipv6hdr *ip6h, struct udphdr *udph, void *data_end)
 {
@@ -382,98 +412,34 @@ static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 		return 0;
 	}
 
-	__u8 *dataptr = (__u8 *) ipxh;
-	size_t i;
-	for (i = 0; i < IPX_MAX_PKTLEN; i+=4096) {
-		if (i + 4096 > payload_len) {
-			break;
-		}
-		if (dataptr + i + 4096 > data_end) {
-			return 0;
-		}
+	struct calc_ipx_in_ipv6_csum_loopctx lctx = {
+		.dataptr = (__u8 *) ipxh,
+		.diff = diff,
+		.payload_len = payload_len,
+		.data_end = data_end
+	};
 
-		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 4096, diff);
-	}
-
-	dataptr += i;
-	payload_len -= i;
-	for (i = 0; i < 4096; i+=1024) {
-		if (i + 1024 > payload_len) {
-			break;
-		}
-		if (dataptr + i + 1024 > data_end) {
-			return 0;
-		}
-
-		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 1024, diff);
-	}
-
-	dataptr += i;
-	payload_len -= i;
-	for (i = 0; i < 1024; i+=256) {
-		if (i + 256 > payload_len) {
-			break;
-		}
-		if (dataptr + i + 256 > data_end) {
-			return 0;
-		}
-
-		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 256, diff);
-	}
-
-	dataptr += i;
-	payload_len -= i;
-	for (i = 0; i < 256; i+=64) {
-		if (i + 64 > payload_len) {
-			break;
-		}
-		if (dataptr + i + 64 > data_end) {
-			return 0;
-		}
-
-		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 64, diff);
-	}
-
-	dataptr += i;
-	payload_len -= i;
-	for (i = 0; i < 64; i+=16) {
-		if (i + 16 > payload_len) {
-			break;
-		}
-		if (dataptr + i + 16 > data_end) {
-			return 0;
-		}
-
-		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 16, diff);
-	}
-
-	dataptr += i;
-	payload_len -= i;
-	for (i = 0; i < 16; i+=4) {
-		if (i + 4 > payload_len) {
-			break;
-		}
-		if (dataptr + i + 4 > data_end) {
-			return 0;
-		}
-
-		diff = bpf_csum_diff(NULL, 0, (__be32 *) (dataptr + i), 4, diff);
+	long nloops = bpf_loop(IPX_MAX_PKTLEN / 4,
+			&calc_ipx_in_ipv6_csum_loopfn, &lctx, 0);
+	if (nloops < 0 || nloops > (IPX_MAX_PKTLEN / 4) || lctx.diff < 0) {
+		return 0;
 	}
 
 	__be32 rest = 0;
-	dataptr += i;
-	payload_len -= i;
+	lctx.dataptr += (lctx.payload_len / 4) * 4;
+	lctx.payload_len -= (lctx.payload_len / 4) * 4;
+	int i;
 	for (i = 0; i < 4; i++) {
-		if (i + 1 > payload_len) {
+		if (i + 1 > lctx.payload_len) {
 			break;
 		}
-		if (dataptr + i + 1 > data_end) {
+		if (lctx.dataptr + i + 1 > lctx.data_end) {
 			return 0;
 		}
 
-		*(((__u8 *) &rest) + i) = *(dataptr + i);
+		*(((__u8 *) &rest) + i) = *(lctx.dataptr + i);
 	}
-	diff = bpf_csum_diff(NULL, 0, &rest, 4, diff);
+	diff = bpf_csum_diff(NULL, 0, &rest, 4, lctx.diff);
 
 	return ~diff;
 }
