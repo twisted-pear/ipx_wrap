@@ -610,8 +610,6 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	/* TODO: handle extension headers */
-
 	size_t oldhdr_size;
 	size_t newhdr_size;
 	struct ipv6_and_udphdr newhdr;
@@ -697,8 +695,6 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
 		return TC_ACT_SHOT;
 	}
-
-	/* TODO: handle extension headers */
 
 	if (ip6h->nexthdr == IPPROTO_ICMPV6) {
 		struct icmp6hdr *icmp6h;
