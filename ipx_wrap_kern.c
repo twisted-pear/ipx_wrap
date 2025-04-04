@@ -19,8 +19,8 @@
 #define IPX_IN_IPV6_PORT 213
 
 /* based on the maximum IPX TC when using RIP */
-#define IPV6_HOP_LIMIT_MAX 15
-#define IPX_TC_MAX 15
+#define IPV6_HOP_LIMIT_MAX 16
+#define IPX_TC_MAX 16
 
 #define IPX_MAX_PKTLEN (65535-17) /* should be 65535 but this is the largest
 				     value I got past the verifier */
@@ -447,6 +447,10 @@ static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, __u32
 		prefix, struct ipv6_and_udphdr *newhdr, void *data_end)
 {
+	/* increase TC here as it is not constructed from the IPv6 hop limit on
+	 * egress */
+	ipxh->tc++;
+
 	/* build new IPv6 and UDP headers */
 	fill_ipv6_from_ipx_basic(ipxh, prefix, &newhdr->ip6h);
 
