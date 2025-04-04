@@ -3,6 +3,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+#define IFINDEX_MAX 64
+
 #define ETH_ALEN 6
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
@@ -30,14 +32,19 @@
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 
+struct if_config {
+	__be32 prefix;
+	__be32 network;
+} __attribute__((packed));
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32);
-	__type(value, __u32);
-	__uint(max_entries, 1);
+	__type(value, struct if_config);
+	__uint(max_entries, IFINDEX_MAX);
 	__uint(map_flags, BPF_F_RDONLY_PROG);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} ipx_wrap_prefix SEC(".maps");
+} ipx_wrap_if_config SEC(".maps");
 
 struct icmpv6_nd {
 	/* the reserved bits are already part of the ICMPv6 header struct */
@@ -573,9 +580,14 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		return TC_ACT_OK;
 	}
 
-	__u32 key = 0;
-	__u32 *prefix = bpf_map_lookup_elem(&ipx_wrap_prefix, &key);
-	if (prefix == NULL) {
+	__u32 ifidx = ctx->ingress_ifindex;
+	if (ifidx == 0) {
+		return TC_ACT_SHOT;
+	}
+
+	struct if_config *ifcfg = bpf_map_lookup_elem(&ipx_wrap_if_config,
+			&ifidx);
+	if (ifcfg == NULL) {
 		return TC_ACT_SHOT;
 	}
 
@@ -605,10 +617,11 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	struct ipv6_and_udphdr newhdr;
 	if (is_ipv6_in_ipx(ipxh)) {
 		oldhdr_size = sizeof(struct ipxhdr);
-		newhdr_size = mk_ipv6_from_ipx(ipxh, *prefix, &newhdr.ip6h);
+		newhdr_size = mk_ipv6_from_ipx(ipxh, ifcfg->prefix,
+				&newhdr.ip6h);
 	} else {
 		oldhdr_size = 0;
-		newhdr_size = pack_ipx_in_ipv6(ipxh, *prefix, &newhdr,
+		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg->prefix, &newhdr,
 				data_end);
 	}
 
@@ -655,9 +668,14 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 SEC("tc/egress")
 int ipx_wrap_out(struct __sk_buff *ctx)
 {
-	__u32 key = 0;
-	__u32 *prefix = bpf_map_lookup_elem(&ipx_wrap_prefix, &key);
-	if (prefix == NULL) {
+	__u32 ifidx = ctx->ifindex;
+	if (ifidx == 0) {
+		return TC_ACT_SHOT;
+	}
+
+	struct if_config *ifcfg = bpf_map_lookup_elem(&ipx_wrap_if_config,
+			&ifidx);
+	if (ifcfg == NULL) {
 		return TC_ACT_SHOT;
 	}
 
@@ -701,7 +719,8 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	struct ipv6_eui64_addr *saddr6 = (void *) &ip6h->saddr;
 
 	/* discard packets from another prefix */
-	if (daddr6->prefix != *prefix || saddr6->prefix != *prefix) {
+	if (daddr6->prefix != ifcfg->prefix || saddr6->prefix != ifcfg->prefix)
+	{
 		return TC_ACT_SHOT;
 	}
 

@@ -7,7 +7,7 @@ PAHOLE ?= pahole
 LIBBPF_PREFIX ?= /usr
 VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/btf/vmlinux" || echo "vmlinux.btf")
 
-USER_TARGETS = ipx_wrap_set_prefix
+USER_TARGETS = ipx_wrap_if_config
 TC_OBJ = ipx_wrap_kern.o
 
 LIBS = -lbpf
