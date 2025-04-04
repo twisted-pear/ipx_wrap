@@ -7,7 +7,7 @@ PAHOLE ?= pahole
 LIBBPF_PREFIX ?= /usr
 VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/btf/vmlinux" || echo "vmlinux.btf")
 
-USER_TARGETS = ipx_wrap_if_config
+USER_TARGETS = ipx_wrap_if_config ipx_wrap_ripd
 TC_OBJ = ipx_wrap_kern.o
 
 LIBS = -lbpf
@@ -20,7 +20,7 @@ vmlinux.h: $(VMLINUX_H_PREREQ)
 vmlinux.btf:
 	$(PAHOLE) --btf_encode_detached=$@
 
-$(TC_OBJ): %.o: %.c vmlinux.h
+$(TC_OBJ): %.o: %.c vmlinux.h common.h
 	$(CLANG) -S \
 	    -target bpf \
 	    -D __BPF_TRACING__ \
@@ -35,7 +35,7 @@ $(TC_OBJ): %.o: %.c vmlinux.h
 	    -O2 -emit-llvm -c -g -o ${@:.o=.ll} $<
 	$(LLC) -march=bpf -filetype=obj -o $@ ${@:.o=.ll}
 
-$(USER_TARGETS): %: %.c
+$(USER_TARGETS): %: %.c common.h
 	$(CC) -Wall -I $(LIBBPF_PREFIX)/include/ -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(LIBS)
 
 clean:

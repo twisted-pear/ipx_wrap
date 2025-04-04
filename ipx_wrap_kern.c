@@ -3,6 +3,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+#include "common.h"
+
 #define IFINDEX_MAX 64
 
 #define ETH_ALEN 6
@@ -17,8 +19,6 @@
 
 #define IPV6_IN_IPX_PKT_TYPE 0x1F
 #define IPV6_IN_IPX_SOCK_BASE 0xD600
-
-#define IPX_IN_IPV6_PORT 213
 
 /* based on the maximum IPX TC when using RIP */
 #define IPV6_HOP_LIMIT_MAX 16
@@ -55,29 +55,6 @@ struct icmpv6_opt_lladdr_eth {
 	__u8 type;
 	__u8 length;
 	unsigned char lladdr_eth[ETH_ALEN];
-} __attribute__((packed));
-
-struct ipx_addr {
-	__be32 net;
-	__u8 node[6];
-	__be16 sock;
-} __attribute__((packed));
-
-struct ipxhdr {
-	__be16 csum;
-	__be16 pktlen;
-	__u8 tc;
-	__u8 type;
-	struct ipx_addr daddr;
-	struct ipx_addr saddr;
-} __attribute__((packed));
-
-struct ipv6_eui64_addr {
-	__be32 prefix;
-	__be32 ipx_net;
-	__u8 ipx_node_fst[3];
-	__be16 fffe;
-	__u8 ipx_node_snd[3];
 } __attribute__((packed));
 
 struct ipv6_and_udphdr {
