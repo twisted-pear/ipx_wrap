@@ -27,6 +27,11 @@
 #define IPX_MAX_PKTLEN (65535-17) /* should be 65535 but this is the largest
 				     value I got past the verifier */
 
+#define IPX_NET_LOCAL 0x0
+static __u8 IPX_BCAST_NODE[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+static __u8 IPV6_MCAST_ALL_NODES[16] = { 0xFF, 0x02, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
 #define IPX_TO_IPV6_REINJECT_MARK 0xdead4774
 
 #define TC_ACT_OK 0
@@ -292,8 +297,8 @@ static __always_inline bool is_nd_sol(struct ipv6hdr *ip6h, void *data_end,
 	return true;
 }
 
-static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh, __u32
-		prefix, struct ipv6hdr *newhdr)
+static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh,
+		struct if_config *ifcfg, struct ipv6hdr *newhdr)
 {
 	/* obtain basic information from the IPX header and store it in the new
 	 * IPv6 header */
@@ -308,7 +313,7 @@ static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh, __u32
 	struct ipv6_eui64_addr *saddr6 = (void *) &newhdr->saddr;
 	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr->daddr;
 
-	saddr6->prefix = prefix;
+	saddr6->prefix = ifcfg->prefix;
 	saddr6->ipx_net = ipxh->saddr.net;
 	__builtin_memcpy(saddr6->ipx_node_fst, ipxh->saddr.node,
 			sizeof(saddr6->ipx_node_fst));
@@ -317,7 +322,7 @@ static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh, __u32
 			sizeof(saddr6->ipx_node_fst),
 			sizeof(saddr6->ipx_node_snd));
 
-	daddr6->prefix = prefix;
+	daddr6->prefix = ifcfg->prefix;
 	daddr6->ipx_net = ipxh->daddr.net;
 	__builtin_memcpy(daddr6->ipx_node_fst, ipxh->daddr.node,
 			sizeof(daddr6->ipx_node_fst));
@@ -327,11 +332,11 @@ static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh, __u32
 			sizeof(daddr6->ipx_node_snd));
 }
 
-static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, __u32
-		prefix, struct ipv6hdr *newhdr)
+static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, struct
+		if_config *ifcfg, struct ipv6hdr *newhdr)
 {
 	/* build new IPv6 header */
-	fill_ipv6_from_ipx_basic(ipxh, prefix, newhdr);
+	fill_ipv6_from_ipx_basic(ipxh, ifcfg, newhdr);
 
 	newhdr->payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) - sizeof(struct
 				ipxhdr));
@@ -428,15 +433,16 @@ static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 	return ~diff;
 }
 
-static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, __u32
-		prefix, struct ipv6_and_udphdr *newhdr, void *data_end)
+static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
+		if_config *ifcfg, struct ipv6_and_udphdr *newhdr, void
+		*data_end)
 {
 	/* increase TC here as it is not constructed from the IPv6 hop limit on
 	 * egress */
 	ipxh->tc++;
 
 	/* build new IPv6 and UDP headers */
-	fill_ipv6_from_ipx_basic(ipxh, prefix, &newhdr->ip6h);
+	fill_ipv6_from_ipx_basic(ipxh, ifcfg, &newhdr->ip6h);
 
 	newhdr->ip6h.payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) +
 			sizeof(struct udphdr));
@@ -446,6 +452,30 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, __u32
 	newhdr->udph.dest = bpf_htons(IPX_IN_IPV6_PORT);
 	newhdr->udph.len = bpf_htons(bpf_ntohs(ipxh->pktlen) + sizeof(struct
 				udphdr));
+
+	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr->ip6h.daddr;
+
+	/* destination network is the local net... */
+	if (ipxh->daddr.net == IPX_NET_LOCAL) {
+		/* ... and the sender is in the same network as us... */
+		if (ipxh->saddr.net == ifcfg->network) {
+			/* ...fill in the network in the IPv6 header */
+			daddr6->ipx_net = ifcfg->network;
+		}
+	}
+
+	/* destination node is broadcast... */
+	if (__builtin_memcmp(ipxh->daddr.node, IPX_BCAST_NODE,
+				sizeof(ipxh->daddr.node)) == 0) {
+		/* ...and our network is the destination network... */
+		if (daddr6->ipx_net == ifcfg->network) {
+			/* ...send the packet to the all nodes multicast addr
+			 * instead */
+			__builtin_memcpy(&newhdr->ip6h.daddr,
+					IPV6_MCAST_ALL_NODES,
+					sizeof(newhdr->ip6h.daddr));
+		}
+	}
 
 	/* fill the UDP checksum */
 	newhdr->udph.check = calc_ipx_in_ipv6_csum(ipxh, &newhdr->ip6h,
@@ -592,12 +622,10 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	struct ipv6_and_udphdr newhdr;
 	if (is_ipv6_in_ipx(ipxh)) {
 		oldhdr_size = sizeof(struct ipxhdr);
-		newhdr_size = mk_ipv6_from_ipx(ipxh, ifcfg->prefix,
-				&newhdr.ip6h);
+		newhdr_size = mk_ipv6_from_ipx(ipxh, ifcfg, &newhdr.ip6h);
 	} else {
 		oldhdr_size = 0;
-		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg->prefix, &newhdr,
-				data_end);
+		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, data_end);
 	}
 
 	/* install new IPv6 header */
