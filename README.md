@@ -1,5 +1,20 @@
 # ipx_wrap
 
+The idea is that IPv6 packets that are sent are turned into IPX packets on the
+wire and IPX packets that are received are turned into IPv6 packets that can be
+routed by the IPv6 network stack.
+
+To rewrite the packets there are two BPF programs. To configure them there is a
+simple command-line utility (`ipx_wrap_if_config`). To propagate routes to real
+IPX hosts there is `ipx_wrap_ripd`.
+
+Most likely only works with a recent Linux kernel. Tested with 6.13.
+
+## Warning!
+
+This is highly experimental and has only been sporadically tested against
+NetWare 6.5. It will have bugs or exhibit unexpected behavior.
+
 ## BPF programs
 
 There are two BPF programs for the TC hook. One for egress, one for ingress.
@@ -34,7 +49,7 @@ IPX traffic. On ingress the entire IPX packet (header + payload) is wrapped in
 an IPv6 UDP packet with source and destination port `213`. The IPv6 header is
 populated with information from the IPX header. On egress, any IPv6 UDP packet
 with source and destination port equal to `213` has the IPv6 and UDP headers
-stripped out and the UDP payload is appended directly to the ethernet header.
+stripped out and the UDP payload is appended directly to the Ethernet header.
 
 Note that the first approach takes up all socket numbers between `0xd600` and
 `0xd6ff`. These are "well-known" sockets. Since this is not a NetWare
@@ -66,7 +81,7 @@ ethtool -K <if> tx-udp_tnl-csum-segmentation off
 The `install.sh` script will do both for you.
 You still need to set the prefix and network! See below.
 
-## ipx_wrap_set_prefix
+## ipx_wrap_if_config
 
 Sets a 4 byte prefix and the IPX network number for the BPF programs on one
 interface.
