@@ -19,8 +19,28 @@ modified into an appropriate neighbor advertisement and sent back to the
 interface. This is possible because the MAC address is always part of the IPX
 address.
 
-Currently the destination socket address is used to encode the protocol number
-(UDP, ICMPv6, TCP etc.).
+There are two ways packets are converted between IPX and IPv6. The first is
+intended to carry arbitrary IPv6 traffic over IPX. Here both the source and
+destination IPX socket numbers have a value of `(0xd6 << 8) | <next header>`.
+The IPX packet type is `0x1f`. On ingress, if both socket numbers have `0xd6`
+in their most significant bit and the packet type is `0x1f`, the IPX header is
+directly translated into an IPv6 header and the payload of the IPX packet is
+appended to that IPv6 header. On egress, any IPv6 packet that is not a UDP
+packet with source and destination port equal to `213` has its IPv6 header
+converted into an IPX header and its payload is appended to that IPX header.
+
+The second way to convert packets is intended to allow for routing of native
+IPX traffic. On ingress the entire IPX packet (header + payload) is wrapped in
+an IPv6 UDP packet with source and destination port `213`. The IPv6 header is
+populated with information from the IPX header. On egress, any IPv6 UDP packet
+with source and destination port equal to `213` has the IPv6 and UDP headers
+stripped out and the UDP payload is appended directly to the ethernet header.
+
+Note that the first approach takes up all socket numbers between `0xd600` and
+`0xd6ff`. These are "well-known" sockets. Since this is not a NetWare
+application and what is left of Novell is now owned by OpenText, I have not
+contacted anybody to have these sockets reserved. So it is possible that they
+clash with existing applications.
 
 Load with:
 ```
@@ -44,13 +64,19 @@ ethtool -K <if> tx-udp_tnl-csum-segmentation off
 ```
 
 The `install.sh` script will do both for you.
-You still need to set the prefix! See below.
+You still need to set the prefix and network! See below.
 
 ## ipx_wrap_set_prefix
 
-Sets a 4 byte prefix for the BPF programs.
+Sets a 4 byte prefix and the IPX network number for the BPF programs on one
+interface.
 
 Usage:
 ```
-Usage: ipx_wrap_set_prefix <ipv6 /32 prefix>
+Usage: ipx_wrap_if_config <if> <ipv6 /32 prefix>-<ipx net hex>
+```
+
+So for a prefix of `fdaa:bbbb` and the network `0xdeadcafe` you would call:
+```
+./ipx_wrap_if_config <if> fdaa:bbbb-deadcafe
 ```
