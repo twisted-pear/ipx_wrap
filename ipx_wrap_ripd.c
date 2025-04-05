@@ -24,11 +24,11 @@
 #define RIP_TYPE_RESPONSE 2
 #define RIP_MAX_HOPS 15
 
-#define RIP_INTERVAL_SECS 60
-#define RIP_ROUTE_LIFETIME_SECS 300
+#define RIP_UPDATE_TIMER 60
+#define RIP_INVALID_TIMER 180
 
 #define RIP_METRIC_MULT 2048
-#define RIP_ROUTE_LIFETIME_MULT 100
+#define RIP_INVALID_TIMER_MULT 100
 
 #define MAX_ROUTES 64
 
@@ -236,7 +236,7 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, struct
 
 	/* we want to add the route, add flags */
 	rt.rtmsg_flags = RTMSG_NEWROUTE | RTF_UP | RTF_GATEWAY | RTF_EXPIRES;
-	rt.rtmsg_info = RIP_ROUTE_LIFETIME_SECS * RIP_ROUTE_LIFETIME_MULT;
+	rt.rtmsg_info = RIP_INVALID_TIMER * RIP_INVALID_TIMER_MULT;
 
 	/* try to insert the route */
 	int sock = socket(AF_INET6, SOCK_DGRAM, 0);
@@ -419,7 +419,7 @@ int main(int argc, char **argv)
 		exit(8);
 	}
 	struct itimerspec tmr_spec = {
-		.it_interval = { .tv_sec = RIP_INTERVAL_SECS },
+		.it_interval = { .tv_sec = RIP_UPDATE_TIMER },
 		.it_value = { .tv_sec = 1 }
 	};
 	if (timerfd_settime(tmr, 0, &tmr_spec, NULL) < 0) {
