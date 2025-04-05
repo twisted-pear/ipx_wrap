@@ -98,13 +98,15 @@ So for a prefix of `fdaa:bbbb` and the network `0xdeadcafe` you would call:
 
 ## ipx_wrap_ripd
 
-Sends routes to IPX networks within the prefix in periodic RIP response
-packets. It will transmit all known routes within the prefix, except those that
-are routed via the same interface it sends from.
+Sends and receives routes on the given interface. It will transmit all known
+routes within the prefix, except those that are routed via the same interface
+it sends from. It will also learn routes it receives and enter them into the
+main routing table.
 
 Usage:
 ```
-Usage: ipx_wrap_ripd <bind ipv6 addr>
+Usage: ipx_wrap_ripd <if> <bind ipv6 addr>
 ```
 
-The parameter is the address assigned to the interface we want to send from.
+The second parameter is the address assigned to the interface (which is the
+first parameter).
