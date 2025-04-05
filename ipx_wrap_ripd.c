@@ -59,6 +59,7 @@ static int get_next_rip_entry(FILE *rtable, struct rip_entry *re, __u32
 	char *line = NULL;
 	size_t len;
 
+	errno = 0;
 	ssize_t res = getline(&line, &len, rtable);
 	if (res < 0) {
 		free(line);
@@ -357,12 +358,22 @@ int main(int argc, char **argv)
 		exit(3);
 	}
 
-	/* bind the socket to the interface */
-	if (setsockopt(udpsock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
-				strlen(ifname))) {
-		perror("bind to device");
+	/* allow other processes to bind to this address too, so we don't
+	 * monopolize the port */
+	int reuse = 1;
+	if (setsockopt(udpsock, SOL_SOCKET, SO_REUSEADDR, &reuse,
+				sizeof(reuse)) < 0) {
+		perror("set reuseaddr");
 		close(udpsock);
 		exit(4);
+	}
+
+	/* bind the socket to the interface */
+	if (setsockopt(udpsock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
+				strlen(ifname)) < 0) {
+		perror("bind to device");
+		close(udpsock);
+		exit(5);
 	}
 
 	/* join the all nodes multicast group */
@@ -374,7 +385,7 @@ int main(int argc, char **argv)
 				sizeof(group)) < 0) {
 		perror("join mcast group");
 		close(udpsock);
-		exit(5);
+		exit(6);
 	}
 
 	/* bind to the port (but not the interface IP) */
@@ -388,7 +399,7 @@ int main(int argc, char **argv)
 	if (bind(udpsock, (struct sockaddr *) &source, sizeof(source)) < 0) {
 		perror("binding UDP socket");
 		close(udpsock);
-		exit(6);
+		exit(7);
 	}
 
 	/* prepare destination for sending */
@@ -405,7 +416,7 @@ int main(int argc, char **argv)
 	if (tmr < 0) {
 		perror("creating timer");
 		close(udpsock);
-		exit(7);
+		exit(8);
 	}
 	struct itimerspec tmr_spec = {
 		.it_interval = { .tv_sec = RIP_INTERVAL_SECS },
@@ -415,7 +426,7 @@ int main(int argc, char **argv)
 		perror("arming timer");
 		close(udpsock);
 		close(tmr);
-		exit(8);
+		exit(9);
 	}
 
 	/* open the routing table */
@@ -424,7 +435,7 @@ int main(int argc, char **argv)
 		perror("open routing table");
 		close(udpsock);
 		close(tmr);
-		exit(9);
+		exit(10);
 	}
 
 	struct pollfd fds[2] = {
@@ -447,7 +458,7 @@ int main(int argc, char **argv)
 			/* poll errored */
 		        if (errno != EINTR) {
 				perror("poll");
-				ret = 10;
+				ret = 11;
 				break;
 			}
 
@@ -468,7 +479,7 @@ int main(int argc, char **argv)
 		} else if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
 			/* some other error */
 			fprintf(stderr, "socket error\n");
-			ret = 11;
+			ret = 12;
 			break;
 		}
 
@@ -484,7 +495,7 @@ int main(int argc, char **argv)
 		} else if (fds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
 			/* some other error */
 			fprintf(stderr, "timer error\n");
-			ret = 12;
+			ret = 13;
 			break;
 		}
 	}
