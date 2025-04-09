@@ -78,22 +78,24 @@ ethtool -K <if> tx-udp_tnl-segmentation off
 ethtool -K <if> tx-udp_tnl-csum-segmentation off
 ```
 
-The `install.sh` script will do both for you.
-You still need to set the prefix and network! See below.
+Afterwards, you still need to set the prefix and the network number for the BPF
+program (see `ipx_wrap_if_config`).
+
+The `install.sh` script will do all three tasks for you.
+
+```
+Usage: install.sh <if> <if ipv6 addr>
+```
 
 ## ipx_wrap_if_config
 
 Sets a 4 byte prefix and the IPX network number for the BPF programs on one
-interface.
+interface. The second parameter is the IPv6 address of the interface. Prefix
+and network number are extracted from the address.
 
 Usage:
 ```
-Usage: ipx_wrap_if_config <if> <ipv6 /32 prefix>-<ipx net hex>
-```
-
-So for a prefix of `fdaa:bbbb` and the network `0xdeadcafe` you would call:
-```
-./ipx_wrap_if_config <if> fdaa:bbbb-deadcafe
+Usage: ipx_wrap_if_config <if> <if ipv6 addr>
 ```
 
 ## ipx_wrap_ripd
