@@ -3,30 +3,20 @@
 #include <linux/limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <bpf/bpf.h>
 
-#define IPV6_PREFIX_LEN 4
+#include "common.h"
+
 #define PIN_BASE "/sys/fs/bpf"
 #define PIN_SUB "tc/globals"
 #define IPX_WRAP_IF_CONFIG_MAP "ipx_wrap_if_config"
 
 static _Noreturn void usage() {
-	printf("Usage: ipx_wrap_if_config <if> <ipv6 /32 prefix>-<ipx net hex>\n");
+	printf("Usage: ipx_wrap_if_config <if> <if ipv6 addr>\n");
 	exit(1);
 }
-
-static int parse_cfg(char *str, unsigned char *prefix, __u32 *net)
-{
-	if (sscanf(str, "%02hhx%02hhx:%02hhx%02hhx-%x%*c", &prefix[0],
-				&prefix[1], &prefix[2], &prefix[3], net) !=
-			IPV6_PREFIX_LEN + 1) {
-		return -1;
-	}
-
-	return 0;
-}
-
 
 int main(int argc, char **argv)
 {
@@ -35,17 +25,17 @@ int main(int argc, char **argv)
 	}
 
 	char *ifname = argv[1];
-	char *prefix_str = argv[2];
+	char *addr_str = argv[2];
 
-	struct __attribute__((packed)) {
-		unsigned char prefix[IPV6_PREFIX_LEN];
-		__be32 net;
-	} if_config;
+	struct ipv6_eui64_addr addr;
+	struct if_config ifcfg;
 
-	if (parse_cfg(prefix_str, if_config.prefix, &if_config.net) < 0) {
+	if (inet_pton(AF_INET6, addr_str, &addr) != 1) {
 		usage();
 	}
-	if_config.net = htonl(if_config.net);
+
+	ifcfg.prefix = addr.prefix;
+	ifcfg.network = addr.ipx_net;
 
 	__u32 ifidx = if_nametoindex(ifname);
 	if (ifidx == 0) {
@@ -67,7 +57,7 @@ int main(int argc, char **argv)
 		exit(4);
 	}
 
-	if (bpf_map_update_elem(map_fd, &ifidx, &if_config, 0) < 0) {
+	if (bpf_map_update_elem(map_fd, &ifidx, &ifcfg, 0) < 0) {
 		perror("update if config map");
 		exit(5);
 	}

@@ -28,4 +28,9 @@ struct ipv6_eui64_addr {
 	__u8 ipx_node_snd[3];
 } __attribute__((packed));
 
+struct if_config {
+	__be32 prefix;
+	__be32 network;
+} __attribute__((packed));
+
 #endif /* __COMMON_H__ */

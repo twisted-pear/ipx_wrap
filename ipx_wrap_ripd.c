@@ -49,7 +49,7 @@ static struct rip_pkt rip_pkt_out;
 static struct rip_pkt rip_pkt_in;
 
 static _Noreturn void usage() {
-	printf("Usage: ipx_wrap_ripd <if> <bind ipv6 addr>\n");
+	printf("Usage: ipx_wrap_ripd <if> <if ipv6 addr>\n");
 	exit(1);
 }
 
@@ -307,10 +307,10 @@ int main(int argc, char **argv)
 	}
 
 	char *ifname = argv[1];
-	char *bind_addr_str = argv[2];
+	char *if_addr_str = argv[2];
 
-	struct in6_addr bind_addr;
-	if (inet_pton(AF_INET6, bind_addr_str, &bind_addr) != 1) {
+	struct in6_addr if_addr;
+	if (inet_pton(AF_INET6, if_addr_str, &if_addr) != 1) {
 		usage();
 	}
 
@@ -320,8 +320,7 @@ int main(int argc, char **argv)
 		exit(2);
 	}
 
-	struct ipv6_eui64_addr *my_addr = (struct ipv6_eui64_addr *)
-		&bind_addr;
+	struct ipv6_eui64_addr *my_addr = (struct ipv6_eui64_addr *) &if_addr;
 
 	/* prepare the destination address */
 	struct in6_addr send_addr;

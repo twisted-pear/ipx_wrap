@@ -35,11 +35,6 @@ static __u8 IPX_BCAST_NODE[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 
-struct if_config {
-	__be32 prefix;
-	__be32 network;
-} __attribute__((packed));
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32);
