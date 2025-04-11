@@ -112,11 +112,15 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(struct ipxw_mux_msg
 				data_sock, void *ctx), void *tx_ctx, void
 		*unbind_ctx);
 
-/* turn an ipx message into a recv message, conversion happens in place */
-ssize_t ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipxmsg);
+/* turn an xmit message into an ipx message, conversion happens in place */
+struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
+		ipx_addr *saddr);
 
-/* send the recv msg to the client, may block if the caller did not check if
- * the data socket is writeable */
+/* turn an ipx message into a recv message, conversion happens in place */
+struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
+
+/* send the recv msg to the client, will not block if the data socket is not
+ * writeable, caller can retry or discard */
 int ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

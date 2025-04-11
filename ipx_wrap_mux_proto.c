@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <arpa/inet.h>
 
 #include "ipx_wrap_mux_proto.h"
 
@@ -154,8 +155,7 @@ ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg)
 		return -EINVAL;
 	}
 
-	size_t msg_len = offsetof(struct ipxw_mux_msg, data) +
-		msg->xmit.data_len;
+	size_t msg_len = sizeof(struct ipxw_mux_msg) + msg->xmit.data_len;
 
 	/* send message, may block */
 	ssize_t sent_len = send(data_sock, msg, msg_len, 0);
@@ -393,10 +393,71 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(struct ipxw_mux_msg
 	return rcvd_msg_len;
 }
 
-ssize_t ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipxmsg)
+struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
+		ipx_addr *saddr)
 {
-	// TODO
-	return -1;
+	if (xmit_msg->type != IPXW_MUX_XMIT) {
+		return NULL;
+	}
+
+	struct ipx_addr daddr = xmit_msg->xmit.daddr;
+	__u8 pkt_type = xmit_msg->xmit.pkt_type;
+
+	/* get the correct length for the ipx header */
+	if (xmit_msg->xmit.data_len > IPX_MAX_DATA_LEN) {
+		return NULL;
+	}
+	__u16 msg_len = xmit_msg->xmit.data_len + sizeof(struct ipxhdr);
+
+	/* rewrite to ipx msg */
+	struct ipxhdr *ipx_msg = (struct ipxhdr *) xmit_msg;
+	ipx_msg->csum = 0xFFFF;
+	ipx_msg->pktlen = htons(msg_len);
+	ipx_msg->tc = 0;
+	ipx_msg->type = pkt_type;
+	ipx_msg->daddr = daddr;
+	ipx_msg->saddr = *saddr;
+
+	return ipx_msg;
+}
+
+struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
+{
+	struct ipx_addr saddr = ipx_msg->saddr;
+	__u8 pkt_type = ipx_msg->type;
+
+	/* extract the correct data length */
+	__u16 data_len = ntohs(ipx_msg->pktlen);
+	if (data_len < sizeof(struct ipxw_mux_msg)) {
+		return NULL;
+	}
+	if (data_len > IPXW_MUX_MSG_LEN) {
+		return NULL;
+	}
+	data_len -= sizeof(struct ipxhdr);
+
+	/* determine if the packet is a broadcast */
+	bool is_bcast = true;
+	int i;
+	for (i = 0; i < sizeof(ipx_msg->daddr.node); i++) {
+		if (ipx_msg->daddr.node[i] != 0xFF) {
+			is_bcast = false;
+			break;
+		}
+	}
+
+	/* clear the header so we can rewrite into a recv msg */
+	memset(ipx_msg, 0, sizeof(struct ipxw_mux_msg));
+
+	/* rewrite to recv msg */
+	struct ipxw_mux_msg *recv_msg = (struct ipxw_mux_msg *) ipx_msg;
+	recv_msg->type = IPXW_MUX_RECV;
+	recv_msg->recv.saddr = saddr;
+	recv_msg->recv.pkt_type = pkt_type;
+	recv_msg->recv.is_bcast = is_bcast;
+	recv_msg->recv.data_len = data_len;
+
+	return recv_msg;
 }
 
 int ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg)
@@ -405,15 +466,16 @@ int ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg)
 		return -EINVAL;
 	}
 
-	size_t msg_len = offsetof(struct ipxw_mux_msg, data) +
-		msg->recv.data_len;
+	if (msg->recv.data_len > IPX_MAX_DATA_LEN) {
+		return -EINVAL;
+	}
 
+	size_t msg_len = sizeof(struct ipxw_mux_msg) + msg->recv.data_len;
 	if (msg_len > IPXW_MUX_MSG_LEN) {
 		return -EINVAL;
 	}
 
-	/* send msg to client, may block */
-	ssize_t sent_len = send(data_sock, msg, msg_len, 0);
+	ssize_t sent_len = send(data_sock, msg, msg_len, MSG_DONTWAIT);
 	if (sent_len < 0) {
 		return -errno;
 	}
