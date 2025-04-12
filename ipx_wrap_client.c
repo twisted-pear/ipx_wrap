@@ -7,7 +7,9 @@
 int main(int argc, char **argv)
 {
 	struct ipxw_mux_msg bind_msg;
+	memset(&bind_msg, 0, sizeof(struct ipxw_mux_msg));
 	bind_msg.type = IPXW_MUX_BIND;
+	bind_msg.bind.recv_bcast = 1;
 
 	int data_sock = ipxw_mux_bind(&bind_msg);
 	if (data_sock < 0) {

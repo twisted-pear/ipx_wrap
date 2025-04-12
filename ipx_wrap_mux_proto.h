@@ -107,10 +107,10 @@ int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
  * (using transmit_msg_cb), on receiving and unbind msg, unbind the socket
  * (using handle_unbind_cb), this blocks if the caller did not check that data
  * is avaiable to read */
-ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(struct ipxw_mux_msg
-			*msg, void *ctx), void (*handle_unbind_cb)(int
-				data_sock, void *ctx), void *tx_ctx, void
-		*unbind_ctx);
+ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
+			ipxw_mux_msg *msg, void *ctx), void
+		(*handle_unbind_cb)(int data_sock, void *ctx), void *tx_ctx,
+		void *unbind_ctx);
 
 /* turn an xmit message into an ipx message, conversion happens in place */
 struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct

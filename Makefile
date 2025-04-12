@@ -40,7 +40,7 @@ $(TC_OBJ): %.o: %.c vmlinux.h common.h
 $(USER_TARGETS): %: %.c common.h
 	$(CC) $(CFLAGS) -I $(LIBBPF_PREFIX)/include/ -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(LIBS)
 
-$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h
+$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h uthash.h
 	$(CC) $(CFLAGS) -I $(LIBBPF_PREFIX)/include/ -o $@ $< ipx_wrap_mux_proto.o
 
 

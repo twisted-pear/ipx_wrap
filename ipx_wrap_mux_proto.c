@@ -338,10 +338,10 @@ int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
 	return -errno;
 }
 
-ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(struct ipxw_mux_msg
-			*msg, void *ctx), void (*handle_unbind_cb)(int
-				data_sock, void *ctx), void *tx_ctx, void
-		*unbind_ctx)
+ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
+			ipxw_mux_msg *msg, void *ctx), void
+		(*handle_unbind_cb)(int data_sock, void *ctx), void *tx_ctx,
+		void *unbind_ctx)
 {
 	struct ipxw_mux_msg *rcvd_msg = calloc(1, IPXW_MUX_MSG_LEN);
 	if (rcvd_msg == NULL) {
@@ -386,7 +386,7 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(struct ipxw_mux_msg
 
 	/* tx_msg_cb has to free the buffer if it is not needed anymore, even
 	 * if it returns an error */
-	if (tx_msg_cb(rcvd_msg, tx_ctx) < 0) {
+	if (tx_msg_cb(data_sock, rcvd_msg, tx_ctx) < 0) {
 		return -EINVAL;
 	}
 
