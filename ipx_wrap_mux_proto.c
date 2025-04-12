@@ -19,7 +19,7 @@ int ipxw_mux_bind(struct ipxw_mux_msg *bind_msg)
 	int ctrl_sock = -1;
 
 	do {
-		if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) < 0) {
+		if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0) {
 			break;
 		}
 
@@ -194,7 +194,7 @@ ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg)
 		return -EMSGSIZE;
 	}
 
-	return data_len;
+	return rcvd_len;
 }
 
 /* muxer functions */
@@ -411,7 +411,7 @@ struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
 
 	/* rewrite to ipx msg */
 	struct ipxhdr *ipx_msg = (struct ipxhdr *) xmit_msg;
-	ipx_msg->csum = 0xFFFF;
+	ipx_msg->csum = IPX_CSUM_NONE;
 	ipx_msg->pktlen = htons(msg_len);
 	ipx_msg->tc = 0;
 	ipx_msg->type = pkt_type;
@@ -437,14 +437,8 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
 	data_len -= sizeof(struct ipxhdr);
 
 	/* determine if the packet is a broadcast */
-	bool is_bcast = true;
-	int i;
-	for (i = 0; i < sizeof(ipx_msg->daddr.node); i++) {
-		if (ipx_msg->daddr.node[i] != 0xFF) {
-			is_bcast = false;
-			break;
-		}
-	}
+	bool is_bcast = memcmp(ipx_msg->daddr.node, IPX_BCAST_NODE,
+			IPX_ADDR_NODE_BYTES) == 0;
 
 	/* clear the header so we can rewrite into a recv msg */
 	memset(ipx_msg, 0, sizeof(struct ipxw_mux_msg));
@@ -460,7 +454,7 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
 	return recv_msg;
 }
 
-int ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg)
+ssize_t ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg)
 {
 	if (msg->type != IPXW_MUX_RECV) {
 		return -EINVAL;

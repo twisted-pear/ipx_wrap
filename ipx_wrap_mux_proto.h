@@ -1,6 +1,7 @@
 #ifndef __IPX_WRAP_MUX_PROTO_H__
 #define __IPX_WRAP_MUX_PROTO_H__
 
+#include <sys/queue.h>
 #include <bpf/bpf.h>
 
 #include "common.h"
@@ -66,11 +67,15 @@ struct ipxw_mux_msg {
 				struct ipxw_mux_msg_xmit xmit;
 				struct ipxw_mux_msg_recv recv;
 			};
+			STAILQ_ENTRY(ipxw_mux_msg) q_entry;
 		} __attribute__((packed));
 		struct ipxhdr ipxh;
 	};
 	__u8 data[0];
 } __attribute__((packed));
+
+_Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
+		"ipxw_mux_msg too large");
 
 #define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg))
 
@@ -104,7 +109,7 @@ int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
 			ipxw_mux_msg_bind *, void *ctx), void *ctx);
 
 /* receive xmit msgs, turn them into IPX messages and attempt to send them
- * (using transmit_msg_cb), on receiving and unbind msg, unbind the socket
+ * (using transmit_msg_cb), on receiving an unbind msg, unbind the socket
  * (using handle_unbind_cb), this blocks if the caller did not check that data
  * is avaiable to read */
 ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
@@ -121,6 +126,6 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 
 /* send the recv msg to the client, will not block if the data socket is not
  * writeable, caller can retry or discard */
-int ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg);
+ssize_t ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

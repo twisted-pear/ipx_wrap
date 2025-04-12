@@ -1,13 +1,29 @@
 #ifndef __COMMON_H__
 #define __COMMON_H__
 
+#define IPX_ADDR_NODE_BYTES 6
+
+#ifndef bpf_htons
+#	define bpf_htons htons
+#endif
+#ifndef bpf_htonl
+#	define bpf_htonl htonl
+#endif
+
+#define IPX_CSUM_NONE bpf_htons(0xFFFF)
+#define IPX_NET_LOCAL bpf_htonl(0x0)
+#define IPX_NET_ALL_ROUTES bpf_htonl(0xFFFFFFFF)
+#define IPX_NET_DEFAULT_ROUTE bpf_htonl(0xFFFFFFFE)
+static const __u8 IPX_BCAST_NODE[IPX_ADDR_NODE_BYTES] = { 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF };
+
 #define IPX_IN_IPV6_PORT 213
-static __u8 IPV6_MCAST_ALL_NODES[16] = { 0xFF, 0x02, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+static const __u8 IPV6_MCAST_ALL_NODES[16] = { 0xFF, 0x02, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
 struct ipx_addr {
 	__be32 net;
-	__u8 node[6];
+	__u8 node[IPX_ADDR_NODE_BYTES];
 	__be16 sock;
 } __attribute__((packed));
 

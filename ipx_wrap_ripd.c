@@ -333,7 +333,7 @@ int main(int argc, char **argv)
 	memset(dst_addr->ipx_node_snd, 0xFF, sizeof(dst_addr->ipx_node_snd));
 
 	/* pre-fill IPX header */
-	rip_pkt_out.ipxh.csum = 0xFFFF;
+	rip_pkt_out.ipxh.csum = IPX_CSUM_NONE;
 	rip_pkt_out.ipxh.pktlen = htons(sizeof(rip_pkt_out.ipxh) +
 			sizeof(rip_pkt_out.rip_type));
 	rip_pkt_out.ipxh.tc = 0;

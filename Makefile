@@ -11,7 +11,7 @@ USER_TARGETS = ipx_wrap_if_config ipx_wrap_ripd
 MUX_TARGETS = ipx_wrap_mux ipx_wrap_client
 TC_OBJ = ipx_wrap_kern.o
 
-CFLAGS = -Wall
+CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/
 LIBS = -lbpf
 
 all: $(MUX_TARGETS) $(USER_TARGETS) $(TC_OBJ)
@@ -38,11 +38,10 @@ $(TC_OBJ): %.o: %.c vmlinux.h common.h
 	$(LLC) -march=bpf -filetype=obj -o $@ ${@:.o=.ll}
 
 $(USER_TARGETS): %: %.c common.h
-	$(CC) $(CFLAGS) -I $(LIBBPF_PREFIX)/include/ -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(LIBS)
+	$(CC) $(CFLAGS) -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(LIBS)
 
 $(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h uthash.h
-	$(CC) $(CFLAGS) -I $(LIBBPF_PREFIX)/include/ -o $@ $< ipx_wrap_mux_proto.o
-
+	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o
 
 clean:
 	rm -f *.o *.ll $(USER_TARGETS) $(MUX_TARGETS) vmlinux.h vmlinux.btf

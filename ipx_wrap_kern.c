@@ -27,9 +27,6 @@
 #define IPX_MAX_PKTLEN (65535-17) /* should be 65535 but this is the largest
 				     value I got past the verifier */
 
-#define IPX_NET_LOCAL 0x0
-static __u8 IPX_BCAST_NODE[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-
 #define IPX_TO_IPV6_REINJECT_MARK 0xdead4774
 
 #define TC_ACT_OK 0
@@ -484,7 +481,7 @@ static __always_inline size_t mk_ipx_from_ipv6(struct ipv6hdr *ip6h, struct
 	struct ipv6_eui64_addr *saddr6 = (void *) &ip6h->saddr;
 
 	/* build new IPX header */
-	newhdr->csum = 0xFFFF;
+	newhdr->csum = IPX_CSUM_NONE;
 	newhdr->pktlen = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(struct
 				ipxhdr));
 	newhdr->tc = (ip6h->hop_limit > IPV6_HOP_LIMIT_MAX) ? 0 :
