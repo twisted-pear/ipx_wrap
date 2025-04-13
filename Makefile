@@ -7,8 +7,8 @@ PAHOLE ?= pahole
 LIBBPF_PREFIX ?= /usr
 VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/btf/vmlinux" || echo "vmlinux.btf")
 
-USER_TARGETS = ipx_wrap_if_config ipx_wrap_ripd
-MUX_TARGETS = ipx_wrap_mux ipx_wrap_tx_client ipx_wrap_rx_client
+USER_TARGETS = ipx_wrap_if_config
+MUX_TARGETS = ipx_wrap_mux ipx_wrap_ripd ipx_wrap_tx_client ipx_wrap_rx_client
 TC_OBJ = ipx_wrap_kern.o
 
 CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/

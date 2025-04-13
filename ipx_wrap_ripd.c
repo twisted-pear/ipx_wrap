@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <linux/limits.h>
@@ -12,10 +13,9 @@
 #include <linux/sockios.h>
 #include <sys/ioctl.h>
 #include <sys/timerfd.h>
+#include <ifaddrs.h>
 
-#include <bpf/bpf.h>
-
-#include "common.h"
+#include "ipx_wrap_mux_proto.h"
 
 #define RTABLE_FILE "/proc/net/ipv6_route"
 
@@ -39,17 +39,24 @@ struct rip_entry {
 } __attribute__((packed));
 
 struct rip_pkt {
-	struct ipxhdr ipxh;
-	__be16 rip_type;
-	struct rip_entry rip_entries[MAX_ROUTES];
+	union {
+		struct {
+			struct ipxw_mux_msg mux_msg;
+			__be16 rip_type;
+			struct rip_entry rip_entries[MAX_ROUTES];
+		} __attribute__((packed));
+		__u8 buf[IPXW_MUX_MSG_LEN];
+	};
 } __attribute__((packed));
+
+_Static_assert(sizeof(struct rip_pkt) == IPXW_MUX_MSG_LEN);
 
 static struct rip_pkt rip_pkt_out;
 
 static struct rip_pkt rip_pkt_in;
 
 static _Noreturn void usage() {
-	printf("Usage: ipx_wrap_ripd <if> <if ipv6 addr>\n");
+	printf("Usage: ipx_wrap_ripd <if ipv6 addr>\n");
 	exit(1);
 }
 
@@ -143,15 +150,14 @@ static int mk_rip_pkt(FILE *rtable, __u32 my_prefix, __u32 my_net)
 		}
 	}
 
-	rip_pkt_out.ipxh.pktlen = htons(sizeof(rip_pkt_out.ipxh) +
-			sizeof(rip_pkt_out.rip_type) + nentries * sizeof(struct
-				rip_entry));
+	rip_pkt_out.mux_msg.xmit.data_len = sizeof(rip_pkt_out.rip_type) +
+		(nentries * sizeof(struct rip_entry));
 
 	return nentries;
 }
 
-static int send_rip_resp(int udpsock, FILE *rtable, struct ipv6_eui64_addr
-		*my_addr, struct sockaddr_in6 *destination)
+static int send_rip_resp(int data_sock, FILE *rtable, struct ipv6_eui64_addr
+		*my_addr)
 {
 	__u32 my_prefix = ntohl(my_addr->prefix);
 	__u32 my_net = ntohl(my_addr->ipx_net);
@@ -163,46 +169,13 @@ static int send_rip_resp(int udpsock, FILE *rtable, struct ipv6_eui64_addr
 	}
 
 	printf("Sending RIP response with %u routes.\n", nentries);
-	if (sendto(udpsock, &rip_pkt_out, ntohs(rip_pkt_out.ipxh.pktlen), 0,
-				(struct sockaddr *) destination,
-				sizeof(*destination)) < 0)
-	{
-		perror("sending RIP packet");
+	ssize_t len = ipxw_mux_xmit(data_sock, &rip_pkt_out.mux_msg);
+	if (len < 0) {
+		fprintf(stderr, "send failed: %s\n", strerror(-len));
 		return -1;
 	}
 
 	return 0;
-}
-
-static ssize_t got_rip_pkt(int udpsock)
-{
-	struct ipxhdr ipxh;
-
-	ssize_t len = recv(udpsock, &ipxh, sizeof(ipxh), MSG_PEEK);
-	do {
-		if (len < 0) {
-			perror("receive IPX header");
-			break;
-		}
-		if (len != sizeof(ipxh)) {
-			fprintf(stderr, "received broken IPX packet\n");
-			break;
-		}
-
-		if (ipxh.type != RIP_PKT_TYPE) {
-			break;
-		}
-		if (ipxh.daddr.sock != htons(RIP_SOCK)) {
-			break;
-		}
-
-		return ntohs(ipxh.pktlen);
-	} while (0);
-
-	/* clear out packet */
-	recv(udpsock, &ipxh, 0, 0);
-
-	return -1;
 }
 
 static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, struct
@@ -256,15 +229,21 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, struct
 	return true;
 }
 
-static void handle_rip_pkt(int udpsock, size_t len, struct ipv6_eui64_addr
-		*my_addr, __u32 ifidx)
+static void handle_rip_pkt(int data_sock, struct ipv6_eui64_addr *my_addr,
+		__u32 ifidx)
 {
-	len = recv(udpsock, &rip_pkt_in, (len > sizeof(rip_pkt_in) ?
-				sizeof(rip_pkt_in) : len), 0);
-	size_t hdr_len = sizeof(rip_pkt_in) - sizeof(rip_pkt_in.rip_entries);
+	ssize_t len = ipxw_mux_get_recvd(data_sock, &rip_pkt_in.mux_msg);
+	if (len < 0) {
+		fprintf(stderr, "recv failed: %s\n", strerror(-len));
+		return;
+	}
 
-	/* check if we even have a complete packet */
-	if (len < hdr_len) {
+	assert(len >= sizeof(struct ipxw_mux_msg));
+
+	size_t data_len = rip_pkt_in.mux_msg.recv.data_len;
+
+	/* check if we even have a complete RIP packet */
+	if (data_len < sizeof(rip_pkt_in.rip_type)) {
 		fprintf(stderr, "received RIP packet too short\n");
 		return;
 	}
@@ -275,13 +254,19 @@ static void handle_rip_pkt(int udpsock, size_t len, struct ipv6_eui64_addr
 	}
 
 	/* incomplete routes */
-	if ((len - hdr_len) % sizeof(struct rip_entry) != 0) {
+	if ((data_len - sizeof(rip_pkt_in.rip_type)) % sizeof(struct rip_entry) != 0) {
 		fprintf(stderr, "received RIP packet is mangled\n");
 		return;
 	}
 
-	struct ipx_addr *gw = &rip_pkt_in.ipxh.saddr;
-	size_t nentries = (len - hdr_len) / sizeof(struct rip_entry);
+	struct ipx_addr *gw = &rip_pkt_in.mux_msg.recv.saddr;
+	size_t nentries = (data_len - sizeof(rip_pkt_in.rip_type)) /
+		sizeof(struct rip_entry);
+
+	if (nentries > MAX_ROUTES) {
+		fprintf(stderr, "received RIP packet is too big\n");
+		return;
+	}
 
 	printf("Processing RIP response with %lu routes.\n", nentries);
 
@@ -300,122 +285,113 @@ static void handle_rip_pkt(int udpsock, size_t len, struct ipv6_eui64_addr
 	}
 }
 
+static unsigned int get_ifindex_for_addr(struct in6_addr *if_addr)
+{
+	/* iterate over all addresses to find the interface to our IPv6 addr */
+	struct ifaddrs *addrs;
+	struct ifaddrs *iter;
+
+	if (getifaddrs(&addrs) < 0) {
+		return 0;
+	}
+
+	/* if the loop exits normally, we were unable to find the IPv6 addr */
+	int ret = 0;
+	errno = ENOENT;
+	for (iter = addrs; iter != NULL; iter = iter->ifa_next) {
+		if (iter->ifa_addr == NULL) {
+			continue;
+		}
+		if (iter->ifa_addr->sa_family != AF_INET6) {
+			continue;
+		}
+		struct sockaddr_in6 *iter_sa = (struct sockaddr_in6 *)
+			iter->ifa_addr;
+		if (memcmp(if_addr, &iter_sa->sin6_addr, sizeof(struct
+						in6_addr)) != 0) {
+			continue;
+		}
+
+		/* got address */
+
+		/* determine ifindex or bail out */
+		if (iter->ifa_name == NULL) {
+			break;
+		}
+
+		ret = if_nametoindex(iter->ifa_name);
+	}
+
+	/* address not found */
+	freeifaddrs(addrs);
+
+	return ret;
+}
+
 int main(int argc, char **argv)
 {
-	if (argc != 3) {
+	if (argc != 2) {
 		usage();
 	}
 
-	char *ifname = argv[1];
-	char *if_addr_str = argv[2];
+	char *if_addr_str = argv[1];
+	// TODO: get ifidx from addr
 
 	struct in6_addr if_addr;
 	if (inet_pton(AF_INET6, if_addr_str, &if_addr) != 1) {
 		usage();
 	}
 
-	__u32 ifidx = if_nametoindex(ifname);
+	unsigned int ifidx = get_ifindex_for_addr(&if_addr);
 	if (ifidx == 0) {
-		perror("ifindex");
-		exit(2);
+		perror("determining interface");
+		return 2;
 	}
 
 	struct ipv6_eui64_addr *my_addr = (struct ipv6_eui64_addr *) &if_addr;
 
-	/* prepare the destination address */
-	struct in6_addr send_addr;
-	struct ipv6_eui64_addr *dst_addr = (struct ipv6_eui64_addr *)
-		&send_addr;
-	dst_addr->prefix = my_addr->prefix;
-	dst_addr->ipx_net = my_addr->ipx_net;
-	memset(dst_addr->ipx_node_fst, 0xFF, sizeof(dst_addr->ipx_node_fst));
-	dst_addr->fffe = 0xFFFE;
-	memset(dst_addr->ipx_node_snd, 0xFF, sizeof(dst_addr->ipx_node_snd));
-
-	/* pre-fill IPX header */
-	rip_pkt_out.ipxh.csum = IPX_CSUM_NONE;
-	rip_pkt_out.ipxh.pktlen = htons(sizeof(rip_pkt_out.ipxh) +
-			sizeof(rip_pkt_out.rip_type));
-	rip_pkt_out.ipxh.tc = 0;
-	rip_pkt_out.ipxh.type = RIP_PKT_TYPE;
-	rip_pkt_out.ipxh.daddr.net = my_addr->ipx_net;
-	memset(rip_pkt_out.ipxh.daddr.node, 0xFF,
-			sizeof(rip_pkt_out.ipxh.daddr.node));
-	rip_pkt_out.ipxh.daddr.sock = htons(RIP_SOCK);
-	rip_pkt_out.ipxh.saddr.net = my_addr->ipx_net;
-	memcpy(rip_pkt_out.ipxh.saddr.node, my_addr->ipx_node_fst,
+	/* bind to the address and RIP socket */
+	struct ipxw_mux_msg *bind_msg = &rip_pkt_out.mux_msg;
+	memset(bind_msg, 0, sizeof(struct ipxw_mux_msg));
+	bind_msg->type = IPXW_MUX_BIND;
+	bind_msg->bind.addr.net = my_addr->ipx_net;
+	memcpy(bind_msg->bind.addr.node, my_addr->ipx_node_fst,
 			sizeof(my_addr->ipx_node_fst));
-	memcpy(rip_pkt_out.ipxh.saddr.node + sizeof(my_addr->ipx_node_fst),
-			my_addr->ipx_node_snd, sizeof(my_addr->ipx_node_snd));
-	rip_pkt_out.ipxh.saddr.sock = htons(RIP_SOCK);
+	memcpy(bind_msg->bind.addr.node + sizeof(my_addr->ipx_node_fst),
+			my_addr->ipx_node_snd,
+			sizeof(my_addr->ipx_node_snd));
+	bind_msg->bind.addr.sock = htons(RIP_SOCK);
+	bind_msg->bind.pkt_type = RIP_PKT_TYPE;
+	bind_msg->bind.pkt_type_any = 0;
+	bind_msg->bind.recv_bcast = 1;
+
+	int data_sock = ipxw_mux_bind(bind_msg);
+	if (data_sock < 0) {
+		fprintf(stderr, "bind failed: %s\n", strerror(-data_sock));
+		return 3;
+	}
+	printf("bind successful\n");
+
+	/* clear out bind msg */
+	memset(&rip_pkt_out, 0, sizeof(struct ipxw_mux_msg));
+
+	/* pre-fill xmit msg, this is the same for all sent pkts */
+	rip_pkt_out.mux_msg.type = IPXW_MUX_XMIT;
+	rip_pkt_out.mux_msg.xmit.pkt_type = RIP_PKT_TYPE;
+	rip_pkt_out.mux_msg.xmit.daddr.net = my_addr->ipx_net;
+	memcpy(&rip_pkt_out.mux_msg.xmit.daddr.node, IPX_BCAST_NODE,
+			sizeof(rip_pkt_out.mux_msg.xmit.daddr.node));
+	rip_pkt_out.mux_msg.xmit.daddr.sock = htons(RIP_SOCK);
+
+	/* pre-fill RIP type */
 	rip_pkt_out.rip_type = htons(RIP_TYPE_RESPONSE);
-
-	/* prepare the UDP socket */
-	int udpsock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (udpsock < 0) {
-		perror("creating UDP socket");
-		exit(3);
-	}
-
-	/* allow other processes to bind to this address too, so we don't
-	 * monopolize the port */
-	int reuse = 1;
-	if (setsockopt(udpsock, SOL_SOCKET, SO_REUSEADDR, &reuse,
-				sizeof(reuse)) < 0) {
-		perror("set reuseaddr");
-		close(udpsock);
-		exit(4);
-	}
-
-	/* bind the socket to the interface */
-	if (setsockopt(udpsock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
-				strlen(ifname)) < 0) {
-		perror("bind to device");
-		close(udpsock);
-		exit(5);
-	}
-
-	/* join the all nodes multicast group */
-	struct ipv6_mreq group;
-	group.ipv6mr_interface = ifidx;
-	memcpy(&group.ipv6mr_multiaddr, IPV6_MCAST_ALL_NODES,
-			sizeof(group.ipv6mr_multiaddr));
-	if (setsockopt(udpsock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &group,
-				sizeof(group)) < 0) {
-		perror("join mcast group");
-		close(udpsock);
-		exit(6);
-	}
-
-	/* bind to the port (but not the interface IP) */
-	struct sockaddr_in6 source = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(IPX_IN_IPV6_PORT),
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
-	memset(&source.sin6_addr, 0x00, sizeof(source.sin6_addr));
-	if (bind(udpsock, (struct sockaddr *) &source, sizeof(source)) < 0) {
-		perror("binding UDP socket");
-		close(udpsock);
-		exit(7);
-	}
-
-	/* prepare destination for sending */
-	struct sockaddr_in6 destination = {
-		.sin6_family = AF_INET6,
-		.sin6_addr = send_addr,
-		.sin6_port = htons(IPX_IN_IPV6_PORT),
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
 
 	/* start a timer for sending periodic RIP responses */
 	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
 	if (tmr < 0) {
 		perror("creating timer");
-		close(udpsock);
-		exit(8);
+		ipxw_mux_unbind(data_sock);
+		return 4;
 	}
 	struct itimerspec tmr_spec = {
 		.it_interval = { .tv_sec = RIP_UPDATE_TIMER },
@@ -423,23 +399,23 @@ int main(int argc, char **argv)
 	};
 	if (timerfd_settime(tmr, 0, &tmr_spec, NULL) < 0) {
 		perror("arming timer");
-		close(udpsock);
+		ipxw_mux_unbind(data_sock);
 		close(tmr);
-		exit(9);
+		return 5;
 	}
 
 	/* open the routing table */
 	FILE *rtable = fopen(RTABLE_FILE, "r");
 	if (rtable == NULL) {
 		perror("open routing table");
-		close(udpsock);
+		ipxw_mux_unbind(data_sock);
 		close(tmr);
-		exit(10);
+		return 6;
 	}
 
 	struct pollfd fds[2] = {
 		{
-			.fd = udpsock,
+			.fd = data_sock,
 			.events = POLLIN,
 			.revents = 0
 		},
@@ -457,7 +433,7 @@ int main(int argc, char **argv)
 			/* poll errored */
 		        if (errno != EINTR) {
 				perror("poll");
-				ret = 11;
+				ret = 7;
 				break;
 			}
 
@@ -469,38 +445,38 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		/* we can read from the socket */
-		if (fds[0].revents & POLLIN) {
-			ssize_t len = got_rip_pkt(udpsock);
-			if (len >= 0) {
-				handle_rip_pkt(udpsock, len, my_addr, ifidx);
-			}
-		} else if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+		/* socket */
+		if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
 			/* some other error */
 			fprintf(stderr, "socket error\n");
-			ret = 12;
+			ret = 8;
 			break;
 		}
+		/* we can read from the socket */
+		if (fds[0].revents & POLLIN) {
+			handle_rip_pkt(data_sock, my_addr, ifidx);
+		}
 
+		/* timer */
+		if (fds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+			/* some other error */
+			fprintf(stderr, "timer error\n");
+			ret = 9;
+			break;
+		}
 		/* the timer expired, send periodic RIP response */
 		if (fds[1].revents & POLLIN) {
-			if (send_rip_resp(udpsock, rtable, my_addr,
-						&destination) < 0) {
+			if (send_rip_resp(data_sock, rtable, my_addr) < 0) {
 				fprintf(stderr, "error sending packet\n");
 			}
 			/* consume all expirations */
 			__u64 dummy;
 			read(tmr, &dummy, sizeof(dummy));
-		} else if (fds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-			/* some other error */
-			fprintf(stderr, "timer error\n");
-			ret = 13;
-			break;
 		}
 	}
 
 	fclose(rtable);
-	close(udpsock);
+	ipxw_mux_unbind(data_sock);
 	close(tmr);
 
 	return ret;
