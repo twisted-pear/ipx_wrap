@@ -363,8 +363,6 @@ static ssize_t recv_msg(int data_sock)
 
 		/* other error, make sure to get rid of the message */
 		perror("recving msg");
-	} else {
-		printf("recvd msg with %ld bytes\n", err);
 	}
 
 	STAILQ_REMOVE_HEAD(&be->in_queue, q_entry);
@@ -685,9 +683,6 @@ int main(int argc, char **argv)
 			if (iface != NULL) {
 				/* something went wrong, unbind */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					fprintf(stderr, "error on UDP socket"
-							" %d\n",
-							evs[i].data.fd);
 					// TODO: think about what to do here
 					continue;
 				}
@@ -699,10 +694,6 @@ int main(int argc, char **argv)
 						perror("UDP recv");
 					} else if (err == 0) {
 						/* nobody was interested */
-					} else {
-						printf("recvd on UDP socket"
-								" %d\n",
-								evs[i].data.fd);
 					}
 				}
 
@@ -713,11 +704,6 @@ int main(int argc, char **argv)
 						perror("UDP send");
 					} else if (err == 0) {
 						/* nothing happend */
-					} else {
-						printf("semt %ld bytes on UDP"
-								" socket %d\n",
-								err,
-								evs[i].data.fd);
 					}
 				}
 
@@ -728,8 +714,6 @@ int main(int argc, char **argv)
 
 			/* something went wrong, unbind */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-				fprintf(stderr, "error on client socket %d\n",
-						evs[i].data.fd);
 				handle_unbind(evs[i].data.fd, &epoll_fd);
 				continue;
 			}
@@ -740,14 +724,9 @@ int main(int argc, char **argv)
 						&handle_unbind, NULL,
 						&epoll_fd);
 				if (err < 0 && errno != EINTR) {
-					perror("data handling for xmit");
+					perror("xmitting data");
 				} else if (err == 0) {
-					printf("unbound client socket %d\n",
-							evs[i].data.fd);
-				} else {
-					printf("handled xmit on client socket"
-							" %d\n",
-							evs[i].data.fd);
+					// unbound
 				}
 			}
 
@@ -757,16 +736,9 @@ int main(int argc, char **argv)
 				if (err < 0) {
 					/* get rid of the client */
 					perror("recving data");
-					fprintf(stderr, "error on client socket"
-							" %d\n",
-							evs[i].data.fd);
 					handle_unbind(evs[i].data.fd, &epoll_fd);
 				} else if (err == 0) {
 					/* nothing happened */
-				} else {
-					printf("recvd %ld bytes on client"
-							" socket %d\n", err,
-							evs[i].data.fd);
 				}
 			}
 		}
