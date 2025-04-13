@@ -448,7 +448,8 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 	/* destination network is the local net... */
 	if (ipxh->daddr.net == IPX_NET_LOCAL) {
 		/* ... and the sender is in the same network as us... */
-		if (ipxh->saddr.net == ifcfg->network) {
+		if (ipxh->saddr.net == ifcfg->network || ipxh->saddr.net ==
+				IPX_NET_LOCAL) {
 			/* ...fill in the network in the IPv6 header */
 			daddr6->ipx_net = ifcfg->network;
 		}
