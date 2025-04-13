@@ -48,23 +48,23 @@ struct if_entry {
 		__be32 net;
 		__u8 node[IPX_ADDR_NODE_BYTES];
 	} addr;
+	/* the actual UDP socket */
+	int udp_sock;
 	/* hash entry */
-	UT_hash_handle hh;
+	UT_hash_handle h_ipx_addr;
+	UT_hash_handle h_udp_sock;
 	/* msgs to send */
 	struct ipxw_msg_queue out_queue;
 	/* bindings indexed by the IPX socket */
 	struct bind_entry *ht_ipx_sock_to_bind;
-	/* the actual UDP socket */
-	int udp_sock;
 	/* IPv6 prefix */
 	__be32 prefix;
-	/* index of the actual interface */
-	__u32 ifindex;
 };
 
 static struct bind_entry *ht_sock_to_bind = NULL;
 static struct bind_entry *ht_addr_to_bind = NULL;
-static struct if_entry *ht_ifaces = NULL;
+static struct if_entry *ht_addr_to_iface = NULL;
+static struct if_entry *ht_sock_to_iface = NULL;
 
 static struct bind_entry *get_bind_entry_by_sock(int sock)
 {
@@ -119,7 +119,8 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 
 	/* available addresses */
 	struct if_entry *avail = NULL;
-	HASH_FIND(hh, ht_ifaces, &bind_msg->addr, sizeof(bind_msg->addr.net) +
+	HASH_FIND(h_ipx_addr, ht_addr_to_iface, &bind_msg->addr,
+			sizeof(bind_msg->addr.net) +
 			sizeof(bind_msg->addr.node), avail);
 	if (avail == NULL) {
 		fprintf(stderr, "bind address not allowed\n");
@@ -195,53 +196,146 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 	return 0;
 }
 
+static ssize_t udp_send(int udp_sock, struct if_entry *iface)
+{
+	/* no msgs to send */
+	if (STAILQ_EMPTY(&iface->out_queue)) {
+		return 0;
+	}
+
+	struct ipxw_mux_msg *xmit_msg = STAILQ_FIRST(&iface->out_queue);
+
+	/* have to remove the message from the queue as we are going to rewrite
+	 * it */
+	STAILQ_REMOVE_HEAD(&iface->out_queue, q_entry);
+
+	/* turn xmit msg into an ipx message */
+	struct ipx_addr saddr = {
+		.net = iface->addr.net,
+		.sock = xmit_msg->xmit.ssock
+	};
+	memcpy(&saddr.node, iface->addr.node, IPX_ADDR_NODE_BYTES);
+	struct ipxhdr *ipx_msg = ipxw_mux_xmit_msg_to_ipxh(xmit_msg, &saddr);
+
+	/* build IPv6 destination addr */
+	struct sockaddr_in6 ipv6_dst = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(IPX_IN_IPV6_PORT),
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	struct ipv6_eui64_addr *send_addr = (struct ipv6_eui64_addr *)
+		&ipv6_dst.sin6_addr;
+	send_addr->prefix = iface->prefix;
+	send_addr->ipx_net = ipx_msg->daddr.net;
+	memcpy(send_addr->ipx_node_fst, ipx_msg->daddr.node,
+			sizeof(send_addr->ipx_node_fst));
+	send_addr->fffe = htons(0xfffe);
+	memcpy(send_addr->ipx_node_snd + sizeof(send_addr->ipx_node_fst),
+			ipx_msg->daddr.node + sizeof(send_addr->ipx_node_fst),
+			sizeof(send_addr->ipx_node_snd));
+
+	size_t pktlen = ntohs(ipx_msg->pktlen);
+
+	/* retry if we get EINTR */
+	ssize_t len;
+	do {
+		len = sendto(udp_sock, ipx_msg, pktlen, 0, (struct sockaddr *)
+				&ipv6_dst,
+				sizeof(ipv6_dst));
+	} while (len < 0 && errno == EINTR);
+
+	/* free the msg, we can't do anything about potential errors now */
+	free(ipx_msg);
+
+	/* didn't send the whole packet */
+	if (len != pktlen) {
+		len = -1;
+		errno = EMSGSIZE;
+	}
+
+	return len;
+}
+
 static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 {
-	/* xmit part */
-	printf("txing msg with %d bytes\n", msg->xmit.data_len);
-
 	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
 	if (be_xmit == NULL) {
-		fprintf(stderr, "no binding for %d\n", data_sock);
 		free(msg);
 		return -1;
 	}
 
-	struct ipxhdr *ipx_msg = ipxw_mux_xmit_msg_to_ipxh(msg,
-			&be_xmit->addr);
-	if (ipx_msg == NULL) {
-		fprintf(stderr, "failed to make ipx pkt\n");
-		free(msg);
-		return -1;
-	}
-	printf("made ipx pkt with %d bytes\n", ntohs(ipx_msg->pktlen));
+	assert(msg->type == IPXW_MUX_XMIT);
 
-	// TODO: restrict for pkt type and handle bcasts
+	msg->xmit.ssock = be_xmit->addr.sock;
 
-	/* udp packet would go out here */
-
-	/* recv part */
-	struct bind_entry *be_recv = get_bind_entry_by_addr(&ipx_msg->daddr);
-	if (be_recv == NULL) {
-		fprintf(stderr, "no binding address\n");
-		free(ipx_msg);
-		return -1;
-	}
-
-	struct ipxw_mux_msg *recv_msg = ipxw_mux_ipxh_to_recv_msg(ipx_msg);
-	if (recv_msg == NULL) {
-		fprintf(stderr, "failed to make recv msg\n");
-		free(ipx_msg);
-		return -1;
-	}
-	printf("made recv msg with %d bytes\n", recv_msg->recv.data_len);
-
-	STAILQ_INSERT_TAIL(&be_recv->in_queue, recv_msg, q_entry);
-
+	/* queue the message on the interface */
+	STAILQ_INSERT_TAIL(&be_xmit->iface->out_queue, msg, q_entry);
 	return 0;
 }
 
-static int recv_msg(int data_sock)
+static ssize_t udp_recv(int udp_sock, struct if_entry *iface)
+{
+	ssize_t ret = -1;
+
+	struct ipxhdr *ipx_msg = malloc(IPXW_MUX_MSG_LEN);
+	if (ipx_msg == NULL) {
+		return -1;
+	}
+
+	do {
+		ssize_t len = recv(udp_sock, ipx_msg, IPXW_MUX_MSG_LEN, 0);
+		if (len < 0) {
+			break;
+		}
+
+		/* need at least the IPX header */
+		if (len < sizeof(struct ipxhdr)) {
+			errno = EMSGSIZE;
+			break;
+		}
+
+		/* get the binding for the destination socket */
+		struct bind_entry *be_recv = get_bind_entry_by_ipx_sock(iface,
+				ipx_msg->daddr.sock);
+		if (be_recv == NULL) {
+			/* this is ok, there is just nobody listening */
+			ret = 0;
+			break;
+		}
+
+		/* convert to recv msg */
+		struct ipxw_mux_msg *recv_msg =
+			ipxw_mux_ipxh_to_recv_msg(ipx_msg);
+		if (recv_msg == NULL) {
+			errno = EINVAL;
+			break;
+		}
+
+		/* not interested in this packet as it is a broadcast */
+		if (!be_recv->recv_bcast && recv_msg->recv.is_bcast) {
+			ret = 0;
+			break;
+		}
+
+		/* not interested in this packet type */
+		if (!be_recv->pkt_type_any && be_recv->pkt_type !=
+				recv_msg->recv.pkt_type) {
+			ret = 0;
+			break;
+		}
+
+		/* queue the msg for the client */
+		STAILQ_INSERT_TAIL(&be_recv->in_queue, recv_msg, q_entry);
+		return len;
+	} while (0);
+
+	/* something went wrong, free the msg buffer */
+	free(ipx_msg);
+	return ret;
+}
+
+static ssize_t recv_msg(int data_sock)
 {
 	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
 
@@ -253,15 +347,13 @@ static int recv_msg(int data_sock)
 	/* corrupt data structures? */
 	assert(be->sock == data_sock);
 
-	ssize_t err;
-
-	/* no msgs to receive, just check if the client is still alive */
+	/* no msgs to receive */
 	if (STAILQ_EMPTY(&be->in_queue)) {
 		return 0;
 	}
 
 	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->in_queue);
-	err = ipxw_mux_recv(data_sock, msg);
+	ssize_t err = ipxw_mux_recv(data_sock, msg);
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
@@ -332,9 +424,10 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int ctrl_sock, int exit_cod
 	/* remove all interfaces */
 	struct if_entry *ie;
 	struct if_entry *itmp;
-	HASH_ITER(hh, ht_ifaces, ie, itmp) {
-		HASH_DELETE(hh, ht_ifaces, ie);
-		// TODO: unregister UDP sockets from epoll and close them
+	HASH_ITER(h_ipx_addr, ht_addr_to_iface, ie, itmp) {
+		HASH_DELETE(h_ipx_addr, ht_addr_to_iface, ie);
+		HASH_DELETE(h_udp_sock, ht_sock_to_iface, ie);
+		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ie->udp_sock, NULL);
 		free(ie);
 	}
 
@@ -350,13 +443,62 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int ctrl_sock, int exit_cod
 	exit(exit_code);
 }
 
-static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int pollfd)
+static int mk_udp_socket(char *ifname)
+{
+	/* determine the ifindex */
+	__u32 ifidx = if_nametoindex(ifname);
+	if (ifidx == 0) {
+		return -1;
+	}
+
+	/* prepare the UDP socket */
+	int udp_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (udp_sock < 0) {
+		return -1;
+	}
+
+	/* bind the socket to the interface */
+	if (setsockopt(udp_sock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
+				strlen(ifname)) < 0) {
+		close(udp_sock);
+		return -1;
+	}
+
+	/* join the all nodes multicast group */
+	struct ipv6_mreq group;
+	group.ipv6mr_interface = ifidx;
+	memcpy(&group.ipv6mr_multiaddr, IPV6_MCAST_ALL_NODES,
+			sizeof(group.ipv6mr_multiaddr));
+	if (setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &group,
+				sizeof(group)) < 0) {
+		close(udp_sock);
+		return -1;
+	}
+
+	/* bind to the port (but not the interface IP) */
+	struct sockaddr_in6 source = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(IPX_IN_IPV6_PORT),
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	memset(&source.sin6_addr, 0x00, sizeof(source.sin6_addr));
+	if (bind(udp_sock, (struct sockaddr *) &source, sizeof(source)) < 0) {
+		close(udp_sock);
+		return -1;
+	}
+
+	return udp_sock;
+}
+
+static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd)
 {
 	struct if_entry *iface = calloc(1, sizeof(struct if_entry));
 	if (iface == NULL) {
 		return false;
 	}
 
+	/* prepare data that can be prepared without additional work */
 	iface->prefix = ipv6_addr->prefix;
 
 	iface->addr.net = ipv6_addr->ipx_net;
@@ -366,9 +508,11 @@ static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int pollfd)
 			ipv6_addr->ipx_node_snd,
 			sizeof(ipv6_addr->ipx_node_snd));
 
+	STAILQ_INIT(&iface->out_queue);
+
 	struct if_entry *iface_found = NULL;
-	HASH_FIND(hh, ht_ifaces, &iface->addr, sizeof(iface->addr),
-			iface_found);
+	HASH_FIND(h_ipx_addr, ht_addr_to_iface, &iface->addr,
+			sizeof(iface->addr), iface_found);
 	if (iface_found != NULL) {
 		/* interface for IPX addr already exists */
 		free(iface);
@@ -406,15 +550,37 @@ static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int pollfd)
 		if (iter->ifa_name == NULL) {
 			break;
 		}
-		iface->ifindex = if_nametoindex(iter->ifa_name);
-		if (iface->ifindex == 0) {
+
+		int udp_sock = mk_udp_socket(iter->ifa_name);
+		if (udp_sock < 0) {
 			break;
 		}
 
-		// TODO: open up the UDP socket and register it with epoll
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
+			.data = {
+				.fd = udp_sock
+			}
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, udp_sock, &ev) < 0) {
+			close(udp_sock);
+			break;
+		}
+
+		freeifaddrs(addrs);
+
+		/* this should not happen, as file descriptors are unique
+		 * within the process */
+		HASH_FIND(h_udp_sock, ht_sock_to_iface, &udp_sock, sizeof(int),
+				iface_found);
+		assert(iface_found == NULL);
 
 		/* add new interface entry */
-		HASH_ADD(hh, ht_ifaces, addr, sizeof(iface->addr), iface);
+		iface->udp_sock = udp_sock;
+		HASH_ADD(h_ipx_addr, ht_addr_to_iface, addr,
+				sizeof(iface->addr), iface);
+		HASH_ADD(h_udp_sock, ht_sock_to_iface, udp_sock, sizeof(int),
+				iface);
 		return true;
 	}
 
@@ -455,7 +621,7 @@ int main(int argc, char **argv)
 		}
 
 		if (!add_iface(&addr_buf, epoll_fd)) {
-			perror("setting allowed bind addrs");
+			perror("adding interfaces");
 			cleanup_and_exit(epoll_fd, ctrl_sock, 3);
 		}
 	}
@@ -478,7 +644,7 @@ int main(int argc, char **argv)
 		cleanup_and_exit(epoll_fd, ctrl_sock, 5);
 	}
 
-	int err;
+	ssize_t err;
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
 	while (1) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
@@ -512,11 +678,57 @@ int main(int argc, char **argv)
 				continue;
 			}
 
+			/* one of the UDP sockets */
+			struct if_entry *iface;
+			HASH_FIND(h_udp_sock, ht_sock_to_iface,
+					&evs[i].data.fd, sizeof(int), iface);
+			if (iface != NULL) {
+				/* something went wrong, unbind */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "error on UDP socket"
+							" %d\n",
+							evs[i].data.fd);
+					// TODO: think about what to do here
+					continue;
+				}
+
+				/* can recv */
+				if (evs[i].events & EPOLLIN) {
+					err = udp_recv(evs[i].data.fd, iface);
+					if (err < 0 && errno != EINTR) {
+						perror("UDP recv");
+					} else if (err == 0) {
+						/* nobody was interested */
+					} else {
+						printf("recvd on UDP socket"
+								" %d\n",
+								evs[i].data.fd);
+					}
+				}
+
+				/* can xmit */
+				if (evs[i].events & EPOLLOUT) {
+					err = udp_send(evs[i].data.fd, iface);
+					if (err < 0) {
+						perror("UDP send");
+					} else if (err == 0) {
+						/* nothing happend */
+					} else {
+						printf("semt %ld bytes on UDP"
+								" socket %d\n",
+								err,
+								evs[i].data.fd);
+					}
+				}
+
+				continue;
+			}
+
 			/* one of the data sockets */
 
 			/* something went wrong, unbind */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-				fprintf(stderr, "error on socket %d\n",
+				fprintf(stderr, "error on client socket %d\n",
 						evs[i].data.fd);
 				handle_unbind(evs[i].data.fd, &epoll_fd);
 				continue;
@@ -527,13 +739,14 @@ int main(int argc, char **argv)
 				err = ipxw_mux_do_data(evs[i].data.fd, &tx_msg,
 						&handle_unbind, NULL,
 						&epoll_fd);
-				if (err < 0 && errno != -EINTR) {
+				if (err < 0 && errno != EINTR) {
 					perror("data handling for xmit");
 				} else if (err == 0) {
-					printf("unbound data socket %d\n",
+					printf("unbound client socket %d\n",
 							evs[i].data.fd);
 				} else {
-					printf("handled xmit on socket %d\n",
+					printf("handled xmit on client socket"
+							" %d\n",
 							evs[i].data.fd);
 				}
 			}
@@ -544,14 +757,16 @@ int main(int argc, char **argv)
 				if (err < 0) {
 					/* get rid of the client */
 					perror("recving data");
-					fprintf(stderr, "error on socket %d\n",
+					fprintf(stderr, "error on client socket"
+							" %d\n",
 							evs[i].data.fd);
 					handle_unbind(evs[i].data.fd, &epoll_fd);
 				} else if (err == 0) {
-					// nothing happened
+					/* nothing happened */
 				} else {
-					printf("recvd %d bytes on socket %d\n",
-							err, evs[i].data.fd);
+					printf("recvd %ld bytes on client"
+							" socket %d\n", err,
+							evs[i].data.fd);
 				}
 			}
 		}

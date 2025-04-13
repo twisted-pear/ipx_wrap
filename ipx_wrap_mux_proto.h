@@ -33,7 +33,7 @@ struct ipxw_mux_msg_bind {
 	__u8 recv_bcast:1,
 	     pkt_type_any:1,
 	     reserved:6;
-	__u16 reserved2;
+	__u32 reserved2;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_unbind {
@@ -45,6 +45,7 @@ struct ipxw_mux_msg_xmit {
 	__u8 pkt_type;
 	__u8 reserved;
 	__u16 data_len;
+	__be16 ssock;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_recv {
@@ -53,6 +54,7 @@ struct ipxw_mux_msg_recv {
 	__u8 is_bcast:1,
 	     reserved:7;
 	__u16 data_len;
+	__u16 reserved2;
 } __attribute__((packed));
 
 struct ipxw_mux_msg {
