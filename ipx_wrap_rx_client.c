@@ -38,7 +38,7 @@ int main(int argc, char **argv)
 	int data_sock = ipxw_mux_bind(&bind_msg);
 	if (data_sock < 0) {
 		fprintf(stderr, "bind failed: %s\n", strerror(-data_sock));
-		return 3;
+		return 2;
 	}
 	printf("bind successful\n");
 
@@ -46,14 +46,7 @@ int main(int argc, char **argv)
 	if (data_msg == NULL) {
 		perror("alloc");
 		close(data_sock);
-		return 4;
-	}
-
-	data_msg = calloc(1, IPXW_MUX_MSG_LEN);
-	if (data_msg == NULL) {
-		perror("alloc");
-		close(data_sock);
-		return 4;
+		return 3;
 	}
 
 	ssize_t len = ipxw_mux_get_recvd(data_sock, data_msg);
@@ -61,7 +54,7 @@ int main(int argc, char **argv)
 	if (len < 0) {
 		fprintf(stderr, "recv failed: %s\n", strerror(-len));
 		close(data_sock);
-		return 3;
+		return 4;
 	}
 	printf("recvd %ld bytes\n", len);
 
