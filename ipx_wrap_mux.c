@@ -8,27 +8,33 @@
 #include <sys/queue.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
 
 #define MAX_EPOLL_EVENTS 64
 
-LIST_HEAD(bcast_list, bind_entry);
-STAILQ_HEAD(recv_msg_queue, ipxw_mux_msg);
+STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
+
+struct if_entry;
 
 struct bind_entry {
 	/* if the hash table key is the socket */
 	int sock;
 	/* if the hash table key is the address */
 	struct ipx_addr addr;
+	/* if the hash table key is the IPX socket number */
+	__be16 ipx_sock;
 	/* hash entries */
 	UT_hash_handle h_sock;
 	UT_hash_handle h_addr;
-	/* list entry */
-	LIST_ENTRY(bind_entry) nw_bcast_entry;
+	UT_hash_handle h_ipx_sock;
 	/* recvd msgs for this binding's socket */
-	struct recv_msg_queue in_queue;
+	struct ipxw_msg_queue in_queue;
+	/* corresponding interface */
+	struct if_entry *iface;
 	/* remaining data */
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
@@ -36,24 +42,29 @@ struct bind_entry {
 	     reserved:6;
 };
 
-struct nw_bcast_list {
-	__be32 nw;
-	UT_hash_handle hh;
-	struct bcast_list bcast_recvers;
-};
-
-struct avail_ipx_addr {
+struct if_entry {
+	/* net and node IPX addr */
 	struct __attribute__((packed)) {
 		__be32 net;
 		__u8 node[IPX_ADDR_NODE_BYTES];
 	} addr;
+	/* hash entry */
 	UT_hash_handle hh;
+	/* msgs to send */
+	struct ipxw_msg_queue out_queue;
+	/* bindings indexed by the IPX socket */
+	struct bind_entry *ht_ipx_sock_to_bind;
+	/* the actual UDP socket */
+	int udp_sock;
+	/* IPv6 prefix */
+	__be32 prefix;
+	/* index of the actual interface */
+	__u32 ifindex;
 };
 
-struct bind_entry *ht_sock_to_bind = NULL;
-struct bind_entry *ht_addr_to_bind = NULL;
-struct nw_bcast_list *ht_nw_to_bcast_list = NULL;
-struct avail_ipx_addr *ht_avail_ipx_addrs = NULL;
+static struct bind_entry *ht_sock_to_bind = NULL;
+static struct bind_entry *ht_addr_to_bind = NULL;
+static struct if_entry *ht_ifaces = NULL;
 
 static struct bind_entry *get_bind_entry_by_sock(int sock)
 {
@@ -72,23 +83,14 @@ static struct bind_entry *get_bind_entry_by_addr(struct ipx_addr *addr)
 	return bind;
 }
 
-static struct bcast_list *get_bcast_list(__be32 nw)
+static struct bind_entry *get_bind_entry_by_ipx_sock(struct if_entry *iface,
+		__be16 ipx_sock)
 {
-	struct nw_bcast_list *bcl;
-	HASH_FIND_INT(ht_nw_to_bcast_list, &nw, bcl);
+	struct bind_entry *bind;
 
-	/* create the missing bcast list */
-	if (bcl == NULL) {
-		bcl = calloc(1, sizeof(struct nw_bcast_list));
-		if (bcl == NULL) {
-			return NULL;
-		}
-
-		LIST_INIT(&bcl->bcast_recvers);
-		HASH_ADD_INT(ht_nw_to_bcast_list, nw, bcl);
-	}
-
-	return &bcl->bcast_recvers;
+	HASH_FIND(h_ipx_sock, iface->ht_ipx_sock_to_bind, &ipx_sock,
+			sizeof(__be16), bind);
+	return bind;
 }
 
 static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
@@ -116,9 +118,8 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 	}
 
 	/* available addresses */
-	struct avail_ipx_addr *avail = NULL;
-	HASH_FIND(hh, ht_avail_ipx_addrs, &bind_msg->addr,
-			sizeof(bind_msg->addr.net) +
+	struct if_entry *avail = NULL;
+	HASH_FIND(hh, ht_ifaces, &bind_msg->addr, sizeof(bind_msg->addr.net) +
 			sizeof(bind_msg->addr.node), avail);
 	if (avail == NULL) {
 		fprintf(stderr, "bind address not allowed\n");
@@ -135,10 +136,12 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 	/* this should never happen because file descriptors should be unique
 	 * within the process */
 	e = get_bind_entry_by_sock(data_sock);
-	if (e != NULL) {
-		fprintf(stderr, "socket already in use\n");
-		return -1;
-	}
+	assert(e == NULL);
+
+	/* this should never happen because we already matched against the full
+	 * address and the iface depends on net and node address */
+	e = get_bind_entry_by_ipx_sock(avail, bind_msg->addr.sock);
+	assert(e == NULL);
 
 	/* make and fill new binding entry */
 	e = calloc(1, sizeof(struct bind_entry));
@@ -149,6 +152,8 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 
 	e->sock = data_sock;
 	e->addr = bind_msg->addr;
+	e->ipx_sock = bind_msg->addr.sock;
+	e->iface = avail;
 	e->pkt_type = bind_msg->pkt_type;
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
@@ -168,22 +173,10 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 		return -1;
 	}
 
-	/* register for broadcasts */
-	if (e->recv_bcast) {
-		struct bcast_list *bcl = get_bcast_list(e->addr.net);
-		if (bcl == NULL) {
-			perror("allocating network broadcast list");
-			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, data_sock, NULL);
-			free(e);
-			return -1;
-		}
-
-		LIST_INSERT_HEAD(bcl, e, nw_bcast_entry);
-	}
-
 	/* save binding */
 	HASH_ADD(h_sock, ht_sock_to_bind, sock, sizeof(int), e);
 	HASH_ADD(h_addr, ht_addr_to_bind, addr, sizeof(struct ipx_addr), e);
+	HASH_ADD(h_ipx_sock, avail->ht_ipx_sock_to_bind, ipx_sock, sizeof(__be16), e);
 
 	/* show the new binding in full */
 	printf("bound %d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
@@ -300,9 +293,7 @@ static void unbind_entry(struct bind_entry *e, int epoll_fd)
 	/* remove the bind entry from all data structures */
 	HASH_DELETE(h_sock, ht_sock_to_bind, e);
 	HASH_DELETE(h_addr, ht_addr_to_bind, e);
-	if (e->recv_bcast) {
-		LIST_REMOVE(e, nw_bcast_entry);
-	}
+	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
 
 	int sock = e->sock;
 
@@ -331,8 +322,6 @@ static void handle_unbind(int data_sock, void *ctx)
 
 static _Noreturn void cleanup_and_exit(int epoll_fd, int ctrl_sock, int exit_code)
 {
-	// TODO: handle UDP socket here too
-
 	/* remove all bindings */
 	struct bind_entry *e;
 	struct bind_entry *tmp;
@@ -340,12 +329,13 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int ctrl_sock, int exit_cod
 		unbind_entry(e, epoll_fd);
 	}
 
-	/* remove all allowed IPX bind addrs */
-	struct avail_ipx_addr *ae;
-	struct avail_ipx_addr *atmp;
-	HASH_ITER(hh, ht_avail_ipx_addrs, ae, atmp) {
-		HASH_DELETE(hh, ht_avail_ipx_addrs, ae);
-		free(ae);
+	/* remove all interfaces */
+	struct if_entry *ie;
+	struct if_entry *itmp;
+	HASH_ITER(hh, ht_ifaces, ie, itmp) {
+		HASH_DELETE(hh, ht_ifaces, ie);
+		// TODO: unregister UDP sockets from epoll and close them
+		free(ie);
 	}
 
 	if (ctrl_sock >= 0) {
@@ -360,34 +350,80 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int ctrl_sock, int exit_cod
 	exit(exit_code);
 }
 
-static bool add_avail_ipx_addr(struct ipv6_eui64_addr *ipv6_addr)
+static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int pollfd)
 {
-	struct avail_ipx_addr *ipx_avail = malloc(sizeof(struct
-				avail_ipx_addr));
-	if (ipx_avail == NULL) {
+	struct if_entry *iface = calloc(1, sizeof(struct if_entry));
+	if (iface == NULL) {
 		return false;
 	}
 
-	ipx_avail->addr.net = ipv6_addr->ipx_net;
-	memcpy(ipx_avail->addr.node, ipv6_addr->ipx_node_fst,
+	iface->prefix = ipv6_addr->prefix;
+
+	iface->addr.net = ipv6_addr->ipx_net;
+	memcpy(iface->addr.node, ipv6_addr->ipx_node_fst,
 			sizeof(ipv6_addr->ipx_node_fst));
-	memcpy(ipx_avail->addr.node + sizeof(ipv6_addr->ipx_node_fst),
+	memcpy(iface->addr.node + sizeof(ipv6_addr->ipx_node_fst),
 			ipv6_addr->ipx_node_snd,
 			sizeof(ipv6_addr->ipx_node_snd));
 
-	struct avail_ipx_addr *ipx_avail_found = NULL;
-	HASH_FIND(hh, ht_avail_ipx_addrs, &ipx_avail->addr,
-			sizeof(ipx_avail->addr), ipx_avail_found);
-	if (ipx_avail_found != NULL) {
-		/* IPX addr already exists */
-		free(ipx_avail);
-	} else {
-		/* add new IPX addr */
-		HASH_ADD(hh, ht_avail_ipx_addrs, addr, sizeof(ipx_avail->addr),
-				ipx_avail);
+	struct if_entry *iface_found = NULL;
+	HASH_FIND(hh, ht_ifaces, &iface->addr, sizeof(iface->addr),
+			iface_found);
+	if (iface_found != NULL) {
+		/* interface for IPX addr already exists */
+		free(iface);
+		return true;
 	}
 
-	return true;
+	/* iterate over all addresses to find the interface to our IPv6 addr */
+	struct ifaddrs *addrs;
+	struct ifaddrs *iter;
+
+	if (getifaddrs(&addrs) < 0) {
+		free(iface);
+		return false;
+	}
+
+	/* if the loop exits normally, we were unable to find the IPv6 addr */
+	errno = ENOENT;
+	for (iter = addrs; iter != NULL; iter = iter->ifa_next) {
+		if (iter->ifa_addr == NULL) {
+			continue;
+		}
+		if (iter->ifa_addr->sa_family != AF_INET6) {
+			continue;
+		}
+		struct sockaddr_in6 *iter_sa = (struct sockaddr_in6 *)
+			iter->ifa_addr;
+		if (memcmp(ipv6_addr, &iter_sa->sin6_addr, sizeof(struct
+						ipv6_eui64_addr)) != 0) {
+			continue;
+		}
+
+		/* got address */
+
+		/* determine ifindex or bail out */
+		if (iter->ifa_name == NULL) {
+			break;
+		}
+		iface->ifindex = if_nametoindex(iter->ifa_name);
+		if (iface->ifindex == 0) {
+			break;
+		}
+
+		// TODO: open up the UDP socket and register it with epoll
+
+		/* add new interface entry */
+		HASH_ADD(hh, ht_ifaces, addr, sizeof(iface->addr), iface);
+		return true;
+	}
+
+	/* address not found or other error */
+
+	freeifaddrs(addrs);
+	free(iface);
+
+	return false;
 }
 
 static _Noreturn void usage() {
@@ -401,6 +437,15 @@ int main(int argc, char **argv)
 		usage();
 	}
 
+	int ctrl_sock = -1;
+	int epoll_fd = -1;
+
+	epoll_fd = epoll_create1(0);
+	if (epoll_fd < 0) {
+		perror("create epoll fd");
+		cleanup_and_exit(epoll_fd, ctrl_sock, 2);
+	}
+
 	/* save all the IPX addresses we manage in the hash */
 	struct ipv6_eui64_addr addr_buf;
 	int i;
@@ -409,25 +454,16 @@ int main(int argc, char **argv)
 			usage();
 		}
 
-		if (!add_avail_ipx_addr(&addr_buf)) {
+		if (!add_iface(&addr_buf, epoll_fd)) {
 			perror("setting allowed bind addrs");
-			exit(2);
+			cleanup_and_exit(epoll_fd, ctrl_sock, 3);
 		}
 	}
-
-	int ctrl_sock = -1;
-	int epoll_fd = -1;
 
 	ctrl_sock = ipxw_mux_mk_ctrl_sock();
 	if (ctrl_sock < 0) {
 		fprintf(stderr, "creating ctrl socket failed: %s\n",
 				strerror(-ctrl_sock));
-		cleanup_and_exit(epoll_fd, ctrl_sock, 3);
-	}
-
-	epoll_fd = epoll_create1(0);
-	if (epoll_fd < 0) {
-		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, ctrl_sock, 4);
 	}
 
