@@ -231,8 +231,8 @@ static ssize_t udp_send(int udp_sock, struct if_entry *iface)
 	memcpy(send_addr->ipx_node_fst, ipx_msg->daddr.node,
 			sizeof(send_addr->ipx_node_fst));
 	send_addr->fffe = htons(0xfffe);
-	memcpy(send_addr->ipx_node_snd + sizeof(send_addr->ipx_node_fst),
-			ipx_msg->daddr.node + sizeof(send_addr->ipx_node_fst),
+	memcpy(send_addr->ipx_node_snd, ipx_msg->daddr.node +
+			sizeof(send_addr->ipx_node_fst),
 			sizeof(send_addr->ipx_node_snd));
 
 	size_t pktlen = ntohs(ipx_msg->pktlen);
