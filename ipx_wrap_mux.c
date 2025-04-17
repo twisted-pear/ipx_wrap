@@ -248,7 +248,7 @@ static ssize_t udp_send(struct if_entry *iface)
 	free(ipx_msg);
 
 	/* didn't send the whole packet */
-	if (len != pktlen) {
+	if (len >= 0 && len != pktlen) {
 		len = -1;
 		errno = EMSGSIZE;
 	}
