@@ -90,23 +90,17 @@ int ipxw_mux_bind(struct ipxw_mux_msg *bind_msg)
 		/* receive a reply, this blocks */
 		struct ipxw_mux_msg res;
 		ssize_t res_len = -1;
-		while (res_len < 0) {
+		do {
 			res_len = recv(data_sock, &res, sizeof(res), 0);
-			if (res_len < 0) {
-				/* interrupted, retry */
-				if (errno == EINTR) {
-					continue;
-				}
-				break;
-			}
-		}
+		} while (res_len < 0 && errno == EINTR);
+
 		if (res_len < 0) {
 			break;
 		}
 
 		/* should not happen, but if it does we report the error */
 		if (res_len != sizeof(res)) {
-			errno = EMSGSIZE;
+			errno = EREMOTEIO;
 			break;
 		}
 
@@ -134,7 +128,7 @@ int ipxw_mux_bind(struct ipxw_mux_msg *bind_msg)
 		close(ctrl_sock);
 	}
 
-	return -errno;
+	return -1;
 }
 
 void ipxw_mux_unbind(int data_sock)
@@ -152,7 +146,8 @@ ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg)
 {
 	/* check message type */
 	if (msg->type != IPXW_MUX_XMIT) {
-		return -EINVAL;
+		errno = EINVAL;
+		return -1;
 	}
 
 	size_t msg_len = sizeof(struct ipxw_mux_msg) + msg->xmit.data_len;
@@ -160,11 +155,12 @@ ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg)
 	/* send message, may block */
 	ssize_t sent_len = send(data_sock, msg, msg_len, 0);
 	if (sent_len < 0) {
-		return -errno;
+		return -1;
 	}
 
 	if (sent_len != msg_len) {
-		return -EMSGSIZE;
+		errno = ECOMM;
+		return -1;
 	}
 
 	return sent_len;
@@ -175,23 +171,26 @@ ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg)
 	/* receive a msg */
 	ssize_t rcvd_len = recv(data_sock, msg, IPXW_MUX_MSG_LEN, 0);
 	if (rcvd_len < 0) {
-		return -errno;
+		return -1;
 	}
 
 	/* need at least a full msg */
 	if (rcvd_len < sizeof(struct ipxw_mux_msg)) {
-		return -EMSGSIZE;
+		errno = EREMOTEIO;
+		return -1;
 	}
 
 	/* which has to be of the correct type */
 	if (msg->type != IPXW_MUX_RECV) {
-		return -EINVAL;
+		errno = EINVAL;
+		return -1;
 	}
 
 	/* and the data needs to be the correct length */
 	size_t data_len = rcvd_len - sizeof(struct ipxw_mux_msg);
 	if (msg->recv.data_len != data_len) {
-		return -EMSGSIZE;
+		errno = EREMOTEIO;
+		return -1;
 	}
 
 	return rcvd_len;
@@ -203,7 +202,7 @@ int ipxw_mux_mk_ctrl_sock()
 {
 	int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
 	if (ctrl_sock < 0) {
-		return -errno;
+		return -1;
 	}
 
 	struct sockaddr_un ctrl_addr;
@@ -219,7 +218,7 @@ int ipxw_mux_mk_ctrl_sock()
 	/* bind the socket */
 	if (bind(ctrl_sock, (struct sockaddr *) &ctrl_addr, ctrl_addr_len) < 0) {
 		close (ctrl_sock);
-		return -errno;
+		return -1;
 	}
 
 	return ctrl_sock;
@@ -274,14 +273,14 @@ int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg)
 		/* receive a bind message */
 		/* this can block if the caller didn't check if data is
 		 * available first */
-		int rcvd_len = recvmsg(ctrl_sock, &msgh, 0);
+		ssize_t rcvd_len = recvmsg(ctrl_sock, &msgh, 0);
 		if (rcvd_len < 0) {
 			break;
 		}
 
 		/* should not happen, but if it does we report the error */
 		if (rcvd_len != sizeof(*bind_msg)) {
-			errno = EMSGSIZE;
+			errno = EREMOTEIO;
 			break;
 		}
 
@@ -324,7 +323,7 @@ int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg)
 		close(data_sock);
 	}
 
-	return -errno;
+	return -1;
 }
 
 ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
@@ -334,7 +333,7 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
 {
 	struct ipxw_mux_msg *rcvd_msg = calloc(1, IPXW_MUX_MSG_LEN);
 	if (rcvd_msg == NULL) {
-		return -errno;
+		return -1;
 	}
 
 	/* receive msg, this can block if the caller didn't make sure that data
@@ -342,13 +341,14 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
 	ssize_t rcvd_msg_len = recv(data_sock, rcvd_msg, IPXW_MUX_MSG_LEN, 0);
 	if (rcvd_msg_len < 0) {
 		free(rcvd_msg);
-		return -errno;
+		return -1;
 	}
 
 	/* must at least receive a full mux msg */
 	if (rcvd_msg_len < sizeof(struct ipxw_mux_msg)) {
 		free(rcvd_msg);
-		return -EMSGSIZE;
+		errno = EREMOTEIO;
+		return -1;
 	}
 
 	switch(rcvd_msg->type) {
@@ -363,20 +363,23 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
 		default:
 			/* invalid message type */
 			free(rcvd_msg);
-			return -EINVAL;
+			errno = EINVAL;
+			return -1;
 	}
 
 	/* check if the data length is correct */
 	if (rcvd_msg->xmit.data_len != rcvd_msg_len - sizeof(struct
 				ipxw_mux_msg)) {
 		free(rcvd_msg);
-		return -EMSGSIZE;
+		errno = EREMOTEIO;
+		return -1;
 	}
 
 	/* tx_msg_cb has to free the buffer if it is not needed anymore, even
 	 * if it returns an error */
 	if (tx_msg_cb(data_sock, rcvd_msg, tx_ctx) < 0) {
-		return -EINVAL;
+		errno = EINVAL;
+		return -1;
 	}
 
 	return rcvd_msg_len;
@@ -446,25 +449,29 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
 ssize_t ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg)
 {
 	if (msg->type != IPXW_MUX_RECV) {
-		return -EINVAL;
+		errno = EINVAL;
+		return -1;
 	}
 
 	if (msg->recv.data_len > IPX_MAX_DATA_LEN) {
-		return -EINVAL;
+		errno = EINVAL;
+		return -1;
 	}
 
 	size_t msg_len = sizeof(struct ipxw_mux_msg) + msg->recv.data_len;
 	if (msg_len > IPXW_MUX_MSG_LEN) {
-		return -EINVAL;
+		errno = EINVAL;
+		return -1;
 	}
 
 	ssize_t sent_len = send(data_sock, msg, msg_len, MSG_DONTWAIT);
 	if (sent_len < 0) {
-		return -errno;
+		return -1;
 	}
 
 	if (sent_len != msg_len) {
-		return -EMSGSIZE;
+		errno = ECOMM;
+		return -1;
 	}
 
 	return msg_len;

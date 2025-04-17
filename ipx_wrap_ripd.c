@@ -171,7 +171,7 @@ static int send_rip_resp(int data_sock, FILE *rtable, struct ipv6_eui64_addr
 	printf("Sending RIP response with %u routes.\n", nentries);
 	ssize_t len = ipxw_mux_xmit(data_sock, &rip_pkt_out.mux_msg);
 	if (len < 0) {
-		fprintf(stderr, "send failed: %s\n", strerror(-len));
+		perror("send");
 		return -1;
 	}
 
@@ -234,7 +234,7 @@ static void handle_rip_pkt(int data_sock, struct ipv6_eui64_addr *my_addr,
 {
 	ssize_t len = ipxw_mux_get_recvd(data_sock, &rip_pkt_in.mux_msg);
 	if (len < 0) {
-		fprintf(stderr, "recv failed: %s\n", strerror(-len));
+		perror("recv");
 		return;
 	}
 
@@ -366,7 +366,7 @@ int main(int argc, char **argv)
 
 	int data_sock = ipxw_mux_bind(bind_msg);
 	if (data_sock < 0) {
-		fprintf(stderr, "bind failed: %s\n", strerror(-data_sock));
+		perror("bind");
 		return 3;
 	}
 	printf("bind successful\n");

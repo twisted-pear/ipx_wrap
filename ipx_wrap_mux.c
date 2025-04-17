@@ -250,7 +250,7 @@ static ssize_t udp_send(struct if_entry *iface)
 	/* didn't send the whole packet */
 	if (len >= 0 && len != pktlen) {
 		len = -1;
-		errno = EMSGSIZE;
+		errno = ECOMM;
 	}
 
 	return len;
@@ -292,7 +292,7 @@ static ssize_t udp_recv(struct if_entry *iface)
 
 		/* need at least the IPX header */
 		if (len < sizeof(struct ipxhdr)) {
-			errno = EMSGSIZE;
+			errno = EREMOTEIO;
 			break;
 		}
 
@@ -354,7 +354,8 @@ static ssize_t recv_msg(int data_sock)
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
-		if (err == -EINTR || err == -EAGAIN || err == -EWOULDBLOCK)  {
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+		{
 			return 0;
 		}
 
@@ -587,7 +588,7 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr)
 	return NULL;
 }
 
-static int handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
+static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 		epoll_fd)
 {
 	/* prepare response msg */
@@ -653,6 +654,8 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 		fprintf(stderr, "bind address not allowed\n");
 		ipxw_mux_send_bind_resp(data_sock, &err_msg);
 		close(data_sock);
+
+		errno = EACCES;
 		return -1;
 	}
 
@@ -769,7 +772,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				/* incoming bind msg */
 				err = handle_bind_msg_sub(iface, ctrl_sock,
 						epoll_fd);
-				if (err < 0) {
+				if (err < 0 && errno != EINTR) {
 					perror("handle binding");
 				}
 
@@ -815,9 +818,8 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 			if (evs[i].events & EPOLLIN) {
 				err = ipxw_mux_do_data(evs[i].data.fd, &tx_msg,
 						&handle_unbind, NULL, NULL);
-				if (err < 0 && err != -EINTR) {
-					fprintf(stderr, "xmitting data: %s\n",
-							strerror(-err));
+				if (err < 0 && errno != EINTR) {
+					perror("xmitting data");
 				} else if (err == 0) {
 					/* unbound */
 					continue;
@@ -985,8 +987,7 @@ int main(int argc, char **argv)
 
 	ctrl_sock = ipxw_mux_mk_ctrl_sock();
 	if (ctrl_sock < 0) {
-		fprintf(stderr, "creating ctrl socket failed: %s\n",
-				strerror(-ctrl_sock));
+		perror("creating ctrl socket");
 		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
 	}
 
@@ -1027,7 +1028,7 @@ int main(int argc, char **argv)
 
 				/* incoming bind msg */
 				err = handle_bind_msg_main(ctrl_sock);
-				if (err < 0) {
+				if (err < 0 && errno != EINTR) {
 					perror("handle binding");
 				}
 
