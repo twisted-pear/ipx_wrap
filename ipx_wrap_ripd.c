@@ -335,7 +335,6 @@ int main(int argc, char **argv)
 	}
 
 	char *if_addr_str = argv[1];
-	// TODO: get ifidx from addr
 
 	struct in6_addr if_addr;
 	if (inet_pton(AF_INET6, if_addr_str, &if_addr) != 1) {
