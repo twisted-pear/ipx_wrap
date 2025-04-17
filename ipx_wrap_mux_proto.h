@@ -104,11 +104,12 @@ ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg);
 /* create the control socket and bind it to the well-known abstract address */
 int ipxw_mux_mk_ctrl_sock();
 
-/* receive bind message and try to enter binding into whatever data structure
- * we use (using the callback), then send ACK or ERR, this blocks on receive if
- * the caller didn't check if data is available */
-int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
-			ipxw_mux_msg_bind *, void *ctx), void *ctx);
+/* send a response to a bind message */
+void ipxw_mux_send_bind_resp(int data_sock, struct ipxw_mux_msg *resp_msg);
+
+/* receive bind message, this blocks on if the caller didn't check if data is
+ * available */
+int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg);
 
 /* receive xmit msgs, turn them into IPX messages and attempt to send them
  * (using transmit_msg_cb), on receiving an unbind msg, unbind the socket

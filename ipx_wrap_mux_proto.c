@@ -225,27 +225,37 @@ int ipxw_mux_mk_ctrl_sock()
 	return ctrl_sock;
 }
 
+void ipxw_mux_send_bind_resp(int data_sock, struct ipxw_mux_msg *resp_msg)
+{
+	/* no error handling or reporting, since there is nothing we or the
+	 * caller can do */
+	if (resp_msg->type != IPXW_MUX_BIND_ERR && resp_msg->type !=
+			IPXW_MUX_BIND_ACK) {
+		return;
+	}
+
+	/* send the reply */
+	ssize_t err;
+	do {
+		err = send(data_sock, resp_msg, sizeof(struct ipxw_mux_msg),
+				MSG_DONTWAIT);
+	} while (err < 0 && errno == EINTR);
+}
+
 /* much of this code was taken from
  * https://man7.org/tlpi/code/online/dist/sockets/scm_rights_recv.c.html */
-int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
-			ipxw_mux_msg_bind *, void *ctx), void *ctx)
+int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg)
 {
-	struct ipxw_mux_msg resp_msg;
-	memset(&resp_msg, 0, sizeof(resp_msg));
-
 	int data_sock = -1;
 
 	do {
-		/* prepare buffer to receive the bind message */
-		struct ipxw_mux_msg bind_msg;
-
 		struct msghdr msgh;
 		msgh.msg_name = NULL;
 		msgh.msg_namelen = 0;
 
 		struct iovec iov;
-		iov.iov_base = &bind_msg;
-		iov.iov_len = sizeof(bind_msg);
+		iov.iov_base = bind_msg;
+		iov.iov_len = sizeof(*bind_msg);
 
 		msgh.msg_iov = &iov;
 		msgh.msg_iovlen = 1;
@@ -270,7 +280,7 @@ int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
 		}
 
 		/* should not happen, but if it does we report the error */
-		if (rcvd_len != sizeof(bind_msg)) {
+		if (rcvd_len != sizeof(*bind_msg)) {
 			errno = EMSGSIZE;
 			break;
 		}
@@ -300,35 +310,14 @@ int ipxw_mux_do_ctrl(int ctrl_sock, int (*record_bind_cb)(int data_sock, struct
 			break;
 		}
 
-		/* from here on out we are ready to send a response */
-		resp_msg.type = IPXW_MUX_BIND_ERR;
-
 		/* validate bind msg */
-		if (bind_msg.type != IPXW_MUX_BIND) {
+		if (bind_msg->type != IPXW_MUX_BIND) {
 			errno = ENOTSUP;
 			break;
 		}
 
-		if (record_bind_cb(data_sock, &bind_msg.bind, ctx) < 0) {
-			errno = EACCES;
-			break;
-		}
-
-		/* send success msg */
-		resp_msg.type = IPXW_MUX_BIND_ACK;
-		/* no error handling, there is nothing we can do */
-		send(data_sock, &resp_msg, sizeof(resp_msg), MSG_DONTWAIT);
-
 		return data_sock;
 	} while (0);
-
-	/* send an error response if the response msg has been prepared */
-	if (resp_msg.type == IPXW_MUX_BIND_ERR) {
-		resp_msg.err.err = errno;
-
-		/* no error handling, we can't do anything about this */
-		send(data_sock, &resp_msg, sizeof(resp_msg), MSG_DONTWAIT);
-	}
 
 	/* close a received socket if an error occurred */
 	if (data_sock >= 0) {

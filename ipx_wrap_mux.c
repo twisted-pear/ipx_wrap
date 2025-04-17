@@ -15,22 +15,20 @@
 #include "ipx_wrap_mux_proto.h"
 
 #define MAX_EPOLL_EVENTS 64
+#define MARKER_PTR_CTRL NULL
+#define MARKER_PTR_UDP ((void *) -1)
 
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct if_entry;
 
 struct bind_entry {
-	/* if the hash table key is the socket */
-	int sock;
-	/* if the hash table key is the address */
-	struct ipx_addr addr;
 	/* if the hash table key is the IPX socket number */
 	__be16 ipx_sock;
 	/* hash entries */
-	UT_hash_handle h_sock;
-	UT_hash_handle h_addr;
 	UT_hash_handle h_ipx_sock;
+	/* the data socket */
+	int sock;
 	/* recvd msgs for this binding's socket */
 	struct ipxw_msg_queue in_queue;
 	/* corresponding interface */
@@ -42,6 +40,20 @@ struct bind_entry {
 	     reserved:6;
 };
 
+struct sub_process {
+	/* net and node IPX addr */
+	struct __attribute__((packed)) {
+		__be32 net;
+		__u8 node[IPX_ADDR_NODE_BYTES];
+	} addr;
+	/* hash entry */
+	UT_hash_handle h_ipx_addr;
+	/* the socket used to talk to the sub-process */
+	int sub_sock;
+	/* the sub-process' PID */
+	pid_t sub_pid;
+};
+
 struct if_entry {
 	/* net and node IPX addr */
 	struct __attribute__((packed)) {
@@ -50,9 +62,6 @@ struct if_entry {
 	} addr;
 	/* the actual UDP socket */
 	int udp_sock;
-	/* hash entry */
-	UT_hash_handle h_ipx_addr;
-	UT_hash_handle h_udp_sock;
 	/* msgs to send */
 	struct ipxw_msg_queue out_queue;
 	/* bindings indexed by the IPX socket */
@@ -61,27 +70,7 @@ struct if_entry {
 	__be32 prefix;
 };
 
-static struct bind_entry *ht_sock_to_bind = NULL;
-static struct bind_entry *ht_addr_to_bind = NULL;
-static struct if_entry *ht_addr_to_iface = NULL;
-static struct if_entry *ht_sock_to_iface = NULL;
-
-static struct bind_entry *get_bind_entry_by_sock(int sock)
-{
-	struct bind_entry *bind;
-
-	HASH_FIND(h_sock, ht_sock_to_bind, &sock, sizeof(int), bind);
-	return bind;
-}
-
-static struct bind_entry *get_bind_entry_by_addr(struct ipx_addr *addr)
-{
-	struct bind_entry *bind;
-
-	HASH_FIND(h_addr, ht_addr_to_bind, addr, sizeof(struct ipx_addr),
-			bind);
-	return bind;
-}
+static struct sub_process *ht_ipx_addr_to_sub = NULL;
 
 static struct bind_entry *get_bind_entry_by_ipx_sock(struct if_entry *iface,
 		__be16 ipx_sock)
@@ -93,91 +82,80 @@ static struct bind_entry *get_bind_entry_by_ipx_sock(struct if_entry *iface,
 	return bind;
 }
 
-static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
-		*ctx)
+static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
+		struct ipxw_mux_msg_bind *bind_msg)
 {
 	/* illegal network bindings */
 	if (bind_msg->addr.net == IPX_NET_LOCAL) {
 		fprintf(stderr, "binding to local net not allowed\n");
-		return -1;
+		return false;
 	}
 	if (bind_msg->addr.net == IPX_NET_ALL_ROUTES) {
 		fprintf(stderr, "binding to all routes net not allowed\n");
-		return -1;
+		return false;
 	}
 	if (bind_msg->addr.net == IPX_NET_DEFAULT_ROUTE) {
 		fprintf(stderr, "binding to default route net not allowed\n");
-		return -1;
+		return false;
 	}
 
 	/* illegal node bindings */
 	if (memcmp(bind_msg->addr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES) ==
 			0) {
 		fprintf(stderr, "binding to broadcast node not allowed\n");
-		return -1;
+		return false;
 	}
 
-	/* available addresses */
-	struct if_entry *avail = NULL;
-	HASH_FIND(h_ipx_addr, ht_addr_to_iface, &bind_msg->addr,
-			sizeof(bind_msg->addr.net) +
-			sizeof(bind_msg->addr.node), avail);
-	if (avail == NULL) {
+	/* not sure how we got this message, but we can only bind to the
+	 * address of our interface */
+	if (iface->addr.net != bind_msg->addr.net) {
 		fprintf(stderr, "bind address not allowed\n");
-		return -1;
+		return false;
+	}
+	if (memcmp(iface->addr.node, bind_msg->addr.node, IPX_ADDR_NODE_BYTES)
+			!= 0) {
+		fprintf(stderr, "bind address not allowed\n");
+		return false;
 	}
 
-	/* check if someone already bound to this address */
-	struct bind_entry *e = get_bind_entry_by_addr(&bind_msg->addr);
+	/* socket already in use */
+	struct bind_entry *e = get_bind_entry_by_ipx_sock(iface,
+			bind_msg->addr.sock);
 	if (e != NULL) {
 		fprintf(stderr, "binding already in use\n");
-		return -1;
+		return false;
 	}
-
-	/* this should never happen because file descriptors should be unique
-	 * within the process */
-	e = get_bind_entry_by_sock(data_sock);
-	assert(e == NULL);
-
-	/* this should never happen because we already matched against the full
-	 * address and the iface depends on net and node address */
-	e = get_bind_entry_by_ipx_sock(avail, bind_msg->addr.sock);
-	assert(e == NULL);
 
 	/* make and fill new binding entry */
 	e = calloc(1, sizeof(struct bind_entry));
 	if (e == NULL) {
 		perror("allocating binding");
-		return -1;
+		return false;
 	}
 
 	e->sock = data_sock;
-	e->addr = bind_msg->addr;
 	e->ipx_sock = bind_msg->addr.sock;
-	e->iface = avail;
+	e->iface = iface;
 	e->pkt_type = bind_msg->pkt_type;
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
 	STAILQ_INIT(&e->in_queue);
 
 	/* register for epoll */
-	int epoll_fd = *((int *) ctx);
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
 		.data = {
-			.fd = data_sock
+			.ptr = e
 		}
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, data_sock, &ev) < 0) {
 		perror("registering for event polling");
 		free(e);
-		return -1;
+		return false;
 	}
 
 	/* save binding */
-	HASH_ADD(h_sock, ht_sock_to_bind, sock, sizeof(int), e);
-	HASH_ADD(h_addr, ht_addr_to_bind, addr, sizeof(struct ipx_addr), e);
-	HASH_ADD(h_ipx_sock, avail->ht_ipx_sock_to_bind, ipx_sock, sizeof(__be16), e);
+	HASH_ADD(h_ipx_sock, iface->ht_ipx_sock_to_bind, ipx_sock, sizeof(__be16), e);
 
 	/* show the new binding in full */
 	printf("bound %d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
@@ -193,11 +171,13 @@ static int record_bind(int data_sock, struct ipxw_mux_msg_bind *bind_msg, void
 	}
 	printf("recv bcasts: %s\n", bind_msg->recv_bcast ? "yes" : "no");
 
-	return 0;
+	return true;
 }
 
-static ssize_t udp_send(int udp_sock, struct if_entry *iface)
+static ssize_t udp_send(struct if_entry *iface)
 {
+	int udp_sock = iface->udp_sock;
+
 	/* no msgs to send */
 	if (STAILQ_EMPTY(&iface->out_queue)) {
 		return 0;
@@ -259,24 +239,23 @@ static ssize_t udp_send(int udp_sock, struct if_entry *iface)
 
 static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 {
-	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
-	if (be_xmit == NULL) {
-		free(msg);
-		return -1;
-	}
+	struct bind_entry *be_xmit = ctx;
+	assert(be_xmit != NULL);
 
 	assert(msg->type == IPXW_MUX_XMIT);
 
-	msg->xmit.ssock = be_xmit->addr.sock;
+	msg->xmit.ssock = be_xmit->ipx_sock;
 
 	/* queue the message on the interface */
 	STAILQ_INSERT_TAIL(&be_xmit->iface->out_queue, msg, q_entry);
 	return 0;
 }
 
-static ssize_t udp_recv(int udp_sock, struct if_entry *iface)
+static ssize_t udp_recv(struct if_entry *iface)
 {
 	ssize_t ret = -1;
+
+	int udp_sock = iface->udp_sock;
 
 	struct ipxhdr *ipx_msg = malloc(IPXW_MUX_MSG_LEN);
 	if (ipx_msg == NULL) {
@@ -335,17 +314,9 @@ static ssize_t udp_recv(int udp_sock, struct if_entry *iface)
 	return ret;
 }
 
-static ssize_t recv_msg(int data_sock)
+static ssize_t recv_msg(struct bind_entry *be)
 {
-	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
-
-	/* socket could be polled but is not registered anymore, do nothing */
-	if (be == NULL) {
-		return 0;
-	}
-
-	/* corrupt data structures? */
-	assert(be->sock == data_sock);
+	assert(be != NULL);
 
 	/* no msgs to receive */
 	if (STAILQ_EMPTY(&be->in_queue)) {
@@ -353,7 +324,7 @@ static ssize_t recv_msg(int data_sock)
 	}
 
 	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->in_queue);
-	ssize_t err = ipxw_mux_recv(data_sock, msg);
+	ssize_t err = ipxw_mux_recv(be->sock, msg);
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
@@ -371,7 +342,7 @@ static ssize_t recv_msg(int data_sock)
 	return err;
 }
 
-static void unbind_entry(struct bind_entry *e, int epoll_fd)
+static void unbind_entry(struct bind_entry *e)
 {
 	/* remove all undelivered messages */
 	while (!STAILQ_EMPTY(&e->in_queue)) {
@@ -381,15 +352,9 @@ static void unbind_entry(struct bind_entry *e, int epoll_fd)
 	}
 
 	/* remove the bind entry from all data structures */
-	HASH_DELETE(h_sock, ht_sock_to_bind, e);
-	HASH_DELETE(h_addr, ht_addr_to_bind, e);
 	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
 
 	int sock = e->sock;
-
-	/* deregister from event polling, no error handling, as there is
-	 * nothing we can do */
-	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock, NULL);
 
 	/* close the socket and free */
 	close(sock);
@@ -400,40 +365,74 @@ static void unbind_entry(struct bind_entry *e, int epoll_fd)
 
 static void handle_unbind(int data_sock, void *ctx)
 {
-	struct bind_entry *e = get_bind_entry_by_sock(data_sock);
-	if (e == NULL) {
-		fprintf(stderr, "no binding found for %d\n", data_sock);
-		return;
-	}
+	struct bind_entry *e = ctx;
+	assert(e != NULL);
 
-	int epoll_fd = *((int *) ctx);
-	unbind_entry(e, epoll_fd);
+	unbind_entry(e);
 }
 
-static _Noreturn void cleanup_and_exit(int epoll_fd, int ctrl_sock, int exit_code)
+static void cleanup_sub_process(struct sub_process *sub)
 {
+	assert(sub != NULL);
+	assert(sub->sub_sock >= 0);
+	assert(sub->sub_pid >= 0);
+
+	/* close socket */
+	close(sub->sub_sock);
+
+	/* remove the sub-process entry */
+	HASH_DELETE(h_ipx_addr, ht_ipx_addr_to_sub, sub);
+	free(sub);
+}
+
+static void cleanup_sub_processes()
+{
+	struct sub_process *se;
+	struct sub_process *stmp;
+	HASH_ITER(h_ipx_addr, ht_ipx_addr_to_sub, se, stmp) {
+		cleanup_sub_process(se);
+	}
+}
+
+static void cleanup_iface(struct if_entry *iface)
+{
+	/* close UDP socket */
+	close(iface->udp_sock);
+
 	/* remove all bindings */
 	struct bind_entry *e;
 	struct bind_entry *tmp;
-	HASH_ITER(h_sock, ht_sock_to_bind, e, tmp) {
-		unbind_entry(e, epoll_fd);
+	HASH_ITER(h_ipx_sock, iface->ht_ipx_sock_to_bind, e, tmp) {
+		unbind_entry(e);
 	}
 
-	/* remove all interfaces */
-	struct if_entry *ie;
-	struct if_entry *itmp;
-	HASH_ITER(h_ipx_addr, ht_addr_to_iface, ie, itmp) {
-		HASH_DELETE(h_ipx_addr, ht_addr_to_iface, ie);
-		HASH_DELETE(h_udp_sock, ht_sock_to_iface, ie);
-		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ie->udp_sock, NULL);
-		free(ie);
+	/* remove all undelivered messages */
+	while (!STAILQ_EMPTY(&iface->out_queue)) {
+		struct ipxw_mux_msg *msg = STAILQ_FIRST(&iface->out_queue);
+		STAILQ_REMOVE_HEAD(&iface->out_queue, q_entry);
+		free(msg);
 	}
 
+	free(iface);
+}
+
+static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
+		int ctrl_sock, int exit_code)
+{
+	/* remove all sub-processes (if any) */
+	cleanup_sub_processes();
+
+	/* remove the interface (if any) */
+	if (iface != NULL) {
+		cleanup_iface(iface);
+	}
+
+	/* close down control socket */
 	if (ctrl_sock >= 0) {
-		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ctrl_sock, NULL);
 		close(ctrl_sock);
 	}
 
+	/* close down epoll fd */
 	if (epoll_fd >= 0) {
 		close(epoll_fd);
 	}
@@ -489,16 +488,15 @@ static int mk_udp_socket(char *ifname)
 	return udp_sock;
 }
 
-static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd)
+static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr)
 {
 	struct if_entry *iface = calloc(1, sizeof(struct if_entry));
 	if (iface == NULL) {
-		return false;
+		return NULL;
 	}
 
 	/* prepare data that can be prepared without additional work */
 	iface->prefix = ipv6_addr->prefix;
-
 	iface->addr.net = ipv6_addr->ipx_net;
 	memcpy(iface->addr.node, ipv6_addr->ipx_node_fst,
 			sizeof(ipv6_addr->ipx_node_fst));
@@ -508,22 +506,13 @@ static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd)
 
 	STAILQ_INIT(&iface->out_queue);
 
-	struct if_entry *iface_found = NULL;
-	HASH_FIND(h_ipx_addr, ht_addr_to_iface, &iface->addr,
-			sizeof(iface->addr), iface_found);
-	if (iface_found != NULL) {
-		/* interface for IPX addr already exists */
-		free(iface);
-		return true;
-	}
-
 	/* iterate over all addresses to find the interface to our IPv6 addr */
 	struct ifaddrs *addrs;
 	struct ifaddrs *iter;
 
 	if (getifaddrs(&addrs) < 0) {
 		free(iface);
-		return false;
+		return NULL;
 	}
 
 	/* if the loop exits normally, we were unable to find the IPv6 addr */
@@ -554,38 +543,375 @@ static bool add_iface(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd)
 			break;
 		}
 
-		struct epoll_event ev = {
-			.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
-			.data = {
-				.fd = udp_sock
-			}
-		};
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, udp_sock, &ev) < 0) {
-			close(udp_sock);
-			break;
-		}
+		iface->udp_sock = udp_sock;
 
 		freeifaddrs(addrs);
-
-		/* this should not happen, as file descriptors are unique
-		 * within the process */
-		HASH_FIND(h_udp_sock, ht_sock_to_iface, &udp_sock, sizeof(int),
-				iface_found);
-		assert(iface_found == NULL);
-
-		/* add new interface entry */
-		iface->udp_sock = udp_sock;
-		HASH_ADD(h_ipx_addr, ht_addr_to_iface, addr,
-				sizeof(iface->addr), iface);
-		HASH_ADD(h_udp_sock, ht_sock_to_iface, udp_sock, sizeof(int),
-				iface);
-		return true;
+		return iface;
 	}
 
 	/* address not found or other error */
 
 	freeifaddrs(addrs);
 	free(iface);
+	return NULL;
+}
+
+static int handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
+		epoll_fd)
+{
+	/* prepare response msg */
+	struct ipxw_mux_msg resp_msg;
+	memset(&resp_msg, 0, sizeof(struct ipxw_mux_msg));
+	resp_msg.type = IPXW_MUX_BIND_ERR;
+	resp_msg.err.err = EACCES;
+
+	struct ipxw_mux_msg bind_msg;
+
+	int data_sock = ipxw_mux_recv_bind_msg(ctrl_sock, &bind_msg);
+	/* couldn't even receive the bind msg, just quit */
+	if (data_sock < 0) {
+		return -1;
+	}
+	assert(bind_msg.type == IPXW_MUX_BIND);
+
+	/* binding failed, send error response */
+	if (!record_bind(iface, data_sock, epoll_fd, &bind_msg.bind)) {
+		ipxw_mux_send_bind_resp(data_sock, &resp_msg);
+		close(data_sock);
+
+		errno = EACCES;
+		return -1;
+	}
+
+	/* binding succeeded, send ack response */
+	resp_msg.err.err = 0;
+	resp_msg.type = IPXW_MUX_BIND_ACK;
+	ipxw_mux_send_bind_resp(data_sock, &resp_msg);
+
+	return 0;
+}
+
+static ssize_t handle_bind_msg_main(int ctrl_sock)
+{
+	/* prepare our error msg, just in case */
+	struct ipxw_mux_msg err_msg;
+	memset(&err_msg, 0, sizeof(struct ipxw_mux_msg));
+	err_msg.type = IPXW_MUX_BIND_ERR;
+	err_msg.err.err = EACCES;
+
+	struct ipxw_mux_msg bind_msg;
+
+	int data_sock = ipxw_mux_recv_bind_msg(ctrl_sock, &bind_msg);
+	/* couldn't even receive the bind msg, just quit */
+	if (data_sock < 0) {
+		return -1;
+	}
+	assert(bind_msg.type == IPXW_MUX_BIND);
+
+	struct sub_process *sub;
+	struct __attribute__((packed)) {
+		__be32 net;
+		__u8 node[IPX_ADDR_NODE_BYTES];
+	} addr;
+	addr.net = bind_msg.bind.addr.net;
+	memcpy(addr.node, bind_msg.bind.addr.node, IPX_ADDR_NODE_BYTES);
+	HASH_FIND(h_ipx_addr, ht_ipx_addr_to_sub, &addr, sizeof(addr), sub);
+
+	/* no sub-process listening on the desired interface */
+	if (sub == NULL) {
+		fprintf(stderr, "bind address not allowed\n");
+		ipxw_mux_send_bind_resp(data_sock, &err_msg);
+		close(data_sock);
+		return -1;
+	}
+
+	/* try to send the data socket to the appropriate sub-process */
+
+	/* much of this code was taken from
+	 * https://man7.org/tlpi/code/online/dist/sockets/scm_rights_send.c.html
+	 */
+
+	struct msghdr msgh;
+	msgh.msg_name = NULL;
+	msgh.msg_namelen = 0;
+
+	/* send the full message */
+	struct iovec iov;
+	iov.iov_base = &bind_msg;
+	iov.iov_len = sizeof(bind_msg);
+
+	msgh.msg_iov = &iov;
+	msgh.msg_iovlen = 1;
+
+	/* prepare the ancillary data buffer */
+	union {
+		char buf[CMSG_SPACE(sizeof(int))]; /* Space large
+						      enough to hold an
+						      'int' */
+		struct cmsghdr align;
+	} ctrl_msg;
+	memset(ctrl_msg.buf, 0, sizeof(ctrl_msg.buf));
+
+	msgh.msg_control = ctrl_msg.buf;
+	msgh.msg_controllen = sizeof(ctrl_msg.buf);
+
+	/* prepare ctrl msg header */
+	struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
+	cmsgp->cmsg_level = SOL_SOCKET;
+	cmsgp->cmsg_type = SCM_RIGHTS;
+
+	/* store the socket fd we want to send */
+	cmsgp->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(cmsgp), &data_sock, sizeof(int));
+
+	/* send the ctrl msg */
+	/* should always transmit the entire msg or nothing */
+	ssize_t err;
+	do {
+		err = sendmsg(sub->sub_sock, &msgh, MSG_DONTWAIT);
+	} while (err < 0 && errno == EINTR);
+
+	if (err < 0) {
+		fprintf(stderr, "passing binding to sub-process failed\n");
+		err_msg.err.err = errno;
+		ipxw_mux_send_bind_resp(data_sock, &err_msg);
+		close(data_sock);
+		return -1;
+	}
+
+	close(data_sock);
+	return 0;
+}
+
+static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
+{
+	int epoll_fd = -1;
+
+	epoll_fd = epoll_create1(0);
+	if (epoll_fd < 0) {
+		perror("create epoll fd");
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 4);
+	}
+
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+		.data = {
+			.ptr = MARKER_PTR_CTRL
+		}
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
+		perror("registering ctrl socket for event polling");
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
+	}
+
+	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
+	ev.data.ptr = MARKER_PTR_UDP;
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->udp_sock, &ev) < 0) {
+		perror("registering UDP socket for event polling");
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
+	}
+
+	ssize_t err;
+	struct epoll_event evs[MAX_EPOLL_EVENTS];
+	while (1) {
+		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
+		if (n_fds < 0) {
+			if (errno == -EINTR) {
+				continue;
+			}
+
+			perror("event polling");
+			cleanup_and_exit(iface, epoll_fd, ctrl_sock, 6);
+		}
+
+		int i;
+		for (i = 0; i < n_fds; i++) {
+			/* ctrl socket */
+			if (evs[i].data.ptr == MARKER_PTR_CTRL) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "control socket error\n");
+					cleanup_and_exit(iface, epoll_fd,
+							ctrl_sock, 7);
+				}
+
+				/* incoming bind msg */
+				err = handle_bind_msg_sub(iface, ctrl_sock,
+						epoll_fd);
+				if (err < 0) {
+					perror("handle binding");
+				}
+
+				continue;
+			}
+
+			/* UDP socket */
+			if (evs[i].data.ptr == MARKER_PTR_UDP) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "UDP socket error\n");
+					cleanup_and_exit(iface, epoll_fd,
+							ctrl_sock, 7);
+				}
+
+				/* can recv */
+				if (evs[i].events & EPOLLIN) {
+					err = udp_recv(iface);
+					if (err < 0 && errno != EINTR) {
+						perror("UDP recv");
+					} else if (err == 0) {
+						/* nobody was interested */
+					}
+				}
+
+				/* can xmit */
+				if (evs[i].events & EPOLLOUT) {
+					err = udp_send(iface);
+					if (err < 0) {
+						perror("UDP send");
+					} else if (err == 0) {
+						/* nothing happend */
+					}
+				}
+
+				continue;
+
+			}
+
+			/* one of the data sockets */
+
+			/* something went wrong, unbind */
+			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+				handle_unbind(-1, evs[i].data.ptr);
+				continue;
+			}
+
+			/* can xmit */
+			if (evs[i].events & EPOLLIN) {
+				struct bind_entry *b = evs[i].data.ptr;
+				err = ipxw_mux_do_data(b->sock, &tx_msg,
+						&handle_unbind, b, b);
+				if (err < 0 && errno != EINTR) {
+					perror("xmitting data");
+				} else if (err == 0) {
+					// unbound
+				}
+			}
+
+			/* can recv */
+			if (evs[i].events & EPOLLOUT) {
+				struct bind_entry *b = evs[i].data.ptr;
+				err = recv_msg(b);
+				if (err < 0) {
+					/* get rid of the client */
+					perror("recving data");
+					handle_unbind(b->sock, b);
+				} else if (err == 0) {
+					/* nothing happened */
+				}
+			}
+		}
+	}
+
+	cleanup_and_exit(iface, epoll_fd, ctrl_sock, 0);
+}
+
+static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
+		ctrl_sock)
+{
+	struct sub_process *sub = calloc(1, sizeof(struct sub_process));
+	if (sub == NULL) {
+		return false;
+	}
+
+	sub->addr.net = ipv6_addr->ipx_net;
+	memcpy(sub->addr.node, ipv6_addr->ipx_node_fst,
+			sizeof(ipv6_addr->ipx_node_fst));
+	memcpy(sub->addr.node + sizeof(ipv6_addr->ipx_node_fst),
+			ipv6_addr->ipx_node_snd,
+			sizeof(ipv6_addr->ipx_node_snd));
+	sub->sub_sock = -1;
+
+	struct sub_process *sub_found = NULL;
+	HASH_FIND(h_ipx_addr, ht_ipx_addr_to_sub, &sub->addr,
+			sizeof(sub->addr), sub_found);
+	if (sub_found != NULL) {
+		/* sub-process for IPX addr already exists */
+		free(sub);
+		return true;
+	}
+
+	int sv[2] = { -1, -1 };
+	struct if_entry *iface = NULL;
+	do {
+		if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0) {
+			break;
+		}
+		sub->sub_sock = sv[0];
+
+		struct epoll_event ev = {
+			.events = EPOLLERR | EPOLLHUP,
+			.data = {
+				.ptr = sub
+			}
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sub->sub_sock, &ev) < 0)
+		{
+			break;
+		}
+
+		iface = mk_iface(ipv6_addr);
+		if (iface == NULL) {
+			break;
+		}
+
+		int child_pid = fork();
+		if (child_pid < 0) {
+			break;
+		}
+
+		if (child_pid == 0) {
+			/* child */
+
+			/* delete the created sub-process entry */
+			close(sub->sub_sock);
+			free(sub);
+
+			/* close unused sockets */
+			close(ctrl_sock);
+			close(epoll_fd);
+
+			/* get rid of all previously created sub-process entries */
+			cleanup_sub_processes();
+
+			ctrl_sock = sv[1];
+
+			/* doesn't return */
+			do_sub_process(iface, ctrl_sock);
+		}
+
+		/* parent */
+
+		sub->sub_pid = child_pid;
+
+		cleanup_iface(iface);
+		close(sv[1]);
+
+		/* add new sub-process entry */
+		HASH_ADD(h_ipx_addr, ht_ipx_addr_to_sub, addr, sizeof(sub->addr), sub);
+		return true;
+	} while (0);
+
+	if (sv[1] >= 0) {
+		close(sv[1]);
+	}
+	if (iface != NULL) {
+		cleanup_iface(iface);
+	}
+	if (sub->sub_sock >= 0) {
+		close(sub->sub_sock);
+	}
+	free(sub);
 
 	return false;
 }
@@ -607,7 +933,7 @@ int main(int argc, char **argv)
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
-		cleanup_and_exit(epoll_fd, ctrl_sock, 2);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 2);
 	}
 
 	/* save all the IPX addresses we manage in the hash */
@@ -618,9 +944,9 @@ int main(int argc, char **argv)
 			usage();
 		}
 
-		if (!add_iface(&addr_buf, epoll_fd)) {
-			perror("adding interfaces");
-			cleanup_and_exit(epoll_fd, ctrl_sock, 3);
+		if (!add_sub(&addr_buf, epoll_fd, ctrl_sock)) {
+			perror("adding sub-process");
+			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
 		}
 	}
 
@@ -628,18 +954,18 @@ int main(int argc, char **argv)
 	if (ctrl_sock < 0) {
 		fprintf(stderr, "creating ctrl socket failed: %s\n",
 				strerror(-ctrl_sock));
-		cleanup_and_exit(epoll_fd, ctrl_sock, 4);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
 	}
 
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
 		.data = {
-			.fd = ctrl_sock
+			.ptr = MARKER_PTR_CTRL
 		}
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
 		perror("registering ctrl socket for event polling");
-		cleanup_and_exit(epoll_fd, ctrl_sock, 5);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 5);
 	}
 
 	ssize_t err;
@@ -652,23 +978,22 @@ int main(int argc, char **argv)
 			}
 
 			perror("event polling");
-			cleanup_and_exit(epoll_fd, ctrl_sock, 6);
+			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
 		}
 
 		int i;
 		for (i = 0; i < n_fds; i++) {
 			/* ctrl socket */
-			if (evs[i].data.fd == ctrl_sock) {
+			if (evs[i].data.ptr == MARKER_PTR_CTRL) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
-					cleanup_and_exit(epoll_fd, ctrl_sock,
-							7);
+					cleanup_and_exit(NULL, epoll_fd,
+							ctrl_sock, 7);
 				}
 
 				/* incoming bind msg */
-				err = ipxw_mux_do_ctrl(ctrl_sock, &record_bind,
-						&epoll_fd);
+				err = handle_bind_msg_main(ctrl_sock);
 				if (err < 0) {
 					perror("handle binding");
 				}
@@ -676,75 +1001,18 @@ int main(int argc, char **argv)
 				continue;
 			}
 
-			/* one of the UDP sockets */
-			struct if_entry *iface;
-			HASH_FIND(h_udp_sock, ht_sock_to_iface,
-					&evs[i].data.fd, sizeof(int), iface);
-			if (iface != NULL) {
-				/* something went wrong, unbind */
-				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					// TODO: think about what to do here
-					continue;
-				}
+			/* one of the sub-process sockets */
 
-				/* can recv */
-				if (evs[i].events & EPOLLIN) {
-					err = udp_recv(evs[i].data.fd, iface);
-					if (err < 0 && errno != EINTR) {
-						perror("UDP recv");
-					} else if (err == 0) {
-						/* nobody was interested */
-					}
-				}
-
-				/* can xmit */
-				if (evs[i].events & EPOLLOUT) {
-					err = udp_send(evs[i].data.fd, iface);
-					if (err < 0) {
-						perror("UDP send");
-					} else if (err == 0) {
-						/* nothing happend */
-					}
-				}
-
-				continue;
-			}
-
-			/* one of the data sockets */
-
-			/* something went wrong, unbind */
+			/* something went wrong, remove sub-process */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-				handle_unbind(evs[i].data.fd, &epoll_fd);
+				fprintf(stderr, "sub process died\n");
+				cleanup_sub_process(evs[i].data.ptr);
 				continue;
-			}
-
-			/* can xmit */
-			if (evs[i].events & EPOLLIN) {
-				err = ipxw_mux_do_data(evs[i].data.fd, &tx_msg,
-						&handle_unbind, NULL,
-						&epoll_fd);
-				if (err < 0 && errno != EINTR) {
-					perror("xmitting data");
-				} else if (err == 0) {
-					// unbound
-				}
-			}
-
-			/* can recv */
-			if (evs[i].events & EPOLLOUT) {
-				err = recv_msg(evs[i].data.fd);
-				if (err < 0) {
-					/* get rid of the client */
-					perror("recving data");
-					handle_unbind(evs[i].data.fd, &epoll_fd);
-				} else if (err == 0) {
-					/* nothing happened */
-				}
 			}
 		}
 	}
 
-	cleanup_and_exit(epoll_fd, ctrl_sock, 0);
+	cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 0);
 
 	return 0;
 }
