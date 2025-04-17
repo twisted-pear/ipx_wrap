@@ -15,8 +15,6 @@
 #include "ipx_wrap_mux_proto.h"
 
 #define MAX_EPOLL_EVENTS 64
-#define MARKER_PTR_CTRL NULL
-#define MARKER_PTR_UDP ((void *) -1)
 
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
@@ -25,10 +23,11 @@ struct if_entry;
 struct bind_entry {
 	/* if the hash table key is the IPX socket number */
 	__be16 ipx_sock;
-	/* hash entries */
-	UT_hash_handle h_ipx_sock;
 	/* the data socket */
 	int sock;
+	/* hash entries */
+	UT_hash_handle h_ipx_sock;
+	UT_hash_handle hh; /* by socket */
 	/* recvd msgs for this binding's socket */
 	struct ipxw_msg_queue in_queue;
 	/* corresponding interface */
@@ -46,10 +45,11 @@ struct sub_process {
 		__be32 net;
 		__u8 node[IPX_ADDR_NODE_BYTES];
 	} addr;
-	/* hash entry */
-	UT_hash_handle h_ipx_addr;
 	/* the socket used to talk to the sub-process */
 	int sub_sock;
+	/* hash entry */
+	UT_hash_handle h_ipx_addr;
+	UT_hash_handle hh; /* by socket */
 	/* the sub-process' PID */
 	pid_t sub_pid;
 };
@@ -70,7 +70,17 @@ struct if_entry {
 	__be32 prefix;
 };
 
+static struct bind_entry *ht_sock_to_bind = NULL;
 static struct sub_process *ht_ipx_addr_to_sub = NULL;
+static struct sub_process *ht_sock_to_sub = NULL;
+
+static struct bind_entry *get_bind_entry_by_sock(int sock)
+{
+	struct bind_entry *bind;
+
+	HASH_FIND_INT(ht_sock_to_bind, &sock, bind);
+	return bind;
+}
 
 static struct bind_entry *get_bind_entry_by_ipx_sock(struct if_entry *iface,
 		__be16 ipx_sock)
@@ -80,6 +90,14 @@ static struct bind_entry *get_bind_entry_by_ipx_sock(struct if_entry *iface,
 	HASH_FIND(h_ipx_sock, iface->ht_ipx_sock_to_bind, &ipx_sock,
 			sizeof(__be16), bind);
 	return bind;
+}
+
+static struct sub_process *get_sub_process_by_sock(int sock)
+{
+	struct sub_process *sub;
+
+	HASH_FIND_INT(ht_sock_to_sub, &sock, sub);
+	return sub;
 }
 
 static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
@@ -145,7 +163,7 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
 		.data = {
-			.ptr = e
+			.fd = data_sock
 		}
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, data_sock, &ev) < 0) {
@@ -156,6 +174,7 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 
 	/* save binding */
 	HASH_ADD(h_ipx_sock, iface->ht_ipx_sock_to_bind, ipx_sock, sizeof(__be16), e);
+	HASH_ADD_INT(ht_sock_to_bind, sock, e);
 
 	/* show the new binding in full */
 	printf("bound %d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
@@ -239,8 +258,11 @@ static ssize_t udp_send(struct if_entry *iface)
 
 static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 {
-	struct bind_entry *be_xmit = ctx;
-	assert(be_xmit != NULL);
+	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
+	if (be_xmit == NULL) {
+		free(msg);
+		return -1;
+	}
 
 	assert(msg->type == IPXW_MUX_XMIT);
 
@@ -314,9 +336,13 @@ static ssize_t udp_recv(struct if_entry *iface)
 	return ret;
 }
 
-static ssize_t recv_msg(struct bind_entry *be)
+static ssize_t recv_msg(int data_sock)
 {
-	assert(be != NULL);
+	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
+	if (be == NULL) {
+		/* already unbound */
+		return 0;
+	}
 
 	/* no msgs to receive */
 	if (STAILQ_EMPTY(&be->in_queue)) {
@@ -353,6 +379,7 @@ static void unbind_entry(struct bind_entry *e)
 
 	/* remove the bind entry from all data structures */
 	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
+	HASH_DEL(ht_sock_to_bind, e);
 
 	int sock = e->sock;
 
@@ -365,8 +392,11 @@ static void unbind_entry(struct bind_entry *e)
 
 static void handle_unbind(int data_sock, void *ctx)
 {
-	struct bind_entry *e = ctx;
-	assert(e != NULL);
+	struct bind_entry *e = get_bind_entry_by_sock(data_sock);
+	if (e == NULL) {
+		/* already unbound */
+		return;
+	}
 
 	unbind_entry(e);
 }
@@ -382,6 +412,7 @@ static void cleanup_sub_process(struct sub_process *sub)
 
 	/* remove the sub-process entry */
 	HASH_DELETE(h_ipx_addr, ht_ipx_addr_to_sub, sub);
+	HASH_DEL(ht_sock_to_sub, sub);
 	free(sub);
 }
 
@@ -696,7 +727,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
 		.data = {
-			.ptr = MARKER_PTR_CTRL
+			.fd = ctrl_sock
 		}
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
@@ -705,7 +736,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 	}
 
 	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
-	ev.data.ptr = MARKER_PTR_UDP;
+	ev.data.fd = iface->udp_sock;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->udp_sock, &ev) < 0) {
 		perror("registering UDP socket for event polling");
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
@@ -727,7 +758,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		int i;
 		for (i = 0; i < n_fds; i++) {
 			/* ctrl socket */
-			if (evs[i].data.ptr == MARKER_PTR_CTRL) {
+			if (evs[i].data.fd == ctrl_sock) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
@@ -746,7 +777,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 			}
 
 			/* UDP socket */
-			if (evs[i].data.ptr == MARKER_PTR_UDP) {
+			if (evs[i].data.fd == iface->udp_sock) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "UDP socket error\n");
@@ -780,35 +811,36 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* one of the data sockets */
 
-			/* something went wrong, unbind */
-			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-				handle_unbind(-1, evs[i].data.ptr);
-				continue;
-			}
-
 			/* can xmit */
 			if (evs[i].events & EPOLLIN) {
-				struct bind_entry *b = evs[i].data.ptr;
-				err = ipxw_mux_do_data(b->sock, &tx_msg,
-						&handle_unbind, b, b);
-				if (err < 0 && errno != EINTR) {
-					perror("xmitting data");
+				err = ipxw_mux_do_data(evs[i].data.fd, &tx_msg,
+						&handle_unbind, NULL, NULL);
+				if (err < 0 && err != -EINTR) {
+					fprintf(stderr, "xmitting data: %s\n",
+							strerror(-err));
 				} else if (err == 0) {
-					// unbound
+					/* unbound */
+					continue;
 				}
 			}
 
 			/* can recv */
 			if (evs[i].events & EPOLLOUT) {
-				struct bind_entry *b = evs[i].data.ptr;
-				err = recv_msg(b);
+				err = recv_msg(evs[i].data.fd);
 				if (err < 0) {
 					/* get rid of the client */
 					perror("recving data");
-					handle_unbind(b->sock, b);
+					handle_unbind(evs[i].data.fd, NULL);
+					continue;
 				} else if (err == 0) {
 					/* nothing happened */
 				}
+			}
+
+			/* something went wrong, unbind */
+			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+				handle_unbind(evs[i].data.fd, NULL);
+				continue;
 			}
 		}
 	}
@@ -852,7 +884,7 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 		struct epoll_event ev = {
 			.events = EPOLLERR | EPOLLHUP,
 			.data = {
-				.ptr = sub
+				.fd = sub->sub_sock
 			}
 		};
 		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sub->sub_sock, &ev) < 0)
@@ -899,6 +931,7 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 
 		/* add new sub-process entry */
 		HASH_ADD(h_ipx_addr, ht_ipx_addr_to_sub, addr, sizeof(sub->addr), sub);
+		HASH_ADD_INT(ht_sock_to_sub, sub_sock, sub);
 		return true;
 	} while (0);
 
@@ -960,7 +993,7 @@ int main(int argc, char **argv)
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
 		.data = {
-			.ptr = MARKER_PTR_CTRL
+			.fd = ctrl_sock
 		}
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
@@ -984,7 +1017,7 @@ int main(int argc, char **argv)
 		int i;
 		for (i = 0; i < n_fds; i++) {
 			/* ctrl socket */
-			if (evs[i].data.ptr == MARKER_PTR_CTRL) {
+			if (evs[i].data.fd == ctrl_sock) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
@@ -1006,7 +1039,13 @@ int main(int argc, char **argv)
 			/* something went wrong, remove sub-process */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 				fprintf(stderr, "sub process died\n");
-				cleanup_sub_process(evs[i].data.ptr);
+				struct sub_process *sub =
+					get_sub_process_by_sock(evs[i].data.fd);
+				/* already deleted */
+				if (sub == NULL) {
+					continue;
+				}
+				cleanup_sub_process(sub);
 				continue;
 			}
 		}
