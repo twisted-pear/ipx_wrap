@@ -24,8 +24,11 @@
 #define IPV6_HOP_LIMIT_MAX 16
 #define IPX_TC_MAX 16
 
-#define IPX_MAX_PKTLEN (65535-17) /* should be 65535 but this is the largest
-				     value I got past the verifier */
+#define IPX_MAX_PKTLEN (65535 - sizeof(struct udphdr)) /* this is the largest
+							  that will fit into a
+							  UDP packet without
+							  extension header
+							  trickery */
 
 #define IPX_TO_IPV6_REINJECT_MARK 0xdead4774
 
@@ -104,9 +107,6 @@ static __always_inline int parse_ipxhdr(struct hdr_cursor *cur, void *data_end,
 		return -1;
 	}
 
-	if (pktsize > IPX_MAX_PKTLEN) {
-		return -1;
-	}
 	if (cur->pos + pktsize > data_end) {
 		return -1;
 	}
@@ -336,37 +336,37 @@ static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, struct
 }
 
 struct calc_ipx_in_ipv6_csum_loopctx {
-	__u8 *dataptr;
-	__s32 diff;
+	__s64 diff;
+	__u32 pkt_offset;
 	size_t payload_len;
-	void *data_end;
+	struct __sk_buff *sk_buff;
 };
 
 static long calc_ipx_in_ipv6_csum_loopfn(__u64 index, void* ctx)
 {
 	struct calc_ipx_in_ipv6_csum_loopctx *c = ctx;
 
-	if (index > IPX_MAX_PKTLEN / 4) {
-		c->diff = -1;
-		return 1;
-	}
-
 	if ((index * 4) + 4 > c->payload_len) {
 		return 1;
 	}
-	if (c->dataptr + (index * 4) + 4 > c->data_end) {
+	__be32 data;
+	if (bpf_skb_load_bytes(c->sk_buff, c->pkt_offset + (index * 4), &data,
+				sizeof(data)) < 0) {
 		c->diff = -1;
 		return 1;
 	}
 
-	c->diff = bpf_csum_diff(NULL, 0, (__be32 *) (c->dataptr + (index * 4)),
-			4, c->diff);
+	c->diff = bpf_csum_diff(NULL, 0, &data, sizeof(data), c->diff);
+	/* no point in continuing if the csum calculation failed */
+	if (c->diff < 0) {
+		return 1;
+	}
 
 	return 0;
 }
 
 static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
-		ipv6hdr *ip6h, struct udphdr *udph, void *data_end)
+		ipv6hdr *ip6h, struct udphdr *udph, struct __sk_buff *ctx)
 {
 	/* pseudo header */
 	__s64 diff = bpf_csum_diff(NULL, 0, (__be32*) &ip6h->saddr,
@@ -391,11 +391,12 @@ static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 		return 0;
 	}
 
+	void *data = (void *)(long)ctx->data;
 	struct calc_ipx_in_ipv6_csum_loopctx lctx = {
-		.dataptr = (__u8 *) ipxh,
 		.diff = diff,
+		.pkt_offset = ((void *) ipxh) - data,
 		.payload_len = payload_len,
-		.data_end = data_end
+		.sk_buff = ctx
 	};
 
 	long nloops = bpf_loop(IPX_MAX_PKTLEN / 4,
@@ -405,27 +406,22 @@ static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 	}
 
 	__be32 rest = 0;
-	lctx.dataptr += (lctx.payload_len / 4) * 4;
+	lctx.pkt_offset += (lctx.payload_len / 4) * 4;
 	lctx.payload_len -= (lctx.payload_len / 4) * 4;
-	int i;
-	for (i = 0; i < 4; i++) {
-		if (i + 1 > lctx.payload_len) {
-			break;
-		}
-		if (lctx.dataptr + i + 1 > lctx.data_end) {
+	if (lctx.payload_len > 0) {
+		if (bpf_skb_load_bytes(lctx.sk_buff, lctx.pkt_offset, &rest,
+					lctx.payload_len) < 0) {
 			return 0;
 		}
-
-		*(((__u8 *) &rest) + i) = *(lctx.dataptr + i);
 	}
-	diff = bpf_csum_diff(NULL, 0, &rest, 4, lctx.diff);
+	diff = bpf_csum_diff(NULL, 0, &rest, sizeof(rest), lctx.diff);
 
 	return ~diff;
 }
 
 static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
-		if_config *ifcfg, struct ipv6_and_udphdr *newhdr, void
-		*data_end)
+		if_config *ifcfg, struct ipv6_and_udphdr *newhdr, struct
+		__sk_buff *ctx)
 {
 	/* increase TC here as it is not constructed from the IPv6 hop limit on
 	 * egress */
@@ -470,7 +466,7 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 
 	/* fill the UDP checksum */
 	newhdr->udph.check = calc_ipx_in_ipv6_csum(ipxh, &newhdr->ip6h,
-			&newhdr->udph, data_end);
+			&newhdr->udph, ctx);
 
 	return sizeof(struct ipv6_and_udphdr);
 }
@@ -616,7 +612,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		newhdr_size = mk_ipv6_from_ipx(ipxh, ifcfg, &newhdr.ip6h);
 	} else {
 		oldhdr_size = 0;
-		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, data_end);
+		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, ctx);
 	}
 
 	/* install new IPv6 header */
