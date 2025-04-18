@@ -7,7 +7,8 @@
 #include "common.h"
 
 #define IPXW_MUX_CTRL_SOCK_NAME "ipxw_mux_ctrl"
-#define IPXW_MUX_MSG_LEN 4096
+#define IPXW_MUX_MSG_LEN (65535 - 8) /* more will not fit into a UDP packet,
+					without extension header trickery */
 
 enum ipxw_mux_msg_type {
 	IPXW_MUX_BIND_ACK = 0,
@@ -95,8 +96,10 @@ void ipxw_mux_unbind(int data_sock);
 ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg);
 
 /* get a message from the data socket, assumes msg points to a buffer of at
- * least IPXW_MUX_MSG_LEN bytes, may block if the caller did not check if data
- * is available */
+ * least sizeof(ipxw_mux_msg) bytes and that it is of type IPXW_MUX_RECV and
+ * that the maximum IPX payload length that can be received is stored in
+ * msg->recv.data_len, may block if the caller did not check if data is
+ * available */
 ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg);
 
 /* muxer functions */
@@ -115,10 +118,10 @@ int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg);
  * (using transmit_msg_cb), on receiving an unbind msg, unbind the socket
  * (using handle_unbind_cb), this blocks if the caller did not check that data
  * is avaiable to read */
-ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
-			ipxw_mux_msg *msg, void *ctx), void
-		(*handle_unbind_cb)(int data_sock, void *ctx), void *tx_ctx,
-		void *unbind_ctx);
+ssize_t ipxw_mux_do_xmit(int data_sock, struct ipxw_mux_msg *msg, int
+		(*tx_msg_cb)(int data_sock, struct ipxw_mux_msg *msg, void
+			*ctx), void (*handle_unbind_cb)(int data_sock, void
+				*ctx), void *tx_ctx, void *unbind_ctx);
 
 /* turn an xmit message into an ipx message, conversion happens in place */
 struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct

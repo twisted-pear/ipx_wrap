@@ -232,6 +232,8 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, struct
 static void handle_rip_pkt(int data_sock, struct ipv6_eui64_addr *my_addr,
 		__u32 ifidx)
 {
+	rip_pkt_in.mux_msg.type = IPXW_MUX_RECV;
+	rip_pkt_in.mux_msg.recv.data_len = IPX_MAX_DATA_LEN;
 	ssize_t len = ipxw_mux_get_recvd(data_sock, &rip_pkt_in.mux_msg);
 	if (len < 0) {
 		perror("recv");

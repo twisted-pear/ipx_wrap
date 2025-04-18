@@ -168,8 +168,21 @@ ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg)
 
 ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg)
 {
+	/* check if the msg buffer is ok */
+	if (msg->type != IPXW_MUX_RECV) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (msg->recv.data_len > IPX_MAX_DATA_LEN) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	size_t max_msg_len = msg->recv.data_len + sizeof(struct ipxw_mux_msg);
+
 	/* receive a msg */
-	ssize_t rcvd_len = recv(data_sock, msg, IPXW_MUX_MSG_LEN, 0);
+	ssize_t rcvd_len = recv(data_sock, msg, max_msg_len, 0);
 	if (rcvd_len < 0) {
 		return -1;
 	}
@@ -326,35 +339,40 @@ int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg)
 	return -1;
 }
 
-ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
-			ipxw_mux_msg *msg, void *ctx), void
-		(*handle_unbind_cb)(int data_sock, void *ctx), void *tx_ctx,
-		void *unbind_ctx)
+ssize_t ipxw_mux_do_xmit(int data_sock, struct ipxw_mux_msg *msg, int
+		(*tx_msg_cb)(int data_sock, struct ipxw_mux_msg *msg, void
+			*ctx), void (*handle_unbind_cb)(int data_sock, void
+				*ctx), void *tx_ctx, void *unbind_ctx)
 {
-	struct ipxw_mux_msg *rcvd_msg = calloc(1, IPXW_MUX_MSG_LEN);
-	if (rcvd_msg == NULL) {
+	/* check if the message buffer is ok */
+	if (msg->type != IPXW_MUX_XMIT) {
+		errno = EINVAL;
 		return -1;
 	}
 
+	if (msg->xmit.data_len > IPX_MAX_DATA_LEN) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	size_t max_msg_len = msg->xmit.data_len + sizeof(struct ipxw_mux_msg);
+
 	/* receive msg, this can block if the caller didn't make sure that data
 	 * is available */
-	ssize_t rcvd_msg_len = recv(data_sock, rcvd_msg, IPXW_MUX_MSG_LEN, 0);
+	ssize_t rcvd_msg_len = recv(data_sock, msg, max_msg_len, 0);
 	if (rcvd_msg_len < 0) {
-		free(rcvd_msg);
 		return -1;
 	}
 
 	/* must at least receive a full mux msg */
 	if (rcvd_msg_len < sizeof(struct ipxw_mux_msg)) {
-		free(rcvd_msg);
 		errno = EREMOTEIO;
 		return -1;
 	}
 
-	switch(rcvd_msg->type) {
+	switch(msg->type) {
 		case IPXW_MUX_UNBIND:
 			/* handle unbind */
-			free(rcvd_msg);
 			handle_unbind_cb(data_sock, unbind_ctx);
 			return 0;
 		case IPXW_MUX_XMIT:
@@ -362,22 +380,19 @@ ssize_t ipxw_mux_do_data(int data_sock, int (*tx_msg_cb)(int data_sock, struct
 			break;
 		default:
 			/* invalid message type */
-			free(rcvd_msg);
 			errno = EINVAL;
 			return -1;
 	}
 
 	/* check if the data length is correct */
-	if (rcvd_msg->xmit.data_len != rcvd_msg_len - sizeof(struct
+	if (msg->xmit.data_len != rcvd_msg_len - sizeof(struct
 				ipxw_mux_msg)) {
-		free(rcvd_msg);
 		errno = EREMOTEIO;
 		return -1;
 	}
 
-	/* tx_msg_cb has to free the buffer if it is not needed anymore, even
-	 * if it returns an error */
-	if (tx_msg_cb(data_sock, rcvd_msg, tx_ctx) < 0) {
+	/* handle the message */
+	if (tx_msg_cb(data_sock, msg, tx_ctx) < 0) {
 		errno = EINVAL;
 		return -1;
 	}

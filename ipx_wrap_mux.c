@@ -260,7 +260,6 @@ static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 {
 	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
 	if (be_xmit == NULL) {
-		free(msg);
 		return -1;
 	}
 
@@ -336,39 +335,6 @@ static ssize_t udp_recv(struct if_entry *iface)
 	return ret;
 }
 
-static ssize_t recv_msg(int data_sock)
-{
-	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
-	if (be == NULL) {
-		/* already unbound */
-		return 0;
-	}
-
-	/* no msgs to receive */
-	if (STAILQ_EMPTY(&be->in_queue)) {
-		return 0;
-	}
-
-	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->in_queue);
-	ssize_t err = ipxw_mux_recv(be->sock, msg);
-	if (err < 0) {
-		/* recoverable errors, don't dequeue the message but try again
-		 * later */
-		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-		{
-			return 0;
-		}
-
-		/* other error, make sure to get rid of the message */
-		perror("recving msg");
-	}
-
-	STAILQ_REMOVE_HEAD(&be->in_queue, q_entry);
-	free(msg);
-
-	return err;
-}
-
 static void unbind_entry(struct bind_entry *e)
 {
 	/* remove all undelivered messages */
@@ -400,6 +366,64 @@ static void handle_unbind(int data_sock, void *ctx)
 	}
 
 	unbind_entry(e);
+}
+
+static ssize_t xmit_msg(int data_sock)
+{
+	struct ipxw_mux_msg *msg = calloc(1, IPXW_MUX_MSG_LEN);
+	if (msg == NULL) {
+		return -1;
+	}
+
+	msg->type = IPXW_MUX_XMIT;
+	msg->xmit.data_len = IPX_MAX_DATA_LEN;
+
+	ssize_t err = ipxw_mux_do_xmit(data_sock, msg, &tx_msg, &handle_unbind,
+			NULL, NULL);
+	if (err < 0) {
+		/* some error */
+		free(msg);
+	} else if (err == 0) {
+		/* unbind message */
+		free(msg);
+	} else {
+		/* message queued for sending */
+	}
+
+	return err;
+}
+
+static ssize_t recv_msg(int data_sock)
+{
+	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
+	if (be == NULL) {
+		/* already unbound */
+		return 0;
+	}
+
+	/* no msgs to receive */
+	if (STAILQ_EMPTY(&be->in_queue)) {
+		return 0;
+	}
+
+	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->in_queue);
+	ssize_t err = ipxw_mux_recv(be->sock, msg);
+	if (err < 0) {
+		/* recoverable errors, don't dequeue the message but try again
+		 * later */
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+		{
+			return 0;
+		}
+
+		/* other error, make sure to get rid of the message */
+		perror("recving msg");
+	}
+
+	STAILQ_REMOVE_HEAD(&be->in_queue, q_entry);
+	free(msg);
+
+	return err;
 }
 
 static void cleanup_sub_process(struct sub_process *sub)
@@ -816,8 +840,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* can xmit */
 			if (evs[i].events & EPOLLIN) {
-				err = ipxw_mux_do_data(evs[i].data.fd, &tx_msg,
-						&handle_unbind, NULL, NULL);
+				err = xmit_msg(evs[i].data.fd);
 				if (err < 0 && errno != EINTR) {
 					perror("xmitting data");
 				} else if (err == 0) {

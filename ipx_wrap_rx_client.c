@@ -49,6 +49,8 @@ int main(int argc, char **argv)
 		return 3;
 	}
 
+	data_msg->type = IPXW_MUX_RECV;
+	data_msg->recv.data_len = IPX_MAX_DATA_LEN;
 	ssize_t len = ipxw_mux_get_recvd(data_sock, data_msg);
 	free(data_msg);
 	if (len < 0) {
