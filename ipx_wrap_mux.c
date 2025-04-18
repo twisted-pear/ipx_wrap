@@ -193,12 +193,20 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 	return true;
 }
 
-static ssize_t udp_send(struct if_entry *iface)
+static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
 {
 	int udp_sock = iface->udp_sock;
 
 	/* no msgs to send */
 	if (STAILQ_EMPTY(&iface->out_queue)) {
+		/* unregister from ready-to-write events to avoid busy polling
+		 */
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.data.fd = udp_sock
+		};
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev);
+
 		return 0;
 	}
 
@@ -267,8 +275,21 @@ static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 
 	msg->xmit.ssock = be_xmit->ipx_sock;
 
+	/* reregister for ready-to-write events, now that messages are
+	 * available */
+	int epoll_fd = *((int *) ctx);
+	int udp_sock = be_xmit->iface->udp_sock;
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
+		.data.fd = udp_sock
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev) < 0) {
+		return -1;
+	}
+
 	/* queue the message on the interface */
 	STAILQ_INSERT_TAIL(&be_xmit->iface->out_queue, msg, q_entry);
+
 	return 0;
 }
 
@@ -310,7 +331,7 @@ static ssize_t peek_udp_recv_len(int udp_sock)
 	return -1;
 }
 
-static ssize_t udp_recv(struct if_entry *iface)
+static ssize_t udp_recv(struct if_entry *iface, int epoll_fd)
 {
 	ssize_t ret = -1;
 
@@ -373,8 +394,20 @@ static ssize_t udp_recv(struct if_entry *iface)
 			break;
 		}
 
+		/* reregister for ready-to-write events, now that messages are
+		 * available */
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
+			.data.fd = be_recv->sock
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, be_recv->sock, &ev) < 0)
+		{
+			break;
+		}
+
 		/* queue the msg for the client */
 		STAILQ_INSERT_TAIL(&be_recv->in_queue, recv_msg, q_entry);
+
 		return len;
 	} while (0);
 
@@ -416,7 +449,7 @@ static void handle_unbind(int data_sock, void *ctx)
 	unbind_entry(e);
 }
 
-static ssize_t xmit_msg(int data_sock)
+static ssize_t xmit_msg(int data_sock, int epoll_fd)
 {
 	ssize_t expected = ipxw_mux_peek_xmit_len(data_sock);
 	if (expected < 0) {
@@ -432,7 +465,7 @@ static ssize_t xmit_msg(int data_sock)
 	msg->xmit.data_len = expected - sizeof(*msg);
 
 	ssize_t err = ipxw_mux_do_xmit(data_sock, msg, &tx_msg, &handle_unbind,
-			NULL, NULL);
+			&epoll_fd, NULL);
 	if (err < 0) {
 		/* some error */
 		free(msg);
@@ -446,7 +479,7 @@ static ssize_t xmit_msg(int data_sock)
 	return err;
 }
 
-static ssize_t recv_msg(int data_sock)
+static ssize_t recv_msg(int data_sock, int epoll_fd)
 {
 	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
 	if (be == NULL) {
@@ -456,6 +489,14 @@ static ssize_t recv_msg(int data_sock)
 
 	/* no msgs to receive */
 	if (STAILQ_EMPTY(&be->in_queue)) {
+		/* unregister from ready-to-write events to avoid busy polling
+		 */
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.data.fd = data_sock
+		};
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, data_sock, &ev);
+
 		return 0;
 	}
 
@@ -867,7 +908,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 				/* can recv */
 				if (evs[i].events & EPOLLIN) {
-					err = udp_recv(iface);
+					err = udp_recv(iface, epoll_fd);
 					if (err < 0 && errno != EINTR) {
 						perror("UDP recv");
 					} else if (err == 0) {
@@ -877,7 +918,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 				/* can xmit */
 				if (evs[i].events & EPOLLOUT) {
-					err = udp_send(iface);
+					err = udp_send(iface, epoll_fd);
 					if (err < 0) {
 						perror("UDP send");
 					} else if (err == 0) {
@@ -893,7 +934,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* can xmit */
 			if (evs[i].events & EPOLLIN) {
-				err = xmit_msg(evs[i].data.fd);
+				err = xmit_msg(evs[i].data.fd, epoll_fd);
 				if (err < 0 && errno != EINTR) {
 					perror("xmitting data");
 				} else if (err == 0) {
@@ -904,7 +945,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* can recv */
 			if (evs[i].events & EPOLLOUT) {
-				err = recv_msg(evs[i].data.fd);
+				err = recv_msg(evs[i].data.fd, epoll_fd);
 				if (err < 0) {
 					/* get rid of the client */
 					perror("recving data");
