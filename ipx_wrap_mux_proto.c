@@ -166,6 +166,44 @@ ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg)
 	return sent_len;
 }
 
+ssize_t ipxw_mux_peek_recvd_len(int data_sock)
+{
+	struct ipxw_mux_msg msg;
+
+	ssize_t rcvd_len = recv(data_sock, &msg, sizeof(msg), MSG_PEEK);
+	if (rcvd_len < 0) {
+		return -1;
+	}
+
+	do {
+		/* need the ipxw_mux_msg */
+		if (rcvd_len != sizeof(msg)) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		/* which has to be of the correct type */
+		if (msg.type != IPXW_MUX_RECV) {
+			errno = EINVAL;
+			break;
+		}
+
+		/* and the data must fit */
+		if (msg.recv.data_len > IPX_MAX_DATA_LEN) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		/* return the size of the message to receive */
+		return msg.recv.data_len + sizeof(msg);
+	} while (0);
+
+	/* clear out invalid message */
+	recv(data_sock, &msg, 0, 0);
+
+	return -1;
+}
+
 ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg)
 {
 	/* check if the msg buffer is ok */
@@ -339,6 +377,49 @@ int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg)
 	return -1;
 }
 
+ssize_t ipxw_mux_peek_xmit_len(int data_sock)
+{
+	struct ipxw_mux_msg msg;
+
+	ssize_t rcvd_len = recv(data_sock, &msg, sizeof(msg), MSG_PEEK);
+	if (rcvd_len < 0) {
+		return -1;
+	}
+
+	do {
+		/* need the ipxw_mux_msg */
+		if (rcvd_len != sizeof(msg)) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		if (msg.type == IPXW_MUX_UNBIND)  {
+			/* return the size of the unbind message */
+			return sizeof(msg);
+		}
+
+		/* which has to be of the correct type */
+		if (msg.type != IPXW_MUX_XMIT) {
+			errno = EINVAL;
+			break;
+		}
+
+		/* and the data must fit */
+		if (msg.xmit.data_len > IPX_MAX_DATA_LEN) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		/* return the size of the message to xmit */
+		return msg.xmit.data_len + sizeof(msg);
+	} while (0);
+
+	/* clear out invalid message */
+	recv(data_sock, &msg, 0, 0);
+
+	return -1;
+}
+
 ssize_t ipxw_mux_do_xmit(int data_sock, struct ipxw_mux_msg *msg, int
 		(*tx_msg_cb)(int data_sock, struct ipxw_mux_msg *msg, void
 			*ctx), void (*handle_unbind_cb)(int data_sock, void
@@ -479,7 +560,7 @@ ssize_t ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg)
 		return -1;
 	}
 
-	ssize_t sent_len = send(data_sock, msg, msg_len, MSG_DONTWAIT);
+	ssize_t sent_len = send(data_sock, msg, msg_len, 0);
 	if (sent_len < 0) {
 		return -1;
 	}

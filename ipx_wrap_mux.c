@@ -272,19 +272,61 @@ static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 	return 0;
 }
 
+static ssize_t peek_udp_recv_len(int udp_sock)
+{
+	struct ipxhdr ipxh;
+	ssize_t rcvd_len = recv(udp_sock, &ipxh, sizeof(ipxh), MSG_PEEK);
+	if (rcvd_len < 0) {
+		return -1;
+	}
+
+	do {
+		/* we need the IPX header to determine the message length */
+		if (rcvd_len != sizeof(ipxh)) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		size_t pkt_len = ntohs(ipxh.pktlen);
+
+		/* the length must fit at least the header */
+		if (pkt_len < sizeof(ipxh)) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		/* the payload must fit */
+		if (pkt_len > IPXW_MUX_MSG_LEN) {
+			errno = EREMOTEIO;
+			break;
+		}
+
+		return pkt_len;
+	} while (0);
+
+	/* clear out the invalid message */
+	recv(udp_sock, &ipxh, 0, 0);
+
+	return -1;
+}
+
 static ssize_t udp_recv(struct if_entry *iface)
 {
 	ssize_t ret = -1;
 
 	int udp_sock = iface->udp_sock;
+	ssize_t expected = peek_udp_recv_len(udp_sock);
+	if (expected < 0) {
+		return -1;
+	}
 
-	struct ipxhdr *ipx_msg = malloc(IPXW_MUX_MSG_LEN);
+	struct ipxhdr *ipx_msg = malloc(expected);
 	if (ipx_msg == NULL) {
 		return -1;
 	}
 
 	do {
-		ssize_t len = recv(udp_sock, ipx_msg, IPXW_MUX_MSG_LEN, 0);
+		ssize_t len = recv(udp_sock, ipx_msg, expected, 0);
 		if (len < 0) {
 			break;
 		}
@@ -308,6 +350,12 @@ static ssize_t udp_recv(struct if_entry *iface)
 		struct ipxw_mux_msg *recv_msg =
 			ipxw_mux_ipxh_to_recv_msg(ipx_msg);
 		if (recv_msg == NULL) {
+			errno = EINVAL;
+			break;
+		}
+
+		/* check the message length, the header could lie to us */
+		if (recv_msg->recv.data_len + sizeof(*recv_msg) != expected) {
 			errno = EINVAL;
 			break;
 		}
@@ -370,13 +418,18 @@ static void handle_unbind(int data_sock, void *ctx)
 
 static ssize_t xmit_msg(int data_sock)
 {
-	struct ipxw_mux_msg *msg = calloc(1, IPXW_MUX_MSG_LEN);
+	ssize_t expected = ipxw_mux_peek_xmit_len(data_sock);
+	if (expected < 0) {
+		return -1;
+	}
+
+	struct ipxw_mux_msg *msg = calloc(1, expected);
 	if (msg == NULL) {
 		return -1;
 	}
 
 	msg->type = IPXW_MUX_XMIT;
-	msg->xmit.data_len = IPX_MAX_DATA_LEN;
+	msg->xmit.data_len = expected - sizeof(*msg);
 
 	ssize_t err = ipxw_mux_do_xmit(data_sock, msg, &tx_msg, &handle_unbind,
 			NULL, NULL);

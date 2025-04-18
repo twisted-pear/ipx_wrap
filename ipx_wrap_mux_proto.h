@@ -95,6 +95,8 @@ void ipxw_mux_unbind(int data_sock);
  * data socket is writeable */
 ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg);
 
+ssize_t ipxw_mux_peek_recvd_len(int data_sock);
+
 /* get a message from the data socket, assumes msg points to a buffer of at
  * least sizeof(ipxw_mux_msg) bytes and that it is of type IPXW_MUX_RECV and
  * that the maximum IPX payload length that can be received is stored in
@@ -114,6 +116,8 @@ void ipxw_mux_send_bind_resp(int data_sock, struct ipxw_mux_msg *resp_msg);
  * available */
 int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg);
 
+ssize_t ipxw_mux_peek_xmit_len(int data_sock);
+
 /* receive xmit msgs, turn them into IPX messages and attempt to send them
  * (using transmit_msg_cb), on receiving an unbind msg, unbind the socket
  * (using handle_unbind_cb), this blocks if the caller did not check that data
@@ -130,8 +134,8 @@ struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
 /* turn an ipx message into a recv message, conversion happens in place */
 struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 
-/* send the recv msg to the client, will not block if the data socket is not
- * writeable, caller can retry or discard */
+/* send the recv msg to the client, will block if the data socket is not
+ * writeable */
 ssize_t ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

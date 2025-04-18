@@ -42,21 +42,27 @@ int main(int argc, char **argv)
 	}
 	printf("bind successful\n");
 
-	struct ipxw_mux_msg *data_msg = calloc(1, IPXW_MUX_MSG_LEN);
-	if (data_msg == NULL) {
-		perror("alloc");
+	ssize_t expected = ipxw_mux_peek_recvd_len(data_sock);
+	if (expected < 0) {
+		perror("recv");
 		close(data_sock);
 		return 3;
 	}
+	struct ipxw_mux_msg *data_msg = calloc(1, expected);
+	if (data_msg == NULL) {
+		perror("alloc");
+		close(data_sock);
+		return 4;
+	}
 
 	data_msg->type = IPXW_MUX_RECV;
-	data_msg->recv.data_len = IPX_MAX_DATA_LEN;
+	data_msg->recv.data_len = expected - sizeof(*data_msg);
 	ssize_t len = ipxw_mux_get_recvd(data_sock, data_msg);
 	free(data_msg);
 	if (len < 0) {
 		perror("recv");
 		close(data_sock);
-		return 4;
+		return 5;
 	}
 	printf("recvd %ld bytes\n", len);
 
