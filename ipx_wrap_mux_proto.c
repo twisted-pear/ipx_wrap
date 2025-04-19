@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
@@ -22,11 +23,22 @@ struct ipxw_mux_sk {
 	bool bound;
 };
 
+struct ipxw_mux_sk_buffer {
+	union {
+		struct ipxw_mux_msg mux_msg;
+		__u8 buf[IPXW_MUX_MSG_LEN];
+	};
+};
+
+_Static_assert(sizeof(struct ipxw_mux_sk_buffer) - offsetof(struct
+			ipxw_mux_msg, data) == IPX_MAX_DATA_LEN);
+
+struct ipxw_mux_sk_buffer sk_buf;
+
 struct ipxw_mux_sk *ht_fd_to_mux_sk = NULL;
 
 int ipxw_mux_sk_socket(int domain, int type, int protocol)
 {
-	int sv[2];
 	/* IPX or nothing */
 	if (domain != AF_IPX) {
 		errno = EAFNOSUPPORT;
@@ -39,12 +51,31 @@ int ipxw_mux_sk_socket(int domain, int type, int protocol)
 		return -1;
 	}
 
+	/* reject unsupported flags */
+	if ((type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC | SOCK_DGRAM)) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	int sv[2];
 	if (ipxw_mux_mk_socketpair(sv) < 0) {
 		return -1;
 	}
 
 	struct ipxw_mux_sk *sk = NULL;
 	do {
+		if ((type & SOCK_NONBLOCK) != 0) {
+			if (fcntl(sv[0], F_SETFL, O_NONBLOCK) < 0) {
+				break;
+			}
+		}
+
+		if ((type & SOCK_CLOEXEC) != 0) {
+			if (fcntl(sv[0], F_SETFL, FD_CLOEXEC) < 0) {
+				break;
+			}
+		}
+
 		/* a previous IPX socket wasn't closed properly and now there
 		 * is a conflict, can't do anything here */
 		HASH_FIND_INT(ht_fd_to_mux_sk, &sv[0], sk);
@@ -60,14 +91,6 @@ int ipxw_mux_sk_socket(int domain, int type, int protocol)
 
 		sk->data_sock = sv[0];
 		sk->paired_sock = sv[1];
-
-		if (type & SOCK_NONBLOCK) {
-			// TODO
-		}
-
-		if (type & SOCK_CLOEXEC) {
-			// TODO
-		}
 
 		HASH_ADD_INT(ht_fd_to_mux_sk, data_sock, sk);
 
@@ -107,7 +130,10 @@ int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 
 	struct ipxw_mux_msg bind_msg;
 	bind_msg.type = IPXW_MUX_BIND;
-	bind_msg.bind.addr = ipx_addr->sipx_addr;
+	bind_msg.bind.addr.sock = ipx_addr->sipx_port;
+	bind_msg.bind.addr.net = ipx_addr->sipx_network;
+	memcpy(bind_msg.bind.addr.node, ipx_addr->sipx_node,
+			IPX_ADDR_NODE_BYTES);
 	bind_msg.bind.pkt_type = ipx_addr->sipx_type;
 	if (bind_msg.bind.pkt_type == IPXW_MUX_SK_PKT_TYPE_ANY) {
 		bind_msg.bind.pkt_type_any = 1;
@@ -126,6 +152,167 @@ int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 
 	sk->paired_sock = -1;
 	sk->bound = true;
+	return 0;
+}
+
+ssize_t ipxw_mux_sk_sendto(int sockfd, const void *buf, size_t len, int flags,
+		const struct sockaddr *dest_addr, socklen_t addrlen)
+{
+	/* reject unsupported flags */
+	if ((flags & ~(MSG_DONTWAIT)) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	bool block = (flags & (MSG_DONTWAIT)) == 0;
+
+	/* we need an IPX destination address */
+	if (dest_addr == NULL || addrlen < sizeof(struct sockaddr_ipx)) {
+		errno = EINVAL;
+		return -1;
+	}
+	struct sockaddr_ipx *daddr = (struct sockaddr_ipx *) dest_addr;
+	if (daddr->sipx_family != AF_IPX) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (len > IPX_MAX_DATA_LEN) {
+		errno = EMSGSIZE;
+		return -1;
+	}
+
+	/* look up the socket */
+	struct ipxw_mux_sk *sk;
+	HASH_FIND_INT(ht_fd_to_mux_sk, &sockfd, sk);
+	if (sk == NULL) {
+		errno = ENOTSOCK;
+		return -1;
+	}
+
+	/* socket has to be bound */
+	if (!sk->bound) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* prepare the xmit message */
+	memset(&sk_buf, 0, sizeof(struct ipxw_mux_msg));
+	sk_buf.mux_msg.type = IPXW_MUX_XMIT;
+
+	/* fill in the destination address */
+	sk_buf.mux_msg.xmit.data_len = len;
+	sk_buf.mux_msg.xmit.daddr.sock = daddr->sipx_port;
+	sk_buf.mux_msg.xmit.daddr.net = daddr->sipx_network;
+	memcpy(sk_buf.mux_msg.xmit.daddr.node, daddr->sipx_node,
+			IPX_ADDR_NODE_BYTES);
+	sk_buf.mux_msg.xmit.pkt_type = daddr->sipx_type;
+
+	/* copy over the data */
+	memcpy(sk_buf.mux_msg.data, buf, len);
+	sk_buf.mux_msg.xmit.data_len = len;
+
+	/* send */
+	ssize_t sent_len = ipxw_mux_xmit(sk->data_sock, &sk_buf.mux_msg,
+			block);
+	/* clean up the buffer, regardless of result */
+	memset(&sk_buf, 0, sizeof(sk_buf));
+	if (sent_len < 0) {
+		return -1;
+	}
+
+	/* return the length of the sent data */
+	return sent_len - offsetof(struct ipxw_mux_msg, data);
+}
+
+ssize_t ipxw_mux_sk_recvfrom(int sockfd, void *buf, size_t len, int flags,
+		struct sockaddr *src_addr, socklen_t *addrlen)
+{
+	/* reject unsupported flags */
+	if ((flags & ~(MSG_DONTWAIT)) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	bool block = (flags & (MSG_DONTWAIT)) == 0;
+
+	/* filter invalid parameters */
+	if (src_addr != NULL && addrlen == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* look up the socket */
+	struct ipxw_mux_sk *sk;
+	HASH_FIND_INT(ht_fd_to_mux_sk, &sockfd, sk);
+	if (sk == NULL) {
+		errno = ENOTSOCK;
+		return -1;
+	}
+
+	/* socket has to be bound */
+	if (!sk->bound) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* can only receive this much */
+	if (len > IPX_MAX_DATA_LEN) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* receive */
+	memset(&sk_buf, 0, sizeof(sk_buf));
+	sk_buf.mux_msg.type = IPXW_MUX_RECV;
+	sk_buf.mux_msg.recv.data_len = IPX_MAX_DATA_LEN;
+	ssize_t rcvd_len = ipxw_mux_get_recvd(sk->data_sock, &sk_buf.mux_msg,
+			block);
+	if (rcvd_len < 0) {
+		return -1;
+	}
+
+	/* return the data */
+	ssize_t ret_len = (len > sk_buf.mux_msg.recv.data_len) ?
+		sk_buf.mux_msg.recv.data_len : len;
+	memcpy(buf, sk_buf.mux_msg.data, ret_len);
+
+	/* return the address, if desired */
+	if (src_addr != NULL) {
+		struct sockaddr_ipx saddr;
+		memset(&saddr, 0, sizeof(saddr));
+		saddr.sipx_family = AF_IPX;
+		saddr.sipx_port = sk_buf.mux_msg.recv.saddr.sock;
+		saddr.sipx_network = sk_buf.mux_msg.recv.saddr.net;
+		memcpy(saddr.sipx_node, sk_buf.mux_msg.recv.saddr.node,
+				IPX_ADDR_NODE_BYTES);
+		saddr.sipx_type = sk_buf.mux_msg.recv.pkt_type;
+
+		socklen_t src_addr_len = (sizeof(saddr) > *addrlen) ? *addrlen
+			: sizeof(saddr);
+		memcpy(src_addr, &saddr, src_addr_len);
+		*addrlen = sizeof(saddr);
+	}
+
+	return ret_len;
+}
+
+int ipxw_mux_sk_close(int fd)
+{
+	struct ipxw_mux_sk *sk;
+	HASH_FIND_INT(ht_fd_to_mux_sk, &fd, sk);
+	if (sk == NULL) {
+		errno = EBADF;
+		return -1;
+	}
+
+	if (sk->bound) {
+		ipxw_mux_unbind(sk->data_sock);
+	}
+	if (sk->paired_sock >= 0) {
+		close(sk->paired_sock);
+	}
+	HASH_DEL(ht_fd_to_mux_sk, sk);
+	free(sk);
+
 	return 0;
 }
 
@@ -276,6 +463,11 @@ ssize_t ipxw_mux_xmit(int data_sock, const struct ipxw_mux_msg *msg, bool
 	/* check message type */
 	if (msg->type != IPXW_MUX_XMIT) {
 		errno = EINVAL;
+		return -1;
+	}
+
+	if (msg->xmit.data_len > IPX_MAX_DATA_LEN) {
+		errno = EMSGSIZE;
 		return -1;
 	}
 

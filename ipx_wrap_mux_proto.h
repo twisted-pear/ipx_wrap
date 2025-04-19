@@ -83,18 +83,27 @@ _Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
 #define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg))
 
 /* socket-like api */
+/* absolutely not multithreading-safe */
 
 #define IPXW_MUX_SK_PKT_TYPE_ANY 0xFF
 
 struct sockaddr_ipx {
 	sa_family_t sipx_family;
-	struct ipx_addr sipx_addr;
+	__be16 sipx_port;
+	__be32 sipx_network;
+	__u8 sipx_node[IPX_ADDR_NODE_BYTES];
 	__u8 sipx_type;
+	__u8 sipx_zero; /* 16 byte fill */
 };
 
 int ipxw_mux_sk_socket(int domain, int type, int protocol);
 int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 		addrlen);
+ssize_t ipxw_mux_sk_sendto(int sockfd, const void *buf, size_t len, int flags,
+		const struct sockaddr *dest_addr, socklen_t addrlen);
+ssize_t ipxw_mux_sk_recvfrom(int sockfd, void *buf, size_t len, int flags,
+		struct sockaddr *src_addr, socklen_t *addrlen);
+int ipxw_mux_sk_close(int fd);
 
 /* client functions */
 
