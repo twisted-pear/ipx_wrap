@@ -16,7 +16,7 @@ CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap
 
-all: $(MUX_TARGETS) $(USER_TARGETS) $(TC_OBJ) ipx_wrap_mux
+all: $(MUX_TARGETS) $(USER_TARGETS) $(TC_OBJ) $(MUXER_TARGETS)
 
 vmlinux.h: $(VMLINUX_H_PREREQ)
 	$(BPFT) btf dump file $< format c > $@
@@ -52,6 +52,6 @@ $(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o
 
 clean:
-	rm -f *.o *.ll $(USER_TARGETS) $(MUX_TARGETS) vmlinux.h vmlinux.btf
+	rm -f *.o *.ll $(USER_TARGETS) $(MUX_TARGETS) $(MUXER_TARGETS) vmlinux.h vmlinux.btf
 
 .PHONY: all clean
