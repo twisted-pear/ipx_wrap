@@ -8,13 +8,15 @@ LIBBPF_PREFIX ?= /usr
 VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/btf/vmlinux" || echo "vmlinux.btf")
 
 USER_TARGETS = ipx_wrap_if_config
-MUX_TARGETS = ipx_wrap_mux ipx_wrap_ripd ipx_wrap_tx_client ipx_wrap_rx_client
+MUX_TARGETS = ipx_wrap_ripd ipx_wrap_tx_client ipx_wrap_rx_client
+MUXER_TARGETS = ipx_wrap_mux
 TC_OBJ = ipx_wrap_kern.o
 
 CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/
-LIBS = -lbpf
+USER_LIBS = -lbpf
+MUXER_LIBS = -lcap
 
-all: $(MUX_TARGETS) $(USER_TARGETS) $(TC_OBJ)
+all: $(MUX_TARGETS) $(USER_TARGETS) $(TC_OBJ) ipx_wrap_mux
 
 vmlinux.h: $(VMLINUX_H_PREREQ)
 	$(BPFT) btf dump file $< format c > $@
@@ -38,9 +40,15 @@ $(TC_OBJ): %.o: %.c vmlinux.h common.h
 	$(LLC) -march=bpf -filetype=obj -o $@ ${@:.o=.ll}
 
 $(USER_TARGETS): %: %.c common.h
-	$(CC) $(CFLAGS) -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(LIBS)
+	$(CC) $(CFLAGS) -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(USER_LIBS)
 
-$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h uthash.h
+ipx_wrap_mux_proto.o: ipx_wrap_mux_proto.c ipx_wrap_mux_proto.h uthash.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h uthash.h
+	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o $(MUXER_LIBS)
+
+$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o
 
 clean:

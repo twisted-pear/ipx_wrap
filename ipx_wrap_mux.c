@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <sys/capability.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
@@ -142,6 +144,38 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 	if (e != NULL) {
 		fprintf(stderr, "binding already in use\n");
 		return false;
+	}
+
+	/* the process trying to bind needs CAP_NET_BIND_SERVICE to use one of
+	 * the low sockets */
+	if (ntohs(bind_msg->addr.sock) < ntohs(IPX_MIN_DYNAMIC_SOCKET)) {
+		struct ucred data_creds;
+		socklen_t data_creds_len = sizeof(data_creds);
+		if (getsockopt(data_sock, SOL_SOCKET, SO_PEERCRED, &data_creds,
+					&data_creds_len) < 0) {
+			perror("obtaining process credentials");
+			return false;
+		}
+
+		cap_t data_caps = cap_get_pid(data_creds.pid);
+		if (data_caps == NULL) {
+			perror("obtaining process capabilities");
+			return false;
+		}
+
+		cap_flag_value_t on;
+		if (cap_get_flag(data_caps, CAP_NET_BIND_SERVICE,
+					CAP_PERMITTED, &on) != 0) {
+			perror("checking for CAP_NET_BIND_SERVICE");
+			cap_free(data_caps);
+			return false;
+		}
+		cap_free(data_caps);
+
+		if (on != CAP_SET) {
+			fprintf(stderr, "bind to low socket not permitted\n");
+			return false;
+		}
 	}
 
 	/* make and fill new binding entry */
