@@ -82,27 +82,54 @@ _Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
 
 #define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg))
 
+/* socket-like api */
+
+#define IPXW_MUX_SK_PKT_TYPE_ANY 0xFF
+
+struct sockaddr_ipx {
+	sa_family_t sipx_family;
+	struct ipx_addr sipx_addr;
+	__u8 sipx_type;
+};
+
+int ipxw_mux_sk_socket(int domain, int type, int protocol);
+int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
+		addrlen);
+
 /* client functions */
 
-/* return new data socket or negative error, may block until an answer is
- * received from the muxer */
-int ipxw_mux_bind(struct ipxw_mux_msg *bind_msg);
+/* makes the initial socket pair, the first is to be kept, the second will be
+ * sent to the muxer */
+int ipxw_mux_mk_socketpair(int *sv);
+
+/* send sv[1] to the muxer, returns sv[0] as data socket or negative error, may
+ * block until an answer is received from the muxer, if successful sv[1] will
+ * be closed, if an error occurrs both sv[0] and sv[1] will be closed, this
+ * blocks */
+int ipxw_mux_bind_socketpair(const struct ipxw_mux_msg *bind_msg, int *sv);
+
+/* like ipxw_mux_bind_socketpair but creates and manages the socketpair
+ * internally */
+int ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg);
 
 /* send unbind msg and close socket */
 void ipxw_mux_unbind(int data_sock);
 
 /* write message to data socket, may block if the caller did not check if the
- * data socket is writeable */
-ssize_t ipxw_mux_xmit(int data_sock, struct ipxw_mux_msg *msg);
+ * data socket is writeable and block is true */
+ssize_t ipxw_mux_xmit(int data_sock, const struct ipxw_mux_msg *msg, bool
+		block);
 
-ssize_t ipxw_mux_peek_recvd_len(int data_sock);
+/* get the length of the received message from the header, may block */
+ssize_t ipxw_mux_peek_recvd_len(int data_sock, bool block);
 
 /* get a message from the data socket, assumes msg points to a buffer of at
  * least sizeof(ipxw_mux_msg) bytes and that it is of type IPXW_MUX_RECV and
  * that the maximum IPX payload length that can be received is stored in
  * msg->recv.data_len, may block if the caller did not check if data is
- * available */
-ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg);
+ * available and block is true */
+ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg, bool
+		block);
 
 /* muxer functions */
 
@@ -110,12 +137,15 @@ ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg);
 int ipxw_mux_mk_ctrl_sock();
 
 /* send a response to a bind message */
-void ipxw_mux_send_bind_resp(int data_sock, struct ipxw_mux_msg *resp_msg);
+void ipxw_mux_send_bind_resp(int data_sock, const struct ipxw_mux_msg
+		*resp_msg);
 
 /* receive bind message, this blocks on if the caller didn't check if data is
  * available */
 int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg);
 
+/* get the length of the message to xmit from the header, blocks if the caller
+ * did not check that data is available to read */
 ssize_t ipxw_mux_peek_xmit_len(int data_sock);
 
 /* receive xmit msgs, turn them into IPX messages and attempt to send them
@@ -136,6 +166,6 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 
 /* send the recv msg to the client, will block if the data socket is not
  * writeable */
-ssize_t ipxw_mux_recv(int data_sock, struct ipxw_mux_msg *msg);
+ssize_t ipxw_mux_recv(int data_sock, const struct ipxw_mux_msg *msg);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

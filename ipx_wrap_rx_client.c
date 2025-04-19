@@ -42,7 +42,7 @@ int main(int argc, char **argv)
 	}
 	printf("bind successful\n");
 
-	ssize_t expected = ipxw_mux_peek_recvd_len(data_sock);
+	ssize_t expected = ipxw_mux_peek_recvd_len(data_sock, true);
 	if (expected < 0) {
 		perror("recv");
 		close(data_sock);
@@ -57,7 +57,7 @@ int main(int argc, char **argv)
 
 	data_msg->type = IPXW_MUX_RECV;
 	data_msg->recv.data_len = expected - sizeof(*data_msg);
-	ssize_t len = ipxw_mux_get_recvd(data_sock, data_msg);
+	ssize_t len = ipxw_mux_get_recvd(data_sock, data_msg, true);
 	free(data_msg);
 	if (len < 0) {
 		perror("recv");

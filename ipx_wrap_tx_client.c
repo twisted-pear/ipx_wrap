@@ -62,7 +62,7 @@ int main(int argc, char **argv)
 			sizeof(dest_addr.ipx_node_snd));
 	data_msg->xmit.daddr.sock = htons(dest_sock);
 	data_msg->xmit.pkt_type = pkt_type;
-	ssize_t len = ipxw_mux_xmit(data_sock, data_msg);
+	ssize_t len = ipxw_mux_xmit(data_sock, data_msg, true);
 	free(data_msg);
 	if (len < 0) {
 		perror("xmit");

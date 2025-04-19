@@ -169,7 +169,7 @@ static int send_rip_resp(int data_sock, FILE *rtable, struct ipv6_eui64_addr
 	}
 
 	printf("Sending RIP response with %u routes.\n", nentries);
-	ssize_t len = ipxw_mux_xmit(data_sock, &rip_pkt_out.mux_msg);
+	ssize_t len = ipxw_mux_xmit(data_sock, &rip_pkt_out.mux_msg, true);
 	if (len < 0) {
 		perror("send");
 		return -1;
@@ -234,7 +234,7 @@ static void handle_rip_pkt(int data_sock, struct ipv6_eui64_addr *my_addr,
 {
 	rip_pkt_in.mux_msg.type = IPXW_MUX_RECV;
 	rip_pkt_in.mux_msg.recv.data_len = IPX_MAX_DATA_LEN;
-	ssize_t len = ipxw_mux_get_recvd(data_sock, &rip_pkt_in.mux_msg);
+	ssize_t len = ipxw_mux_get_recvd(data_sock, &rip_pkt_in.mux_msg, true);
 	if (len < 0) {
 		perror("recv");
 		return;
