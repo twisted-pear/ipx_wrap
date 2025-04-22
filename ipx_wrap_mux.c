@@ -14,6 +14,7 @@
 #include <sys/capability.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
@@ -1071,6 +1072,14 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 			cleanup_sub_processes(true);
 
 			ctrl_sock = sv[1];
+
+			/* set sub-process name to something helpful */
+			char sub_name[16];
+			snprintf(sub_name, 16, "ipxmux %08x",
+					ntohl(iface->addr.net));
+			sub_name[15] = '\0';
+			/* no error handling, this is for convenience only */
+			prctl(PR_SET_NAME, sub_name, 0, 0, 0);
 
 			/* doesn't return */
 			do_sub_process(iface, ctrl_sock);
