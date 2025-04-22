@@ -12,10 +12,13 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/capability.h>
+#include <sys/timerfd.h>
+#include <sys/wait.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
 
+#define INTERFACE_RESCAN_SECS 30
 #define MAX_EPOLL_EVENTS 64
 
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
@@ -41,12 +44,14 @@ struct bind_entry {
 	     reserved:6;
 };
 
+struct ipx_if_addr {
+	__be32 net;
+	__u8 node[IPX_ADDR_NODE_BYTES];
+} __attribute__((packed));
+
 struct sub_process {
 	/* net and node IPX addr */
-	struct __attribute__((packed)) {
-		__be32 net;
-		__u8 node[IPX_ADDR_NODE_BYTES];
-	} addr;
+	struct ipx_if_addr addr;
 	/* the socket used to talk to the sub-process */
 	int sub_sock;
 	/* hash entry */
@@ -54,14 +59,13 @@ struct sub_process {
 	UT_hash_handle hh; /* by socket */
 	/* the sub-process' PID */
 	pid_t sub_pid;
+	/* whether to keep the process after the if-scan */
+	bool keep;
 };
 
 struct if_entry {
 	/* net and node IPX addr */
-	struct __attribute__((packed)) {
-		__be32 net;
-		__u8 node[IPX_ADDR_NODE_BYTES];
-	} addr;
+	struct ipx_if_addr addr;
 	/* the actual UDP socket */
 	int udp_sock;
 	/* msgs to send */
@@ -75,6 +79,8 @@ struct if_entry {
 static struct bind_entry *ht_sock_to_bind = NULL;
 static struct sub_process *ht_ipx_addr_to_sub = NULL;
 static struct sub_process *ht_sock_to_sub = NULL;
+
+static int tmr_fd = -1;
 
 static struct bind_entry *get_bind_entry_by_sock(int sock)
 {
@@ -99,6 +105,15 @@ static struct sub_process *get_sub_process_by_sock(int sock)
 	struct sub_process *sub;
 
 	HASH_FIND_INT(ht_sock_to_sub, &sock, sub);
+	return sub;
+}
+
+static struct sub_process *get_sub_process_by_ipx_addr(struct ipx_if_addr
+		*addr)
+{
+	struct sub_process *sub;
+
+	HASH_FIND(h_ipx_addr, ht_ipx_addr_to_sub, addr, sizeof(*addr), sub);
 	return sub;
 }
 
@@ -554,11 +569,22 @@ static ssize_t recv_msg(int data_sock, int epoll_fd)
 	return err;
 }
 
-static void cleanup_sub_process(struct sub_process *sub)
+static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 {
 	assert(sub != NULL);
 	assert(sub->sub_sock >= 0);
 	assert(sub->sub_pid >= 0);
+
+	if (!sub_setup) {
+		printf("dropping interface "
+				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx\n",
+				ntohl(sub->addr.net), sub->addr.node[0],
+				sub->addr.node[1], sub->addr.node[2],
+				sub->addr.node[3], sub->addr.node[4],
+				sub->addr.node[5]);
+	}
+
+	int cpid = sub->sub_pid;
 
 	/* close socket */
 	close(sub->sub_sock);
@@ -567,14 +593,21 @@ static void cleanup_sub_process(struct sub_process *sub)
 	HASH_DELETE(h_ipx_addr, ht_ipx_addr_to_sub, sub);
 	HASH_DEL(ht_sock_to_sub, sub);
 	free(sub);
+
+	/* collect the child process, no error handling, since we can't do
+	 * anything */
+	int err = -1;
+	do {
+		err = waitpid(cpid, NULL, 0);
+	} while (err < 0 && errno == EINTR);
 }
 
-static void cleanup_sub_processes()
+static void cleanup_sub_processes(bool sub_setup)
 {
 	struct sub_process *se;
 	struct sub_process *stmp;
 	HASH_ITER(h_ipx_addr, ht_ipx_addr_to_sub, se, stmp) {
-		cleanup_sub_process(se);
+		cleanup_sub_process(se, sub_setup);
 	}
 }
 
@@ -604,11 +637,16 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 		int ctrl_sock, int exit_code)
 {
 	/* remove all sub-processes (if any) */
-	cleanup_sub_processes();
+	cleanup_sub_processes(false);
 
 	/* remove the interface (if any) */
 	if (iface != NULL) {
 		cleanup_iface(iface);
+	}
+
+	/* close the timer fd */
+	if (tmr_fd >= 0) {
+		close(tmr_fd);
 	}
 
 	/* close down control socket */
@@ -624,7 +662,7 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 	exit(exit_code);
 }
 
-static int mk_udp_socket(char *ifname)
+static int mk_udp_socket(const char *ifname)
 {
 	/* determine the ifindex */
 	__u32 ifidx = if_nametoindex(ifname);
@@ -672,7 +710,8 @@ static int mk_udp_socket(char *ifname)
 	return udp_sock;
 }
 
-static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr)
+static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
+		*ifname)
 {
 	struct if_entry *iface = calloc(1, sizeof(struct if_entry));
 	if (iface == NULL) {
@@ -690,54 +729,15 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr)
 
 	STAILQ_INIT(&iface->out_queue);
 
-	/* iterate over all addresses to find the interface to our IPv6 addr */
-	struct ifaddrs *addrs;
-	struct ifaddrs *iter;
-
-	if (getifaddrs(&addrs) < 0) {
+	/* make and bind the UDP socket for our interface */
+	int udp_sock = mk_udp_socket(ifname);
+	if (udp_sock < 0) {
 		free(iface);
 		return NULL;
 	}
+	iface->udp_sock = udp_sock;
 
-	/* if the loop exits normally, we were unable to find the IPv6 addr */
-	errno = ENOENT;
-	for (iter = addrs; iter != NULL; iter = iter->ifa_next) {
-		if (iter->ifa_addr == NULL) {
-			continue;
-		}
-		if (iter->ifa_addr->sa_family != AF_INET6) {
-			continue;
-		}
-		struct sockaddr_in6 *iter_sa = (struct sockaddr_in6 *)
-			iter->ifa_addr;
-		if (memcmp(ipv6_addr, &iter_sa->sin6_addr, sizeof(struct
-						ipv6_eui64_addr)) != 0) {
-			continue;
-		}
-
-		/* got address */
-
-		/* determine ifindex or bail out */
-		if (iter->ifa_name == NULL) {
-			break;
-		}
-
-		int udp_sock = mk_udp_socket(iter->ifa_name);
-		if (udp_sock < 0) {
-			break;
-		}
-
-		iface->udp_sock = udp_sock;
-
-		freeifaddrs(addrs);
-		return iface;
-	}
-
-	/* address not found or other error */
-
-	freeifaddrs(addrs);
-	free(iface);
-	return NULL;
+	return iface;
 }
 
 static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
@@ -792,14 +792,10 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 	}
 	assert(bind_msg.type == IPXW_MUX_BIND);
 
-	struct sub_process *sub;
-	struct __attribute__((packed)) {
-		__be32 net;
-		__u8 node[IPX_ADDR_NODE_BYTES];
-	} addr;
+	struct ipx_if_addr addr;
 	addr.net = bind_msg.bind.addr.net;
 	memcpy(addr.node, bind_msg.bind.addr.node, IPX_ADDR_NODE_BYTES);
-	HASH_FIND(h_ipx_addr, ht_ipx_addr_to_sub, &addr, sizeof(addr), sub);
+	struct sub_process *sub = get_sub_process_by_ipx_addr(&addr);
 
 	/* no sub-process listening on the desired interface */
 	if (sub == NULL) {
@@ -1001,12 +997,12 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 	cleanup_and_exit(iface, epoll_fd, ctrl_sock, 0);
 }
 
-static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
-		ctrl_sock)
+static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
+		char *ifname, int epoll_fd, int ctrl_sock)
 {
 	struct sub_process *sub = calloc(1, sizeof(struct sub_process));
 	if (sub == NULL) {
-		return false;
+		return NULL;
 	}
 
 	sub->addr.net = ipv6_addr->ipx_net;
@@ -1017,13 +1013,12 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 			sizeof(ipv6_addr->ipx_node_snd));
 	sub->sub_sock = -1;
 
-	struct sub_process *sub_found = NULL;
-	HASH_FIND(h_ipx_addr, ht_ipx_addr_to_sub, &sub->addr,
-			sizeof(sub->addr), sub_found);
+	struct sub_process *sub_found =
+		get_sub_process_by_ipx_addr(&sub->addr);
 	if (sub_found != NULL) {
 		/* sub-process for IPX addr already exists */
 		free(sub);
-		return true;
+		return sub_found;
 	}
 
 	int sv[2] = { -1, -1 };
@@ -1045,7 +1040,7 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 			break;
 		}
 
-		iface = mk_iface(ipv6_addr);
+		iface = mk_iface(ipv6_addr, ifname);
 		if (iface == NULL) {
 			break;
 		}
@@ -1062,12 +1057,18 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 			close(sub->sub_sock);
 			free(sub);
 
-			/* close unused sockets */
-			close(ctrl_sock);
+			/* close unused fds */
+			if (ctrl_sock >= 0) {
+				close(ctrl_sock);
+			}
+			if (tmr_fd >= 0) {
+				close(tmr_fd);
+				tmr_fd = -1;
+			}
 			close(epoll_fd);
 
 			/* get rid of all previously created sub-process entries */
-			cleanup_sub_processes();
+			cleanup_sub_processes(true);
 
 			ctrl_sock = sv[1];
 
@@ -1085,7 +1086,15 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 		/* add new sub-process entry */
 		HASH_ADD(h_ipx_addr, ht_ipx_addr_to_sub, addr, sizeof(sub->addr), sub);
 		HASH_ADD_INT(ht_sock_to_sub, sub_sock, sub);
-		return true;
+
+		printf("adding interface "
+				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx\n",
+				ntohl(sub->addr.net), sub->addr.node[0],
+				sub->addr.node[1], sub->addr.node[2],
+				sub->addr.node[3], sub->addr.node[4],
+				sub->addr.node[5]);
+
+		return sub;
 	} while (0);
 
 	if (sv[1] >= 0) {
@@ -1099,17 +1108,113 @@ static bool add_sub(struct ipv6_eui64_addr *ipv6_addr, int epoll_fd, int
 	}
 	free(sub);
 
-	return false;
+	return NULL;
+}
+
+/* FIXME: we cannot handle an address migrating from one interface to another,
+ * but this should not happen with IPX anyway */
+static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
+{
+	/* iterate over all addresses to find the interface to our IPv6 addr */
+	struct ifaddrs *addrs;
+	struct ifaddrs *iter;
+
+	if (getifaddrs(&addrs) < 0) {
+		return false;
+	}
+
+	/* if the loop exits normally, we were unable to find the IPv6 addr */
+	for (iter = addrs; iter != NULL; iter = iter->ifa_next) {
+		if (iter->ifa_addr == NULL) {
+			continue;
+		}
+		if (iter->ifa_addr->sa_family != AF_INET6) {
+			continue;
+		}
+
+		struct sockaddr_in6 *iter_sa = (struct sockaddr_in6 *)
+			iter->ifa_addr;
+		struct ipv6_eui64_addr *ipv6_addr = (struct ipv6_eui64_addr *)
+			&iter_sa->sin6_addr;
+		if (ipv6_addr->prefix != prefix) {
+			continue;
+		}
+
+		if (iter->ifa_name == NULL) {
+			continue;
+		}
+
+		/* get or create a new sub-process for this address */
+		struct sub_process *if_sub = add_sub(ipv6_addr, iter->ifa_name,
+				epoll_fd, ctrl_sock);
+		/* an error occurred during process creation, abort */
+		if (if_sub == NULL) {
+			freeifaddrs(addrs);
+			return false;
+		}
+
+		/* mark the returned sub-process, so that we keep it */
+		if_sub->keep = true;
+	}
+
+	freeifaddrs(addrs);
+
+	struct sub_process *se;
+	struct sub_process *stmp;
+	HASH_ITER(h_ipx_addr, ht_ipx_addr_to_sub, se, stmp) {
+		if (!se->keep) {
+			cleanup_sub_process(se, false);
+		} else {
+			se->keep = false;
+		}
+	}
+
+	return true;
+}
+
+static int setup_timer(int epoll_fd)
+{
+	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
+	if (tmr < 0) {
+		return -1;
+	}
+
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+		.data = {
+			.fd = tmr
+		}
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, tmr, &ev) < 0) {
+		close(tmr);
+		return -1;
+	}
+
+	struct itimerspec tmr_spec = {
+		.it_interval = { .tv_sec = INTERFACE_RESCAN_SECS },
+		.it_value = { .tv_sec = INTERFACE_RESCAN_SECS }
+	};
+	if (timerfd_settime(tmr, 0, &tmr_spec, NULL) < 0) {
+		close(tmr);
+		return -1;
+	}
+
+	return tmr;
 }
 
 static _Noreturn void usage() {
-	printf("Usage: ipx_wrap_mux <ipv6 addr> [<ipv6 addr>]...\n");
+	printf("Usage: ipx_wrap_mux <32-bit hex prefix>\n");
 	exit(1);
 }
 
 int main(int argc, char **argv)
 {
-	if (argc < 2) {
+	if (argc != 2) {
+		usage();
+	}
+
+	__be32 prefix = htonl(strtoul(argv[1], NULL, 0));
+	if (prefix == 0) {
 		usage();
 	}
 
@@ -1122,24 +1227,23 @@ int main(int argc, char **argv)
 		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 2);
 	}
 
-	/* save all the IPX addresses we manage in the hash */
-	struct ipv6_eui64_addr addr_buf;
-	int i;
-	for (i = 1; i < argc; i++) {
-		if (inet_pton(AF_INET6, argv[i], &addr_buf) != 1) {
-			usage();
-		}
+	tmr_fd = setup_timer(epoll_fd);
+	if (tmr_fd < 0) {
+		perror("creating interface rescan timer");
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
+	}
 
-		if (!add_sub(&addr_buf, epoll_fd, ctrl_sock)) {
-			perror("adding sub-process");
-			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
-		}
+	/* scan all interfaces for addresses within the prefix, we manage those
+	 * interfaces */
+	if (!scan_interfaces(prefix, epoll_fd, ctrl_sock)) {
+		perror("adding sub-process");
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
 	}
 
 	ctrl_sock = ipxw_mux_mk_ctrl_sock();
 	if (ctrl_sock < 0) {
 		perror("creating ctrl socket");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 5);
 	}
 
 	struct epoll_event ev = {
@@ -1150,7 +1254,7 @@ int main(int argc, char **argv)
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
 		perror("registering ctrl socket for event polling");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 5);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
 	}
 
 	ssize_t err;
@@ -1163,7 +1267,7 @@ int main(int argc, char **argv)
 			}
 
 			perror("event polling");
-			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
+			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 7);
 		}
 
 		int i;
@@ -1174,7 +1278,7 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 7);
+							ctrl_sock, 8);
 				}
 
 				/* incoming bind msg */
@@ -1182,6 +1286,30 @@ int main(int argc, char **argv)
 				if (err < 0 && errno != EINTR) {
 					perror("handle binding");
 				}
+
+				continue;
+			}
+
+			/* timer fd */
+			if (evs[i].data.fd == tmr_fd) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "timer fd error\n");
+					cleanup_and_exit(NULL, epoll_fd,
+							ctrl_sock, 9);
+				}
+
+				/* incoming rescan the interfaces */
+				if (!scan_interfaces(prefix, epoll_fd,
+							ctrl_sock)) {
+					perror("adding sub-process");
+					cleanup_and_exit(NULL, epoll_fd,
+							ctrl_sock, 10);
+				}
+
+				/* consume all expirations */
+				__u64 dummy;
+				read(tmr_fd, &dummy, sizeof(dummy));
 
 				continue;
 			}
@@ -1197,7 +1325,7 @@ int main(int argc, char **argv)
 				if (sub == NULL) {
 					continue;
 				}
-				cleanup_sub_process(sub);
+				cleanup_sub_process(sub, false);
 				continue;
 			}
 		}
