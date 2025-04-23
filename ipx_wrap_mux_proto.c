@@ -541,6 +541,83 @@ void ipxw_mux_unbind(struct ipxw_mux_handle h)
 	ipxw_mux_handle_close(h);
 }
 
+ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
+		ipxw_mux_msg *conf_in, struct ipxw_mux_msg *conf_out)
+{
+	size_t in_len = sizeof(struct ipxw_mux_msg);
+
+	/* check message type and, if necessary, data length, adjust in_len */
+	switch (conf_in->type) {
+		case IPXW_MUX_GETSOCKNAME:
+			break;
+		default:
+			errno = EOPNOTSUPP;
+			return -1;
+
+	}
+
+	/* force out msg type */
+	if (conf_out->type != IPXW_MUX_CONF) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* check if out msg is sane */
+	if (conf_out->conf.data_len > IPX_MAX_DATA_LEN) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* send the message, this blocks */
+	ssize_t sent_len = send(h.conf_sock, conf_in, in_len, 0);
+	if (sent_len < 0) {
+		return -1;
+	}
+
+	if (sent_len != in_len) {
+		errno = ECOMM;
+		return -1;
+	}
+
+	/* prepare length for receive */
+	size_t expected_out_len = sizeof(struct ipxw_mux_msg) +
+		conf_out->conf.data_len;
+
+	/* receive the response, this blocks */
+	ssize_t rcvd_len = -1;
+	do {
+		rcvd_len = recv(h.conf_sock, conf_out, expected_out_len, 0);
+	} while (rcvd_len < 0 && errno == EINTR);
+	if (rcvd_len < 0) {
+		return -1;
+	}
+
+	/* we must at least receive a whole message */
+	if (rcvd_len < sizeof(struct ipxw_mux_msg)) {
+		errno = EREMOTEIO;
+		return -1;
+	}
+
+	size_t out_len = sizeof(struct ipxw_mux_msg);
+
+	/* check message type and, if necessary, data length, adjust out_len */
+	switch (conf_in->type) {
+		case IPXW_MUX_GETSOCKNAME:
+			break;
+		default:
+			errno = EOPNOTSUPP;
+			return -1;
+	}
+
+	/* the reply message must contain the correct length, if it has one */
+	if (rcvd_len != out_len) {
+		errno = EREMOTEIO;
+		return -1;
+	}
+
+	return rcvd_len;
+}
+
 ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 		bool block)
 {
@@ -812,20 +889,13 @@ ssize_t ipxw_mux_peek_conf_len(struct ipxw_mux_handle h)
 		}
 
 		/* which has to be of the correct type */
-		// TODO: check for all possible config msg types
 		if (msg.type == IPXW_MUX_UNBIND) {
 			/* nothing */
 			return sizeof(msg);
 
-		} else if (msg.type == IPXW_MUX_CONF) {
-			/* the data must fit */
-			if (msg.conf.data_len > IPX_MAX_DATA_LEN) {
-				errno = EREMOTEIO;
-				break;
-			}
-
-			/* return the size of the conf message */
-			return msg.conf.data_len + sizeof(msg);
+		} else if (msg.type == IPXW_MUX_GETSOCKNAME) {
+			/* nothing */
+			return sizeof(msg);
 		}
 
 		/* no other message type permitted */
@@ -907,20 +977,18 @@ ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	}
 
 	/* should be a more specific message type */
-	// TODO: check for all known conf message types, reject everything else
-	// TODO: verify data length for conf msgs that have one
+	/* verify message length for all accepted types */
 	switch (msg->type) {
 		case IPXW_MUX_UNBIND:
-			break;
-		case IPXW_MUX_CONF:
-			if (msg->conf.data_len != rcvd_msg_len - sizeof(struct
-						ipxw_mux_msg)) {
-				errno = EREMOTEIO;
+		case IPXW_MUX_GETSOCKNAME:
+			if (rcvd_msg_len != sizeof(struct ipxw_mux_msg)) {
+				errno = EINVAL;
 				return -1;
 			}
+
 			break;
 		default:
-			errno = EINVAL;
+			errno = ENOTSUP;
 			return -1;
 	}
 
@@ -1043,6 +1111,39 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
 	recv_msg->recv.data_len = data_len;
 
 	return recv_msg;
+}
+
+ssize_t ipxw_mux_recv_conf(struct ipxw_mux_handle h, const struct ipxw_mux_msg
+		*msg)
+{
+	size_t msg_len = sizeof(struct ipxw_mux_msg);
+
+	/* check for permissible types, check their data_len if they have one
+	 * and add it to msg_len  */
+	switch (msg->type) {
+		case IPXW_MUX_GETSOCKNAME:
+			break;
+		default:
+			errno = ENOTSUP;
+			return -1;
+	}
+
+	if (msg_len > IPXW_MUX_MSG_LEN) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	ssize_t sent_len = send(h.data_sock, msg, msg_len, 0);
+	if (sent_len < 0) {
+		return -1;
+	}
+
+	if (sent_len != msg_len) {
+		errno = ECOMM;
+		return -1;
+	}
+
+	return msg_len;
 }
 
 ssize_t ipxw_mux_recv(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg)

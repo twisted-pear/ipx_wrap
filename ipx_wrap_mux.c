@@ -36,6 +36,8 @@ struct bind_entry {
 	UT_hash_handle hh; /* by socket */
 	/* recvd msgs for this binding's socket */
 	struct ipxw_msg_queue in_queue;
+	/* outgoing config messages get queued here */
+	struct ipxw_msg_queue conf_queue;
 	/* corresponding interface */
 	struct if_entry *iface;
 	/* handle for muxing */
@@ -217,6 +219,7 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
 	STAILQ_INIT(&e->in_queue);
+	STAILQ_INIT(&e->conf_queue);
 
 	/* register for epoll */
 	/* data socket */
@@ -496,6 +499,13 @@ static void unbind_entry(struct bind_entry *e)
 		free(msg);
 	}
 
+	/* remove all undelivered config messages */
+	while (!STAILQ_EMPTY(&e->conf_queue)) {
+		struct ipxw_mux_msg *msg = STAILQ_FIRST(&e->conf_queue);
+		STAILQ_REMOVE_HEAD(&e->conf_queue, q_entry);
+		free(msg);
+	}
+
 	/* remove the bind entry from all data structures */
 	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
 	HASH_DEL(ht_sock_to_bind, e);
@@ -521,6 +531,25 @@ static void handle_unbind(int data_sock)
 	unbind_entry(e);
 }
 
+static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int epoll_fd)
+{
+	/* reregister for ready-to-write events, now that config messages are
+	 * available */
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
+		.data.fd = -ipxw_mux_handle_data(be->h)
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_conf(be->h),
+				&ev) < 0) {
+		return false;
+	}
+
+	/* queue the config message on the config socket */
+	STAILQ_INSERT_TAIL(&be->conf_queue, msg, q_entry);
+
+	return true;
+}
+
 static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 		void *ctx)
 {
@@ -530,15 +559,44 @@ static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 		return -1;
 	}
 
-	/* we only support unbind messages for now */
-	if (msg->type != IPXW_MUX_UNBIND) {
+	/* check message type and prepare response */
+	struct ipxw_mux_msg *rsp_msg = NULL;
+	switch (msg->type) {
+		case IPXW_MUX_UNBIND:
+			unbind_entry(be_conf);
+			return 0;
+		case IPXW_MUX_GETSOCKNAME:
+			rsp_msg = calloc(1, sizeof(struct ipxw_mux_msg));
+			if (rsp_msg == NULL) {
+				return -1;
+			}
+
+			rsp_msg->type = IPXW_MUX_GETSOCKNAME;
+			rsp_msg->getsockname.addr.net =
+				be_conf->iface->addr.net;
+			memcpy(rsp_msg->getsockname.addr.node,
+					be_conf->iface->addr.node,
+					IPX_ADDR_NODE_BYTES);
+			rsp_msg->getsockname.addr.sock = be_conf->ipx_sock;
+			rsp_msg->getsockname.recv_bcast = be_conf->recv_bcast;
+			rsp_msg->getsockname.pkt_type_any =
+				be_conf->pkt_type_any;
+
+			break;
+		default:
+			return -1;
+	}
+
+	/* if we reach this code there must be a response message */
+	assert (rsp_msg != NULL);
+
+	int epoll_fd = context->epoll_fd;
+	if (!queue_conf_msg(be_conf, rsp_msg, epoll_fd)) {
+		free(rsp_msg);
 		return -1;
 	}
 
-	unbind_entry(be_conf);
-
 	return 0;
-
 }
 
 static ssize_t conf_msg(int data_sock, int epoll_fd)
@@ -571,6 +629,47 @@ static ssize_t conf_msg(int data_sock, int epoll_fd)
 
 	/* always get rid of the message, it is handled immediately in
 	 * ipxw_mux_do_conf */
+	free(msg);
+
+	return err;
+}
+
+static ssize_t conf_rsp(int data_sock, int epoll_fd)
+{
+	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
+	if (be == NULL) {
+		/* already unbound */
+		return 0;
+	}
+
+	/* no conf msgs to send */
+	if (STAILQ_EMPTY(&be->conf_queue)) {
+		/* unregister from ready-to-write events to avoid busy polling
+		 */
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.data.fd = -data_sock
+		};
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_conf(be->h),
+				&ev);
+
+		return 0;
+	}
+
+	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->conf_queue);
+	ssize_t err = ipxw_mux_recv_conf(be->h, msg);
+	if (err < 0) {
+		/* recoverable errors, don't dequeue the message but try again
+		 * later */
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+		{
+			return 0;
+		}
+
+		/* other error, make sure to get rid of the message */
+	}
+
+	STAILQ_REMOVE_HEAD(&be->conf_queue, q_entry);
 	free(msg);
 
 	return err;
@@ -647,7 +746,6 @@ static ssize_t recv_msg(int data_sock, int epoll_fd)
 		}
 
 		/* other error, make sure to get rid of the message */
-		perror("recving msg");
 	}
 
 	STAILQ_REMOVE_HEAD(&be->in_queue, q_entry);
@@ -1070,6 +1168,20 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 					} else if (err == 0) {
 						/* should not happen */
 						continue;
+					}
+				}
+
+				/* outgoing conf response */
+				if (evs[i].events & EPOLLOUT) {
+					err = conf_rsp(-evs[i].data.fd,
+							epoll_fd);
+					if (err < 0) {
+						/* get rid of the client */
+						perror("sending conf msg");
+						handle_unbind(-evs[i].data.fd);
+						continue;
+					} else if (err == 0) {
+						/* nothing happened */
 					}
 				}
 

@@ -16,6 +16,7 @@ enum ipxw_mux_msg_type {
 	IPXW_MUX_BIND,
 	IPXW_MUX_UNBIND,
 	IPXW_MUX_CONF,
+	IPXW_MUX_GETSOCKNAME,
 	IPXW_MUX_XMIT,
 	IPXW_MUX_RECV,
 	IPXW_MUX_MAX
@@ -42,13 +43,22 @@ struct ipxw_mux_msg_unbind {
 	// empty
 } __attribute__((packed));
 
-// TODO: flesh this out
 struct ipxw_mux_msg_conf {
 	__u8 reserved[sizeof(struct ipx_addr)];
 	__u8 reserved2;
 	__u8 reserved3;
 	__u16 data_len;
 	__u16 reserved4;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_getsockname {
+	struct ipx_addr addr;
+	__u8 pkt_type;
+	__u8 recv_bcast:1,
+	     pkt_type_any:1,
+	     reserved:6;
+	__u16 reserved2;
+	__u16 reserved3;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_xmit {
@@ -78,6 +88,7 @@ struct ipxw_mux_msg {
 				struct ipxw_mux_msg_bind bind;
 				struct ipxw_mux_msg_unbind unbind;
 				struct ipxw_mux_msg_conf conf;
+				struct ipxw_mux_msg_getsockname getsockname;
 				struct ipxw_mux_msg_xmit xmit;
 				struct ipxw_mux_msg_recv recv;
 			};
@@ -146,6 +157,9 @@ struct ipxw_mux_handle ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg);
 /* send unbind msg and close socket */
 void ipxw_mux_unbind(struct ipxw_mux_handle h);
 
+ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
+		ipxw_mux_msg *conf_in, struct ipxw_mux_msg *conf_out);
+
 /* write message to data socket, may block if the caller did not check if the
  * data socket is writeable and block is true */
 ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
@@ -199,6 +213,9 @@ struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
 
 /* turn an ipx message into a recv message, conversion happens in place */
 struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
+
+ssize_t ipxw_mux_recv_conf(struct ipxw_mux_handle h, const struct ipxw_mux_msg
+		*msg);
 
 /* send the recv msg to the client, will block if the data socket is not
  * writeable */
