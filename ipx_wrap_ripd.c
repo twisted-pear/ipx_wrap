@@ -156,8 +156,8 @@ static int mk_rip_pkt(FILE *rtable, __u32 my_prefix, __u32 my_net)
 	return nentries;
 }
 
-static int send_rip_resp(int data_sock, FILE *rtable, struct ipv6_eui64_addr
-		*my_addr)
+static int send_rip_resp(struct ipxw_mux_handle h, FILE *rtable, struct
+		ipv6_eui64_addr *my_addr)
 {
 	__u32 my_prefix = ntohl(my_addr->prefix);
 	__u32 my_net = ntohl(my_addr->ipx_net);
@@ -169,7 +169,7 @@ static int send_rip_resp(int data_sock, FILE *rtable, struct ipv6_eui64_addr
 	}
 
 	printf("Sending RIP response with %u routes.\n", nentries);
-	ssize_t len = ipxw_mux_xmit(data_sock, &rip_pkt_out.mux_msg, true);
+	ssize_t len = ipxw_mux_xmit(h, &rip_pkt_out.mux_msg, true);
 	if (len < 0) {
 		perror("send");
 		return -1;
@@ -229,12 +229,12 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, struct
 	return true;
 }
 
-static void handle_rip_pkt(int data_sock, struct ipv6_eui64_addr *my_addr,
-		__u32 ifidx)
+static void handle_rip_pkt(struct ipxw_mux_handle h, struct ipv6_eui64_addr
+		*my_addr, __u32 ifidx)
 {
 	rip_pkt_in.mux_msg.type = IPXW_MUX_RECV;
 	rip_pkt_in.mux_msg.recv.data_len = IPX_MAX_DATA_LEN;
-	ssize_t len = ipxw_mux_get_recvd(data_sock, &rip_pkt_in.mux_msg, true);
+	ssize_t len = ipxw_mux_get_recvd(h, &rip_pkt_in.mux_msg, true);
 	if (len < 0) {
 		perror("recv");
 		return;
@@ -366,8 +366,8 @@ int main(int argc, char **argv)
 	bind_msg->bind.pkt_type_any = 0;
 	bind_msg->bind.recv_bcast = 1;
 
-	int data_sock = ipxw_mux_bind(bind_msg);
-	if (data_sock < 0) {
+	struct ipxw_mux_handle h = ipxw_mux_bind(bind_msg);
+	if (ipxw_mux_handle_is_error(h)) {
 		perror("bind");
 		return 3;
 	}
@@ -391,7 +391,7 @@ int main(int argc, char **argv)
 	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
 	if (tmr < 0) {
 		perror("creating timer");
-		ipxw_mux_unbind(data_sock);
+		ipxw_mux_unbind(h);
 		return 4;
 	}
 	struct itimerspec tmr_spec = {
@@ -400,7 +400,7 @@ int main(int argc, char **argv)
 	};
 	if (timerfd_settime(tmr, 0, &tmr_spec, NULL) < 0) {
 		perror("arming timer");
-		ipxw_mux_unbind(data_sock);
+		ipxw_mux_unbind(h);
 		close(tmr);
 		return 5;
 	}
@@ -409,14 +409,14 @@ int main(int argc, char **argv)
 	FILE *rtable = fopen(RTABLE_FILE, "r");
 	if (rtable == NULL) {
 		perror("open routing table");
-		ipxw_mux_unbind(data_sock);
+		ipxw_mux_unbind(h);
 		close(tmr);
 		return 6;
 	}
 
 	struct pollfd fds[2] = {
 		{
-			.fd = data_sock,
+			.fd = ipxw_mux_handle_data(h),
 			.events = POLLIN,
 			.revents = 0
 		},
@@ -455,7 +455,7 @@ int main(int argc, char **argv)
 		}
 		/* we can read from the socket */
 		if (fds[0].revents & POLLIN) {
-			handle_rip_pkt(data_sock, my_addr, ifidx);
+			handle_rip_pkt(h, my_addr, ifidx);
 		}
 
 		/* timer */
@@ -467,7 +467,7 @@ int main(int argc, char **argv)
 		}
 		/* the timer expired, send periodic RIP response */
 		if (fds[1].revents & POLLIN) {
-			if (send_rip_resp(data_sock, rtable, my_addr) < 0) {
+			if (send_rip_resp(h, rtable, my_addr) < 0) {
 				fprintf(stderr, "error sending packet\n");
 			}
 			/* consume all expirations */
@@ -477,7 +477,7 @@ int main(int argc, char **argv)
 	}
 
 	fclose(rtable);
-	ipxw_mux_unbind(data_sock);
+	ipxw_mux_unbind(h);
 	close(tmr);
 
 	return ret;

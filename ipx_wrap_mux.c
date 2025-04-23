@@ -38,6 +38,8 @@ struct bind_entry {
 	struct ipxw_msg_queue in_queue;
 	/* corresponding interface */
 	struct if_entry *iface;
+	/* handle for muxing */
+	struct ipxw_mux_handle h;
 	/* remaining data */
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
@@ -75,6 +77,11 @@ struct if_entry {
 	struct bind_entry *ht_ipx_sock_to_bind;
 	/* IPv6 prefix */
 	__be32 prefix;
+};
+
+struct do_ctx {
+	struct bind_entry *be;
+	int epoll_fd;
 };
 
 static struct bind_entry *ht_sock_to_bind = NULL;
@@ -118,8 +125,8 @@ static struct sub_process *get_sub_process_by_ipx_addr(struct ipx_if_addr
 	return sub;
 }
 
-static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
-		struct ipxw_mux_msg_bind *bind_msg)
+static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
+		epoll_fd, struct ipxw_mux_msg_bind *bind_msg)
 {
 	/* illegal network bindings */
 	if (bind_msg->addr.net == IPX_NET_LOCAL) {
@@ -167,7 +174,8 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 	if (ntohs(bind_msg->addr.sock) < ntohs(IPX_MIN_DYNAMIC_SOCKET)) {
 		struct ucred data_creds;
 		socklen_t data_creds_len = sizeof(data_creds);
-		if (getsockopt(data_sock, SOL_SOCKET, SO_PEERCRED, &data_creds,
+		if (getsockopt(ipxw_mux_handle_conf(h), SOL_SOCKET,
+					SO_PEERCRED, &data_creds,
 					&data_creds_len) < 0) {
 			perror("obtaining process credentials");
 			return false;
@@ -201,22 +209,34 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 		return false;
 	}
 
-	e->sock = data_sock;
+	e->sock = ipxw_mux_handle_data(h);
 	e->ipx_sock = bind_msg->addr.sock;
 	e->iface = iface;
+	e->h = h;
 	e->pkt_type = bind_msg->pkt_type;
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
 	STAILQ_INIT(&e->in_queue);
 
 	/* register for epoll */
+	/* data socket */
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
 		.data = {
-			.fd = data_sock
+			.fd = ipxw_mux_handle_data(h)
 		}
 	};
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, data_sock, &ev) < 0) {
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_handle_data(h), &ev) <
+			0) {
+		perror("registering for event polling");
+		free(e);
+		return false;
+	}
+	/* config socket */
+	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	ev.data.fd = -ipxw_mux_handle_data(h);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_handle_conf(h), &ev) <
+			0) {
 		perror("registering for event polling");
 		free(e);
 		return false;
@@ -227,12 +247,12 @@ static bool record_bind(struct if_entry *iface, int data_sock, int epoll_fd,
 	HASH_ADD_INT(ht_sock_to_bind, sock, e);
 
 	/* show the new binding in full */
-	printf("bound %d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
-			data_sock, ntohl(bind_msg->addr.net),
-			bind_msg->addr.node[0], bind_msg->addr.node[1],
-			bind_msg->addr.node[2], bind_msg->addr.node[3],
-			bind_msg->addr.node[4], bind_msg->addr.node[5],
-			ntohs(bind_msg->addr.sock));
+	printf("bound %d:%d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
+			ipxw_mux_handle_data(h), ipxw_mux_handle_conf(h),
+			ntohl(bind_msg->addr.net), bind_msg->addr.node[0],
+			bind_msg->addr.node[1], bind_msg->addr.node[2],
+			bind_msg->addr.node[3], bind_msg->addr.node[4],
+			bind_msg->addr.node[5], ntohs(bind_msg->addr.sock));
 	if (bind_msg->pkt_type_any) {
 		printf("pkt type: any, ");
 	} else {
@@ -314,9 +334,11 @@ static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
 	return len;
 }
 
-static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
+static int tx_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg, void
+		*ctx)
 {
-	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
+	struct do_ctx *context = (struct do_ctx *) ctx;
+	struct bind_entry *be_xmit = context->be;
 	if (be_xmit == NULL) {
 		return -1;
 	}
@@ -327,13 +349,12 @@ static int tx_msg(int data_sock, struct ipxw_mux_msg *msg, void *ctx)
 
 	/* reregister for ready-to-write events, now that messages are
 	 * available */
-	int epoll_fd = *((int *) ctx);
 	int udp_sock = be_xmit->iface->udp_sock;
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
 		.data.fd = udp_sock
 	};
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev) < 0) {
+	if (epoll_ctl(context->epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev) < 0) {
 		return -1;
 	}
 
@@ -479,16 +500,17 @@ static void unbind_entry(struct bind_entry *e)
 	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
 	HASH_DEL(ht_sock_to_bind, e);
 
-	int sock = e->sock;
+	struct ipxw_mux_handle h = e->h;
 
 	/* close the socket and free */
-	close(sock);
+	ipxw_mux_handle_close(e->h);
 	free(e);
 
-	printf("%d unbound\n", sock);
+	printf("%d:%d unbound\n", ipxw_mux_handle_data(h),
+			ipxw_mux_handle_conf(h));
 }
 
-static void handle_unbind(int data_sock, void *ctx)
+static void handle_unbind(int data_sock)
 {
 	struct bind_entry *e = get_bind_entry_by_sock(data_sock);
 	if (e == NULL) {
@@ -499,9 +521,70 @@ static void handle_unbind(int data_sock, void *ctx)
 	unbind_entry(e);
 }
 
+static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
+		void *ctx)
+{
+	struct do_ctx *context = (struct do_ctx *) ctx;
+	struct bind_entry *be_conf = context->be;
+	if (be_conf == NULL) {
+		return -1;
+	}
+
+	/* we only support unbind messages for now */
+	if (msg->type != IPXW_MUX_UNBIND) {
+		return -1;
+	}
+
+	unbind_entry(be_conf);
+
+	return 0;
+
+}
+
+static ssize_t conf_msg(int data_sock, int epoll_fd)
+{
+	struct bind_entry *be_conf = get_bind_entry_by_sock(data_sock);
+	if (be_conf == NULL) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	ssize_t expected = ipxw_mux_peek_conf_len(be_conf->h);
+	if (expected < 0) {
+		return -1;
+	}
+
+	struct ipxw_mux_msg *msg = calloc(1, expected);
+	if (msg == NULL) {
+		return -1;
+	}
+
+	msg->type = IPXW_MUX_CONF;
+	msg->conf.data_len = expected - sizeof(*msg);
+
+	struct do_ctx ctx = {
+		.be = be_conf,
+		.epoll_fd = epoll_fd
+	};
+	ssize_t err = ipxw_mux_do_conf(be_conf->h, msg, &handle_conf_msg,
+			&ctx);
+
+	/* always get rid of the message, it is handled immediately in
+	 * ipxw_mux_do_conf */
+	free(msg);
+
+	return err;
+}
+
 static ssize_t xmit_msg(int data_sock, int epoll_fd)
 {
-	ssize_t expected = ipxw_mux_peek_xmit_len(data_sock);
+	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
+	if (be_xmit == NULL) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	ssize_t expected = ipxw_mux_peek_xmit_len(be_xmit->h);
 	if (expected < 0) {
 		return -1;
 	}
@@ -514,13 +597,16 @@ static ssize_t xmit_msg(int data_sock, int epoll_fd)
 	msg->type = IPXW_MUX_XMIT;
 	msg->xmit.data_len = expected - sizeof(*msg);
 
-	ssize_t err = ipxw_mux_do_xmit(data_sock, msg, &tx_msg, &handle_unbind,
-			&epoll_fd, NULL);
+	struct do_ctx ctx = {
+		.be = be_xmit,
+		.epoll_fd = epoll_fd
+	};
+	ssize_t err = ipxw_mux_do_xmit(be_xmit->h, msg, &tx_msg, &ctx);
 	if (err < 0) {
 		/* some error */
 		free(msg);
 	} else if (err == 0) {
-		/* unbind message */
+		/* should not happen */
 		free(msg);
 	} else {
 		/* message queued for sending */
@@ -551,7 +637,7 @@ static ssize_t recv_msg(int data_sock, int epoll_fd)
 	}
 
 	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->in_queue);
-	ssize_t err = ipxw_mux_recv(be->sock, msg);
+	ssize_t err = ipxw_mux_recv(be->h, msg);
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
@@ -752,17 +838,18 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 
 	struct ipxw_mux_msg bind_msg;
 
-	int data_sock = ipxw_mux_recv_bind_msg(ctrl_sock, &bind_msg);
+	struct ipxw_mux_handle h = ipxw_mux_recv_bind_msg(ctrl_sock,
+			&bind_msg);
 	/* couldn't even receive the bind msg, just quit */
-	if (data_sock < 0) {
+	if (ipxw_mux_handle_is_error(h)) {
 		return -1;
 	}
 	assert(bind_msg.type == IPXW_MUX_BIND);
 
 	/* binding failed, send error response */
-	if (!record_bind(iface, data_sock, epoll_fd, &bind_msg.bind)) {
-		ipxw_mux_send_bind_resp(data_sock, &resp_msg);
-		close(data_sock);
+	if (!record_bind(iface, h, epoll_fd, &bind_msg.bind)) {
+		ipxw_mux_send_bind_resp(h, &resp_msg);
+		ipxw_mux_handle_close(h);
 
 		errno = EACCES;
 		return -1;
@@ -771,7 +858,7 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 	/* binding succeeded, send ack response */
 	resp_msg.err.err = 0;
 	resp_msg.type = IPXW_MUX_BIND_ACK;
-	ipxw_mux_send_bind_resp(data_sock, &resp_msg);
+	ipxw_mux_send_bind_resp(h, &resp_msg);
 
 	return 0;
 }
@@ -786,9 +873,9 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 
 	struct ipxw_mux_msg bind_msg;
 
-	int data_sock = ipxw_mux_recv_bind_msg(ctrl_sock, &bind_msg);
+	struct ipxw_mux_handle h = ipxw_mux_recv_bind_msg(ctrl_sock, &bind_msg);
 	/* couldn't even receive the bind msg, just quit */
-	if (data_sock < 0) {
+	if (ipxw_mux_handle_is_error(h)) {
 		return -1;
 	}
 	assert(bind_msg.type == IPXW_MUX_BIND);
@@ -801,14 +888,14 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 	/* no sub-process listening on the desired interface */
 	if (sub == NULL) {
 		fprintf(stderr, "bind address not allowed\n");
-		ipxw_mux_send_bind_resp(data_sock, &err_msg);
-		close(data_sock);
+		ipxw_mux_send_bind_resp(h, &err_msg);
+		ipxw_mux_handle_close(h);
 
 		errno = EACCES;
 		return -1;
 	}
 
-	/* try to send the data socket to the appropriate sub-process */
+	/* try to send the sockets to the appropriate sub-process */
 
 	/* much of this code was taken from
 	 * https://man7.org/tlpi/code/online/dist/sockets/scm_rights_send.c.html
@@ -827,8 +914,9 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 	msgh.msg_iovlen = 1;
 
 	/* prepare the ancillary data buffer */
+	int fds[2] = { ipxw_mux_handle_data(h), ipxw_mux_handle_conf(h) };
 	union {
-		char buf[CMSG_SPACE(sizeof(int))]; /* Space large
+		char buf[CMSG_SPACE(sizeof(fds))]; /* Space large
 						      enough to hold an
 						      'int' */
 		struct cmsghdr align;
@@ -840,12 +928,22 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 
 	/* prepare ctrl msg header */
 	struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
+	if (cmsgp == NULL)  {
+		fprintf(stderr, "failed to pass binding to sub-process\n");
+		err_msg.err.err = EINVAL;
+		ipxw_mux_send_bind_resp(h, &err_msg);
+		ipxw_mux_handle_close(h);
+
+		errno = EINVAL;
+		return -1;
+
+	}
 	cmsgp->cmsg_level = SOL_SOCKET;
 	cmsgp->cmsg_type = SCM_RIGHTS;
 
 	/* store the socket fd we want to send */
-	cmsgp->cmsg_len = CMSG_LEN(sizeof(int));
-	memcpy(CMSG_DATA(cmsgp), &data_sock, sizeof(int));
+	cmsgp->cmsg_len = CMSG_LEN(sizeof(fds));
+	memcpy(CMSG_DATA(cmsgp), fds, sizeof(fds));
 
 	/* send the ctrl msg */
 	/* should always transmit the entire msg or nothing */
@@ -857,12 +955,12 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 	if (err < 0) {
 		fprintf(stderr, "passing binding to sub-process failed\n");
 		err_msg.err.err = errno;
-		ipxw_mux_send_bind_resp(data_sock, &err_msg);
-		close(data_sock);
+		ipxw_mux_send_bind_resp(h, &err_msg);
+		ipxw_mux_handle_close(h);
 		return -1;
 	}
 
-	close(data_sock);
+	ipxw_mux_handle_close(h);
 	return 0;
 }
 
@@ -961,6 +1059,29 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			}
 
+			/* one of the config sockets */
+			if (evs[i].data.fd < 0) {
+				/* incoming conf msg */
+				if (evs[i].events & EPOLLIN) {
+					err = conf_msg(-evs[i].data.fd,
+							epoll_fd);
+					if (err < 0 && errno != EINTR) {
+						perror("handling conf msg");
+					} else if (err == 0) {
+						/* should not happen */
+						continue;
+					}
+				}
+
+				/* something went wrong, unbind */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					handle_unbind(-evs[i].data.fd);
+					continue;
+				}
+
+				continue;
+			}
+
 			/* one of the data sockets */
 
 			/* can xmit */
@@ -969,7 +1090,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				if (err < 0 && errno != EINTR) {
 					perror("xmitting data");
 				} else if (err == 0) {
-					/* unbound */
+					/* should not happen */
 					continue;
 				}
 			}
@@ -980,7 +1101,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				if (err < 0) {
 					/* get rid of the client */
 					perror("recving data");
-					handle_unbind(evs[i].data.fd, NULL);
+					handle_unbind(evs[i].data.fd);
 					continue;
 				} else if (err == 0) {
 					/* nothing happened */
@@ -989,7 +1110,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* something went wrong, unbind */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-				handle_unbind(evs[i].data.fd, NULL);
+				handle_unbind(evs[i].data.fd);
 				continue;
 			}
 		}

@@ -15,6 +15,7 @@ enum ipxw_mux_msg_type {
 	IPXW_MUX_BIND_ERR,
 	IPXW_MUX_BIND,
 	IPXW_MUX_UNBIND,
+	IPXW_MUX_CONF,
 	IPXW_MUX_XMIT,
 	IPXW_MUX_RECV,
 	IPXW_MUX_MAX
@@ -39,6 +40,15 @@ struct ipxw_mux_msg_bind {
 
 struct ipxw_mux_msg_unbind {
 	// empty
+} __attribute__((packed));
+
+// TODO: flesh this out
+struct ipxw_mux_msg_conf {
+	__u8 reserved[sizeof(struct ipx_addr)];
+	__u8 reserved2;
+	__u8 reserved3;
+	__u16 data_len;
+	__u16 reserved4;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_xmit {
@@ -67,6 +77,7 @@ struct ipxw_mux_msg {
 				struct ipxw_mux_msg_bind_err err;
 				struct ipxw_mux_msg_bind bind;
 				struct ipxw_mux_msg_unbind unbind;
+				struct ipxw_mux_msg_conf conf;
 				struct ipxw_mux_msg_xmit xmit;
 				struct ipxw_mux_msg_recv recv;
 			};
@@ -81,6 +92,16 @@ _Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
 		"ipxw_mux_msg too large");
 
 #define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg))
+
+struct ipxw_mux_handle {
+	int data_sock;
+	int conf_sock;
+};
+
+void ipxw_mux_handle_close(struct ipxw_mux_handle h);
+bool ipxw_mux_handle_is_error(struct ipxw_mux_handle h);
+int ipxw_mux_handle_data(struct ipxw_mux_handle h);
+int ipxw_mux_handle_conf(struct ipxw_mux_handle h);
 
 /* socket-like api */
 /* absolutely not multithreading-safe */
@@ -115,30 +136,31 @@ int ipxw_mux_mk_socketpair(int *sv);
  * block until an answer is received from the muxer, if successful sv[1] will
  * be closed, if an error occurrs both sv[0] and sv[1] will be closed, this
  * blocks */
-int ipxw_mux_bind_socketpair(const struct ipxw_mux_msg *bind_msg, int *sv);
+struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
+		*bind_msg, int *sv);
 
 /* like ipxw_mux_bind_socketpair but creates and manages the socketpair
  * internally */
-int ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg);
+struct ipxw_mux_handle ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg);
 
 /* send unbind msg and close socket */
-void ipxw_mux_unbind(int data_sock);
+void ipxw_mux_unbind(struct ipxw_mux_handle h);
 
 /* write message to data socket, may block if the caller did not check if the
  * data socket is writeable and block is true */
-ssize_t ipxw_mux_xmit(int data_sock, const struct ipxw_mux_msg *msg, bool
-		block);
+ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
+		bool block);
 
 /* get the length of the received message from the header, may block */
-ssize_t ipxw_mux_peek_recvd_len(int data_sock, bool block);
+ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block);
 
 /* get a message from the data socket, assumes msg points to a buffer of at
  * least sizeof(ipxw_mux_msg) bytes and that it is of type IPXW_MUX_RECV and
  * that the maximum IPX payload length that can be received is stored in
  * msg->recv.data_len, may block if the caller did not check if data is
  * available and block is true */
-ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg, bool
-		block);
+ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
+		bool block);
 
 /* muxer functions */
 
@@ -146,25 +168,30 @@ ssize_t ipxw_mux_get_recvd(int data_sock, struct ipxw_mux_msg *msg, bool
 int ipxw_mux_mk_ctrl_sock();
 
 /* send a response to a bind message */
-void ipxw_mux_send_bind_resp(int data_sock, const struct ipxw_mux_msg
-		*resp_msg);
+void ipxw_mux_send_bind_resp(struct ipxw_mux_handle h, const struct
+		ipxw_mux_msg *resp_msg);
 
 /* receive bind message, this blocks on if the caller didn't check if data is
  * available */
-int ipxw_mux_recv_bind_msg(int ctrl_sock, struct ipxw_mux_msg *bind_msg);
+struct ipxw_mux_handle ipxw_mux_recv_bind_msg(int ctrl_sock, struct
+		ipxw_mux_msg *bind_msg);
+
+ssize_t ipxw_mux_peek_conf_len(struct ipxw_mux_handle h);
 
 /* get the length of the message to xmit from the header, blocks if the caller
  * did not check that data is available to read */
-ssize_t ipxw_mux_peek_xmit_len(int data_sock);
+ssize_t ipxw_mux_peek_xmit_len(struct ipxw_mux_handle h);
+
+ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
+		int (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
+			ipxw_mux_msg *msg, void *ctx), void *conf_ctx);
 
 /* receive xmit msgs, turn them into IPX messages and attempt to send them
- * (using transmit_msg_cb), on receiving an unbind msg, unbind the socket
- * (using handle_unbind_cb), this blocks if the caller did not check that data
+ * (using transmit_msg_cb), this blocks if the caller did not check that data
  * is avaiable to read */
-ssize_t ipxw_mux_do_xmit(int data_sock, struct ipxw_mux_msg *msg, int
-		(*tx_msg_cb)(int data_sock, struct ipxw_mux_msg *msg, void
-			*ctx), void (*handle_unbind_cb)(int data_sock, void
-				*ctx), void *tx_ctx, void *unbind_ctx);
+ssize_t ipxw_mux_do_xmit(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
+		int (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
+			*msg, void *ctx), void *tx_ctx);
 
 /* turn an xmit message into an ipx message, conversion happens in place */
 struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
@@ -175,6 +202,7 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 
 /* send the recv msg to the client, will block if the data socket is not
  * writeable */
-ssize_t ipxw_mux_recv(int data_sock, const struct ipxw_mux_msg *msg);
+ssize_t ipxw_mux_recv(struct ipxw_mux_handle h, const struct ipxw_mux_msg
+		*msg);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

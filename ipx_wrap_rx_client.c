@@ -35,38 +35,38 @@ int main(int argc, char **argv)
 	bind_msg.bind.pkt_type_any = pkt_type_any;
 	bind_msg.bind.recv_bcast = recv_bcast;
 
-	int data_sock = ipxw_mux_bind(&bind_msg);
-	if (data_sock < 0) {
+	struct ipxw_mux_handle h = ipxw_mux_bind(&bind_msg);
+	if (ipxw_mux_handle_is_error(h)) {
 		perror("bind");
 		return 2;
 	}
 	printf("bind successful\n");
 
-	ssize_t expected = ipxw_mux_peek_recvd_len(data_sock, true);
+	ssize_t expected = ipxw_mux_peek_recvd_len(h, true);
 	if (expected < 0) {
 		perror("recv");
-		close(data_sock);
+		ipxw_mux_handle_close(h);
 		return 3;
 	}
 	struct ipxw_mux_msg *data_msg = calloc(1, expected);
 	if (data_msg == NULL) {
 		perror("alloc");
-		close(data_sock);
+		ipxw_mux_handle_close(h);
 		return 4;
 	}
 
 	data_msg->type = IPXW_MUX_RECV;
 	data_msg->recv.data_len = expected - sizeof(*data_msg);
-	ssize_t len = ipxw_mux_get_recvd(data_sock, data_msg, true);
+	ssize_t len = ipxw_mux_get_recvd(h, data_msg, true);
 	free(data_msg);
 	if (len < 0) {
 		perror("recv");
-		close(data_sock);
+		ipxw_mux_handle_close(h);
 		return 5;
 	}
 	printf("recvd %ld bytes\n", len);
 
-	ipxw_mux_unbind(data_sock);
+	ipxw_mux_unbind(h);
 
 	return 0;
 }

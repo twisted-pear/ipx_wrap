@@ -38,8 +38,8 @@ int main(int argc, char **argv)
 	bind_msg.bind.addr.sock = htons(bind_sock);
 	bind_msg.bind.recv_bcast = 0;
 
-	int data_sock = ipxw_mux_bind(&bind_msg);
-	if (data_sock < 0) {
+	struct ipxw_mux_handle h = ipxw_mux_bind(&bind_msg);
+	if (ipxw_mux_handle_is_error(h)) {
 		perror("bind");
 		return 3;
 	}
@@ -48,7 +48,7 @@ int main(int argc, char **argv)
 	struct ipxw_mux_msg *data_msg = calloc(1, IPXW_MUX_MSG_LEN);
 	if (data_msg == NULL) {
 		perror("alloc");
-		close(data_sock);
+		ipxw_mux_handle_close(h);
 		return 4;
 	}
 
@@ -62,16 +62,16 @@ int main(int argc, char **argv)
 			sizeof(dest_addr.ipx_node_snd));
 	data_msg->xmit.daddr.sock = htons(dest_sock);
 	data_msg->xmit.pkt_type = pkt_type;
-	ssize_t len = ipxw_mux_xmit(data_sock, data_msg, true);
+	ssize_t len = ipxw_mux_xmit(h, data_msg, true);
 	free(data_msg);
 	if (len < 0) {
 		perror("xmit");
-		close(data_sock);
+		ipxw_mux_handle_close(h);
 		return 5;
 	}
 	printf("xmitted %ld bytes\n", len);
 
-	ipxw_mux_unbind(data_sock);
+	ipxw_mux_unbind(h);
 
 	return 0;
 }
