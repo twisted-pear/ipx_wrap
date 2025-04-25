@@ -92,6 +92,12 @@ static struct sub_process *ht_sock_to_sub = NULL;
 
 static int tmr_fd = -1;
 
+static int sort_bind_entry_by_ipx_sock(struct bind_entry *a, struct bind_entry
+		*b)
+{
+	return ntohs(a->ipx_sock) - ntohs(b->ipx_sock);
+}
+
 static struct bind_entry *get_bind_entry_by_sock(int sock)
 {
 	struct bind_entry *bind;
@@ -127,40 +133,92 @@ static struct sub_process *get_sub_process_by_ipx_addr(struct ipx_if_addr
 	return sub;
 }
 
+static __be16 find_min_free_dyn_sock(struct if_entry *iface)
+{
+	__be16 min_free_dyn_sock = IPX_MIN_DYNAMIC_SOCKET;
+	struct bind_entry *e;
+	struct bind_entry *tmp;
+	HASH_ITER(h_ipx_sock, iface->ht_ipx_sock_to_bind, e, tmp) {
+		/* skip over entries with a socket smaller than
+		 * IPX_MIN_DYNAMIC_SOCKET */
+		if (ntohs(e->ipx_sock) < ntohs(min_free_dyn_sock)) {
+			continue;
+		}
+
+		/* all dynamic sockets in use */
+		if (ntohs(min_free_dyn_sock) >=
+				ntohs(IPX_MIN_WELL_KNOWN_SOCKET)) {
+			break;
+		}
+
+		/* found a free dynamic socket */
+		if (ntohs(e->ipx_sock) > ntohs(min_free_dyn_sock)) {
+			break;
+		}
+
+		/* current dynamic socket taken, try next one */
+		if (ntohs(e->ipx_sock) == ntohs(min_free_dyn_sock)) {
+			min_free_dyn_sock = htons(ntohs(min_free_dyn_sock) +
+					1);
+		}
+	}
+
+	return min_free_dyn_sock;
+}
+
+static bool has_net_bind_service(struct ipxw_mux_handle h)
+{
+	struct ucred data_creds;
+	socklen_t data_creds_len = sizeof(data_creds);
+	if (getsockopt(ipxw_mux_handle_conf(h), SOL_SOCKET, SO_PEERCRED,
+				&data_creds, &data_creds_len) < 0) {
+		return false;
+	}
+
+	cap_t data_caps = cap_get_pid(data_creds.pid);
+	if (data_caps == NULL) {
+		return false;
+	}
+
+	cap_flag_value_t on;
+	if (cap_get_flag(data_caps, CAP_NET_BIND_SERVICE, CAP_PERMITTED, &on)
+			!= 0) {
+		cap_free(data_caps);
+		return false;
+	}
+	cap_free(data_caps);
+
+	return on == CAP_SET;
+}
+
 static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 		epoll_fd, struct ipxw_mux_msg_bind *bind_msg)
 {
-	/* illegal network bindings */
-	if (bind_msg->addr.net == IPX_NET_LOCAL) {
-		fprintf(stderr, "binding to local net not allowed\n");
-		return false;
-	}
-	if (bind_msg->addr.net == IPX_NET_ALL_ROUTES) {
-		fprintf(stderr, "binding to all routes net not allowed\n");
-		return false;
-	}
-	if (bind_msg->addr.net == IPX_NET_DEFAULT_ROUTE) {
-		fprintf(stderr, "binding to default route net not allowed\n");
-		return false;
-	}
-
-	/* illegal node bindings */
-	if (memcmp(bind_msg->addr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES) ==
-			0) {
-		fprintf(stderr, "binding to broadcast node not allowed\n");
-		return false;
-	}
-
 	/* not sure how we got this message, but we can only bind to the
 	 * address of our interface */
 	if (iface->addr.net != bind_msg->addr.net) {
 		fprintf(stderr, "bind address not allowed\n");
+		errno = EACCES;
 		return false;
 	}
 	if (memcmp(iface->addr.node, bind_msg->addr.node, IPX_ADDR_NODE_BYTES)
 			!= 0) {
 		fprintf(stderr, "bind address not allowed\n");
+		errno = EACCES;
 		return false;
+	}
+
+	/* no socket was specified, find the lowest dynamic socket */
+	if (ntohs(bind_msg->addr.sock) == 0) {
+		__be16 min_free_dyn_sock = find_min_free_dyn_sock(iface);
+		if (ntohs(min_free_dyn_sock) >=
+				ntohs(IPX_MIN_WELL_KNOWN_SOCKET)) {
+			fprintf(stderr, "dynamic sockets exhausted\n");
+			errno = EADDRINUSE;
+			return false;
+		}
+
+		bind_msg->addr.sock = min_free_dyn_sock;
 	}
 
 	/* socket already in use */
@@ -168,38 +226,16 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 			bind_msg->addr.sock);
 	if (e != NULL) {
 		fprintf(stderr, "binding already in use\n");
+		errno = EADDRINUSE;
 		return false;
 	}
 
 	/* the process trying to bind needs CAP_NET_BIND_SERVICE to use one of
 	 * the low sockets */
 	if (ntohs(bind_msg->addr.sock) < ntohs(IPX_MIN_DYNAMIC_SOCKET)) {
-		struct ucred data_creds;
-		socklen_t data_creds_len = sizeof(data_creds);
-		if (getsockopt(ipxw_mux_handle_conf(h), SOL_SOCKET,
-					SO_PEERCRED, &data_creds,
-					&data_creds_len) < 0) {
-			perror("obtaining process credentials");
-			return false;
-		}
-
-		cap_t data_caps = cap_get_pid(data_creds.pid);
-		if (data_caps == NULL) {
-			perror("obtaining process capabilities");
-			return false;
-		}
-
-		cap_flag_value_t on;
-		if (cap_get_flag(data_caps, CAP_NET_BIND_SERVICE,
-					CAP_PERMITTED, &on) != 0) {
-			perror("checking for CAP_NET_BIND_SERVICE");
-			cap_free(data_caps);
-			return false;
-		}
-		cap_free(data_caps);
-
-		if (on != CAP_SET) {
+		if (!has_net_bind_service(h)) {
 			fprintf(stderr, "bind to low socket not permitted\n");
+			errno = EACCES;
 			return false;
 		}
 	}
@@ -246,7 +282,8 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	}
 
 	/* save binding */
-	HASH_ADD(h_ipx_sock, iface->ht_ipx_sock_to_bind, ipx_sock, sizeof(__be16), e);
+	HASH_ADD_INORDER(h_ipx_sock, iface->ht_ipx_sock_to_bind, ipx_sock,
+			sizeof(__be16), e, sort_bind_entry_by_ipx_sock);
 	HASH_ADD_INT(ht_sock_to_bind, sock, e);
 
 	/* show the new binding in full */
@@ -947,10 +984,10 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 
 	/* binding failed, send error response */
 	if (!record_bind(iface, h, epoll_fd, &bind_msg.bind)) {
+		resp_msg.err.err = errno;
 		ipxw_mux_send_bind_resp(h, &resp_msg);
 		ipxw_mux_handle_close(h);
 
-		errno = EACCES;
 		return -1;
 	}
 
@@ -972,95 +1009,147 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 
 	struct ipxw_mux_msg bind_msg;
 
-	struct ipxw_mux_handle h = ipxw_mux_recv_bind_msg(ctrl_sock, &bind_msg);
+	struct ipxw_mux_handle h = ipxw_mux_recv_bind_msg(ctrl_sock,
+			&bind_msg);
 	/* couldn't even receive the bind msg, just quit */
 	if (ipxw_mux_handle_is_error(h)) {
 		return -1;
 	}
 	assert(bind_msg.type == IPXW_MUX_BIND);
 
-	struct ipx_if_addr addr;
-	addr.net = bind_msg.bind.addr.net;
-	memcpy(addr.node, bind_msg.bind.addr.node, IPX_ADDR_NODE_BYTES);
-	struct sub_process *sub = get_sub_process_by_ipx_addr(&addr);
-
-	/* no sub-process listening on the desired interface */
-	if (sub == NULL) {
-		fprintf(stderr, "bind address not allowed\n");
-		ipxw_mux_send_bind_resp(h, &err_msg);
-		ipxw_mux_handle_close(h);
-
-		errno = EACCES;
-		return -1;
-	}
-
-	/* try to send the sockets to the appropriate sub-process */
-
-	/* much of this code was taken from
-	 * https://man7.org/tlpi/code/online/dist/sockets/scm_rights_send.c.html
-	 */
-
-	struct msghdr msgh;
-	msgh.msg_name = NULL;
-	msgh.msg_namelen = 0;
-
-	/* send the full message */
-	struct iovec iov;
-	iov.iov_base = &bind_msg;
-	iov.iov_len = sizeof(bind_msg);
-
-	msgh.msg_iov = &iov;
-	msgh.msg_iovlen = 1;
-
-	/* prepare the ancillary data buffer */
-	int fds[2] = { ipxw_mux_handle_data(h), ipxw_mux_handle_conf(h) };
-	union {
-		char buf[CMSG_SPACE(sizeof(fds))]; /* Space large
-						      enough to hold an
-						      'int' */
-		struct cmsghdr align;
-	} ctrl_msg;
-	memset(ctrl_msg.buf, 0, sizeof(ctrl_msg.buf));
-
-	msgh.msg_control = ctrl_msg.buf;
-	msgh.msg_controllen = sizeof(ctrl_msg.buf);
-
-	/* prepare ctrl msg header */
-	struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
-	if (cmsgp == NULL)  {
-		fprintf(stderr, "failed to pass binding to sub-process\n");
-		err_msg.err.err = EINVAL;
-		ipxw_mux_send_bind_resp(h, &err_msg);
-		ipxw_mux_handle_close(h);
-
-		errno = EINVAL;
-		return -1;
-
-	}
-	cmsgp->cmsg_level = SOL_SOCKET;
-	cmsgp->cmsg_type = SCM_RIGHTS;
-
-	/* store the socket fd we want to send */
-	cmsgp->cmsg_len = CMSG_LEN(sizeof(fds));
-	memcpy(CMSG_DATA(cmsgp), fds, sizeof(fds));
-
-	/* send the ctrl msg */
-	/* should always transmit the entire msg or nothing */
-	ssize_t err;
 	do {
-		err = sendmsg(sub->sub_sock, &msgh, MSG_DONTWAIT);
-	} while (err < 0 && errno == EINTR);
+		/* illegal networks, reject */
+		if (bind_msg.bind.addr.net == IPX_NET_LOCAL) {
+			fprintf(stderr, "no net to bind to specified\n");
+			errno = EADDRNOTAVAIL;
+			break;
+		}
+		if (bind_msg.bind.addr.net == IPX_NET_ALL_ROUTES) {
+			fprintf(stderr, "binding to all routes net not "
+					"allowed\n");
+			errno = EACCES;
+			break;
+		}
+		if (bind_msg.bind.addr.net == IPX_NET_DEFAULT_ROUTE) {
+			fprintf(stderr, "binding to default route net not "
+					"allowed\n");
+			errno = EACCES;
+			break;
+		}
 
-	if (err < 0) {
-		fprintf(stderr, "passing binding to sub-process failed\n");
-		err_msg.err.err = errno;
-		ipxw_mux_send_bind_resp(h, &err_msg);
+		/* illegal node bindings */
+		if (memcmp(bind_msg.bind.addr.node, IPX_BCAST_NODE,
+					IPX_ADDR_NODE_BYTES) == 0) {
+			fprintf(stderr, "binding to broadcast node not "
+					"allowed\n");
+			errno = EACCES;
+			break;
+		}
+
+		struct sub_process *sub = NULL;
+		/* no node address specified, guess from the network */
+		if (memcmp(bind_msg.bind.addr.node, IPX_NO_NODE,
+					IPX_ADDR_NODE_BYTES) == 0) {
+			struct sub_process *se = NULL;
+			struct sub_process *stmp = NULL;
+			/* find a sub-process with a matching network number...
+			 */
+			HASH_ITER(h_ipx_addr, ht_ipx_addr_to_sub, se, stmp) {
+				if (bind_msg.bind.addr.net == se->addr.net) {
+					/* ... and take the node part */
+					memcpy(bind_msg.bind.addr.node,
+							se->addr.node,
+							IPX_ADDR_NODE_BYTES);
+					sub = se;
+					break;
+				}
+			}
+		} else {
+			struct ipx_if_addr addr;
+			addr.net = bind_msg.bind.addr.net;
+			memcpy(addr.node, bind_msg.bind.addr.node,
+					IPX_ADDR_NODE_BYTES);
+			sub = get_sub_process_by_ipx_addr(&addr);
+		}
+
+		/* no sub-process listening on the desired interface */
+		if (sub == NULL) {
+			fprintf(stderr, "no interface with the specified "
+					"address\n");
+			errno = EADDRNOTAVAIL;
+			break;
+		}
+
+		/* try to send the sockets to the appropriate sub-process */
+
+		/* much of this code was taken from
+		 * https://man7.org/tlpi/code/online/dist/sockets/scm_rights_send.c.html
+		 */
+
+		struct msghdr msgh;
+		msgh.msg_name = NULL;
+		msgh.msg_namelen = 0;
+
+		/* send the full message */
+		struct iovec iov;
+		iov.iov_base = &bind_msg;
+		iov.iov_len = sizeof(bind_msg);
+
+		msgh.msg_iov = &iov;
+		msgh.msg_iovlen = 1;
+
+		/* prepare the ancillary data buffer */
+		int fds[2] = { ipxw_mux_handle_data(h), ipxw_mux_handle_conf(h)
+		};
+		union {
+			char buf[CMSG_SPACE(sizeof(fds))]; /* Space large
+							      enough to hold an
+							      'int' */
+			struct cmsghdr align;
+		} ctrl_msg;
+		memset(ctrl_msg.buf, 0, sizeof(ctrl_msg.buf));
+
+		msgh.msg_control = ctrl_msg.buf;
+		msgh.msg_controllen = sizeof(ctrl_msg.buf);
+
+		/* prepare ctrl msg header */
+		struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
+		if (cmsgp == NULL)  {
+			fprintf(stderr, "failed to pass binding to "
+					"sub-process\n");
+			errno = EINVAL;
+			break;
+		}
+		cmsgp->cmsg_level = SOL_SOCKET;
+		cmsgp->cmsg_type = SCM_RIGHTS;
+
+		/* store the socket fd we want to send */
+		cmsgp->cmsg_len = CMSG_LEN(sizeof(fds));
+		memcpy(CMSG_DATA(cmsgp), fds, sizeof(fds));
+
+		/* send the ctrl msg */
+		/* should always transmit the entire msg or nothing */
+		ssize_t err;
+		do {
+			err = sendmsg(sub->sub_sock, &msgh, MSG_DONTWAIT);
+		} while (err < 0 && errno == EINTR);
+
+		if (err < 0) {
+			fprintf(stderr, "failed to pass binding to "
+					"sub-process\n");
+			break;
+		}
+
 		ipxw_mux_handle_close(h);
-		return -1;
-	}
+		return 0;
+	} while (0);
 
+	/* reject binding and send back error */
+	err_msg.err.err = errno;
+	ipxw_mux_send_bind_resp(h, &err_msg);
 	ipxw_mux_handle_close(h);
-	return 0;
+
+	return -1;
 }
 
 static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)

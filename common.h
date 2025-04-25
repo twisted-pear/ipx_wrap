@@ -16,6 +16,9 @@
 #define IPX_NET_DEFAULT_ROUTE bpf_htonl(0xFFFFFFFE)
 static const __u8 IPX_BCAST_NODE[IPX_ADDR_NODE_BYTES] = { 0xFF, 0xFF, 0xFF,
 	0xFF, 0xFF, 0xFF };
+static const __u8 IPX_NO_NODE[IPX_ADDR_NODE_BYTES] = { 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00 };
+#define IPX_ANY_DYNAMIC_SOCKET bpf_htons(0x0000)
 #define IPX_MIN_DYNAMIC_SOCKET bpf_htons(0x4000)
 #define IPX_MIN_WELL_KNOWN_SOCKET bpf_htons(0x8000)
 
