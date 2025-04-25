@@ -578,6 +578,7 @@ static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 					be_conf->iface->addr.node,
 					IPX_ADDR_NODE_BYTES);
 			rsp_msg->getsockname.addr.sock = be_conf->ipx_sock;
+			rsp_msg->getsockname.pkt_type = be_conf->pkt_type;
 			rsp_msg->getsockname.recv_bcast = be_conf->recv_bcast;
 			rsp_msg->getsockname.pkt_type_any =
 				be_conf->pkt_type_any;

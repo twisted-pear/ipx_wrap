@@ -289,6 +289,12 @@ ssize_t ipxw_mux_sk_recvfrom(int sockfd, void *buf, size_t len, int flags,
 		return -1;
 	}
 
+	/* check for invalid addrlen */
+	if (*addrlen < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	/* look up the socket */
 	struct ipxw_mux_sk *sk;
 	HASH_FIND_INT(ht_fd_to_mux_sk, &sockfd, sk);
@@ -341,6 +347,81 @@ ssize_t ipxw_mux_sk_recvfrom(int sockfd, void *buf, size_t len, int flags,
 	}
 
 	return ret_len;
+}
+
+int ipxw_mux_sk_getsockname(int sockfd, struct sockaddr *restrict addr,
+		socklen_t *restrict addrlen)
+{
+	/* filter invalid parameters */
+	if (addr == NULL || addrlen == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* check for invalid addrlen */
+	if (*addrlen < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* look up the socket */
+	struct ipxw_mux_sk *sk;
+	HASH_FIND_INT(ht_fd_to_mux_sk, &sockfd, sk);
+	if (sk == NULL) {
+		errno = ENOTSOCK;
+		return -1;
+	}
+
+	/* socket has to be bound */
+	if (!sk->bound) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* prepare in message */
+	struct ipxw_mux_msg in_msg;
+	memset(&in_msg, 0, sizeof(in_msg));
+	in_msg.type = IPXW_MUX_GETSOCKNAME;
+
+	/* prepare out message */
+	struct ipxw_mux_msg out_msg;
+	memset(&out_msg, 0, sizeof(out_msg));
+	out_msg.type = IPXW_MUX_CONF;
+
+	ssize_t out_len = ipxw_mux_send_recv_conf_msg(sk->h, &in_msg,
+			&out_msg);
+	if (out_len < 0) {
+		return -1;
+	}
+
+	/* verify output message */
+	if (out_len != sizeof(out_msg)) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (out_msg.type != IPXW_MUX_GETSOCKNAME) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* return the address */
+	struct sockaddr_ipx sk_addr;
+	memset(&sk_addr, 0, sizeof(sk_addr));
+	sk_addr.sipx_family = AF_IPX;
+	sk_addr.sipx_port = out_msg.getsockname.addr.sock;
+	sk_addr.sipx_network = out_msg.getsockname.addr.net;
+	memcpy(sk_addr.sipx_node, out_msg.getsockname.addr.node,
+			IPX_ADDR_NODE_BYTES);
+	sk_addr.sipx_type = out_msg.getsockname.pkt_type_any ?
+		IPXW_MUX_SK_PKT_TYPE_ANY : out_msg.getsockname.pkt_type;
+
+	/* set the output length */
+	socklen_t sk_addr_len = (sizeof(sk_addr) > *addrlen) ? *addrlen :
+		sizeof(sk_addr);
+	memcpy(addr, &sk_addr, sk_addr_len);
+	*addrlen = sizeof(sk_addr);
+
+	return 0;
 }
 
 int ipxw_mux_sk_close(int fd)
@@ -1133,7 +1214,7 @@ ssize_t ipxw_mux_recv_conf(struct ipxw_mux_handle h, const struct ipxw_mux_msg
 		return -1;
 	}
 
-	ssize_t sent_len = send(h.data_sock, msg, msg_len, 0);
+	ssize_t sent_len = send(h.conf_sock, msg, msg_len, 0);
 	if (sent_len < 0) {
 		return -1;
 	}

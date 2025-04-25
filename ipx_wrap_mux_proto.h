@@ -135,6 +135,8 @@ ssize_t ipxw_mux_sk_sendto(int sockfd, const void *buf, size_t len, int flags,
 		const struct sockaddr *dest_addr, socklen_t addrlen);
 ssize_t ipxw_mux_sk_recvfrom(int sockfd, void *buf, size_t len, int flags,
 		struct sockaddr *src_addr, socklen_t *addrlen);
+int ipxw_mux_sk_getsockname(int sockfd, struct sockaddr *restrict addr,
+		socklen_t *restrict addrlen);
 int ipxw_mux_sk_close(int fd);
 
 /* client functions */
