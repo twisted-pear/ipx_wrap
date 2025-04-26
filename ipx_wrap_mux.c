@@ -71,6 +71,8 @@ struct sub_process {
 struct if_entry {
 	/* net and node IPX addr */
 	struct ipx_if_addr addr;
+	/* the UDP socket for receiving multicast */
+	int mcast_udp_sock;
 	/* the actual UDP socket */
 	int udp_sock;
 	/* msgs to send */
@@ -442,11 +444,10 @@ static ssize_t peek_udp_recv_len(int udp_sock)
 	return -1;
 }
 
-static ssize_t udp_recv(struct if_entry *iface, int epoll_fd)
+static ssize_t udp_recv(struct if_entry *iface, int udp_sock, int epoll_fd)
 {
 	ssize_t ret = -1;
 
-	int udp_sock = iface->udp_sock;
 	ssize_t expected = peek_udp_recv_len(udp_sock);
 	if (expected < 0) {
 		return -1;
@@ -525,6 +526,16 @@ static ssize_t udp_recv(struct if_entry *iface, int epoll_fd)
 	/* something went wrong, free the msg buffer */
 	free(ipx_msg);
 	return ret;
+}
+
+static ssize_t udp_recv_mc(struct if_entry *iface, int epoll_fd)
+{
+	return udp_recv(iface, iface->mcast_udp_sock, epoll_fd);
+}
+
+static ssize_t udp_recv_uc(struct if_entry *iface, int epoll_fd)
+{
+	return udp_recv(iface, iface->udp_sock, epoll_fd);
 }
 
 static void unbind_entry(struct bind_entry *e)
@@ -836,6 +847,9 @@ static void cleanup_sub_processes(bool sub_setup)
 
 static void cleanup_iface(struct if_entry *iface)
 {
+	/* close multicast UDP socket */
+	close(iface->mcast_udp_sock);
+
 	/* close UDP socket */
 	close(iface->udp_sock);
 
@@ -885,7 +899,7 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 	exit(exit_code);
 }
 
-static int mk_udp_socket(const char *ifname)
+static int mk_mcast_udp_socket(const char *ifname)
 {
 	/* determine the ifindex */
 	__u32 ifidx = if_nametoindex(ifname);
@@ -924,7 +938,32 @@ static int mk_udp_socket(const char *ifname)
 		.sin6_flowinfo = 0,
 		.sin6_scope_id = 0
 	};
-	memset(&source.sin6_addr, 0x00, sizeof(source.sin6_addr));
+	memcpy(&source.sin6_addr, IPV6_MCAST_ALL_NODES,
+			sizeof(source.sin6_addr));
+	if (bind(udp_sock, (struct sockaddr *) &source, sizeof(source)) < 0) {
+		close(udp_sock);
+		return -1;
+	}
+
+	return udp_sock;
+}
+
+static int mk_udp_socket(struct ipv6_eui64_addr *ipv6_addr)
+{
+	/* prepare the UDP socket */
+	int udp_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (udp_sock < 0) {
+		return -1;
+	}
+
+	/* bind to the port (but not the interface IP) */
+	struct sockaddr_in6 source = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(IPX_IN_IPV6_PORT),
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	memcpy(&source.sin6_addr, ipv6_addr, sizeof(source.sin6_addr));
 	if (bind(udp_sock, (struct sockaddr *) &source, sizeof(source)) < 0) {
 		close(udp_sock);
 		return -1;
@@ -953,11 +992,20 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 	STAILQ_INIT(&iface->out_queue);
 
 	/* make and bind the UDP socket for our interface */
-	int udp_sock = mk_udp_socket(ifname);
-	if (udp_sock < 0) {
+	int mcast_udp_sock = mk_mcast_udp_socket(ifname);
+	if (mcast_udp_sock < 0) {
 		free(iface);
 		return NULL;
 	}
+
+	int udp_sock = mk_udp_socket(ipv6_addr);
+	if (udp_sock < 0) {
+		close(mcast_udp_sock);
+		free(iface);
+		return NULL;
+	}
+
+	iface->mcast_udp_sock = mcast_udp_sock;
 	iface->udp_sock = udp_sock;
 
 	return iface;
@@ -1173,6 +1221,14 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
 	}
 
+	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	ev.data.fd = iface->mcast_udp_sock;
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->mcast_udp_sock, &ev) < 0)
+	{
+		perror("registering multicast UDP socket for event polling");
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
+	}
+
 	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
 	ev.data.fd = iface->udp_sock;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->udp_sock, &ev) < 0) {
@@ -1214,18 +1270,42 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				continue;
 			}
 
-			/* UDP socket */
-			if (evs[i].data.fd == iface->udp_sock) {
+			/* multicast UDP socket */
+			if (evs[i].data.fd == iface->mcast_udp_sock) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					fprintf(stderr, "UDP socket error\n");
+					fprintf(stderr, "multicast UDP socket "
+							"error\n");
 					cleanup_and_exit(iface, epoll_fd,
 							ctrl_sock, 7);
 				}
 
 				/* can recv */
 				if (evs[i].events & EPOLLIN) {
-					err = udp_recv(iface, epoll_fd);
+					err = udp_recv_mc(iface, epoll_fd);
+					if (err < 0 && errno != EINTR) {
+						perror("multicast UDP recv");
+					} else if (err == 0) {
+						/* nobody was interested */
+					}
+				}
+
+				continue;
+
+			}
+
+			/* UDP socket */
+			if (evs[i].data.fd == iface->udp_sock) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "UDP socket error\n");
+					cleanup_and_exit(iface, epoll_fd,
+							ctrl_sock, 8);
+				}
+
+				/* can recv */
+				if (evs[i].events & EPOLLIN) {
+					err = udp_recv_uc(iface, epoll_fd);
 					if (err < 0 && errno != EINTR) {
 						perror("UDP recv");
 					} else if (err == 0) {
