@@ -17,6 +17,8 @@
 #define SAP_SOCK 0x0452
 #define SAP_PKT_TYPE 0x04
 #define SAP_EXPIRY_SECS (60*5)
+#define SAP_MAX_SRVS_PER_PKT 7 /* max observed */
+#define SAP_BCAST_INTERVAL_SECS 60
 
 #define SAP_SRV_TYPE_WILD htons(0xFFFF)
 
@@ -49,7 +51,7 @@ struct srv_entry {
 
 struct srv_id_pkt {
 	__be16 rsp_type;
-	struct srv_data data;
+	struct srv_data data[0];
 } __attribute__((packed));
 
 struct srv_query {
@@ -87,6 +89,98 @@ static struct srv_type_list *ht_srv_type_to_srv_list = NULL;
 
 static struct if_entry *ht_sock_to_if = NULL;
 static struct if_entry *ht_ipx_addr_to_if = NULL;
+
+static bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg
+		*msg, int epoll_fd)
+{
+	int data_sock = ipxw_mux_handle_data(iface->mux_handle);
+
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
+		.data.fd = data_sock
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, data_sock, &ev) < 0) {
+		return false;
+	}
+
+	/* queue the message on the interface */
+	STAILQ_INSERT_TAIL(&iface->out_queue, msg, q_entry);
+
+	return true;
+}
+
+static bool prepare_sap_bcast_for_iface(struct if_entry *iface, int epoll_fd)
+{
+	struct ipxw_mux_msg *bcast = calloc(1, sizeof(struct ipxw_mux_msg) +
+			sizeof(struct srv_id_pkt));
+	struct srv_id_pkt *sap = (struct srv_id_pkt *) bcast->data;
+
+	bcast->type = IPXW_MUX_XMIT;
+	bcast->xmit.daddr.net = iface->addr.net;
+	memcpy(bcast->xmit.daddr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
+	bcast->xmit.daddr.sock = htons(SAP_SOCK);
+	bcast->xmit.pkt_type = SAP_PKT_TYPE;
+	bcast->xmit.data_len = sizeof(struct srv_id_pkt);
+
+	sap->rsp_type = SAP_RSP_TYPE_PERIODIC_BC;
+
+	if (!queue_msg_on_iface(iface, bcast, epoll_fd)) {
+		free(bcast);
+		return false;
+	}
+
+	return true;
+}
+
+static void prepare_sap_bcasts(int epoll_fd)
+{
+	printf("preparing SAP broadcast\n");
+
+	/* prepare broadcast for all interfaces */
+	struct if_entry *e;
+	struct if_entry *tmp;
+	HASH_ITER(h_data_sock, ht_sock_to_if, e, tmp) {
+		if (!prepare_sap_bcast_for_iface(e, epoll_fd)) {
+			perror("sending SAP bcast");
+		}
+	}
+}
+
+static ssize_t send_queued_msgs(struct if_entry *iface, int epoll_fd)
+{
+	int data_sock = ipxw_mux_handle_data(iface->mux_handle);
+
+	/* no msgs to send */
+	if (STAILQ_EMPTY(&iface->out_queue)) {
+		/* unregister from ready-to-write events to avoid busy polling
+		 */
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.data.fd = data_sock
+		};
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, data_sock, &ev);
+
+		return 0;
+	}
+
+	struct ipxw_mux_msg *xmit_msg = STAILQ_FIRST(&iface->out_queue);
+	ssize_t err = ipxw_mux_xmit(iface->mux_handle, xmit_msg, false);
+	if (err < 0) {
+		/* recoverable errors, don't dequeue the message but try again
+		 * later */
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+		{
+			return 0;
+		}
+
+		/* other error, make sure to get rid of the message */
+	}
+
+	STAILQ_REMOVE_HEAD(&iface->out_queue, q_entry);
+	free(xmit_msg);
+
+	return err;
+}
 
 static void cleanup_iface(struct if_entry *iface)
 {
@@ -205,9 +299,9 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, int
 		/* add new interface entry */
 		HASH_ADD(h_ipx_addr, ht_ipx_addr_to_if, addr,
 				sizeof(iface->addr), iface);
-		int data_sock = ipxw_mux_handle_data(iface->mux_handle);
-		HASH_ADD_KEYPTR(h_data_sock, ht_sock_to_if, &data_sock,
-				sizeof(data_sock), iface);
+		HASH_ADD_KEYPTR(h_data_sock, ht_sock_to_if,
+				&iface->mux_handle.data_sock,
+				sizeof(iface->mux_handle.data_sock), iface);
 
 		printf("adding interface "
 				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
@@ -257,7 +351,7 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd)
 
 		/* get or create a new interface for this address */
 		struct if_entry *iface = add_iface(ipv6_addr, epoll_fd);
-		/* an error occurred during process creation, abort */
+		/* an error occurred during interface creation, abort */
 		if (iface == NULL) {
 			freeifaddrs(addrs);
 			return false;
@@ -312,7 +406,8 @@ static int setup_timer(int epoll_fd, time_t secs)
 	return tmr;
 }
 
-static int check_timeout_expired(time_t timeout_secs, time_t *last)
+static int check_timeout_expired(time_t timeout_secs, time_t last, time_t
+		*new_now)
 {
 	struct timespec now;
 	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
@@ -322,9 +417,9 @@ static int check_timeout_expired(time_t timeout_secs, time_t *last)
 	time_t now_secs = now.tv_sec;
 
 	time_t diff;
-	__builtin_sub_overflow(now_secs, *last, &diff);
+	__builtin_sub_overflow(now_secs, last, &diff);
 	if (diff > timeout_secs) {
-		*last = now_secs;
+		*new_now = now_secs;
 		return 1;
 	}
 
@@ -370,6 +465,8 @@ int main(int argc, char **argv)
 	}
 
 	time_t last_interface_scan = 0;
+	time_t last_service_bcast = 0;
+	time_t current_secs = 0;
 	ssize_t err;
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
 	while (1) {
@@ -394,8 +491,10 @@ int main(int argc, char **argv)
 				}
 
 				/* check if inferfaces need to be rescanned */
-				err = check_timeout_expired(INTERFACE_RESCAN_SECS,
-						&last_interface_scan);
+				err = check_timeout_expired(
+						INTERFACE_RESCAN_SECS,
+						last_interface_scan,
+						&current_secs);
 				if (err < 0) {
 					perror("interface rescan timer");
 					cleanup_and_exit(tmr_fd, epoll_fd, 7);
@@ -407,6 +506,21 @@ int main(int argc, char **argv)
 						cleanup_and_exit(tmr_fd,
 								epoll_fd, 8);
 					}
+					last_interface_scan = current_secs;
+				}
+
+				err = check_timeout_expired(
+						SAP_BCAST_INTERVAL_SECS,
+						last_service_bcast,
+						&current_secs);
+				if (err < 0) {
+					perror("SAP expiry timer");
+					cleanup_and_exit(tmr_fd, epoll_fd, 9);
+				} else if (err > 0) {
+					/* send the SAP broadcast on all
+					 * interfaces */
+					prepare_sap_bcasts(epoll_fd);
+					last_service_bcast = current_secs;
 				}
 
 				/* consume all expirations */
@@ -419,11 +533,30 @@ int main(int argc, char **argv)
 			/* one of the interface sockets */
 
 			struct if_entry *iface;
-			HASH_FIND(h_data_sock, ht_sock_to_if, &evs[i].data.fd,
-					sizeof(evs[i].data.fd), iface);
+			int data_sock = evs[i].data.fd;
+			HASH_FIND(h_data_sock, ht_sock_to_if, &data_sock,
+					sizeof(data_sock), iface);
 			/* interface already deleted */
 			if (iface == NULL) {
 				continue;
+			}
+
+			/* can xmit */
+			if (evs[i].events & EPOLLIN) {
+				// TODO
+			}
+
+			/* send queued pkts */
+			if (evs[i].events & EPOLLOUT) {
+				err = send_queued_msgs(iface, epoll_fd);
+				if (err < 0) {
+					/* get rid of the client */
+					perror("recving data");
+					cleanup_iface(iface);
+					continue;
+				} else if (err == 0) {
+					/* nothing happened */
+				}
 			}
 
 			/* something went wrong, remove interface */
