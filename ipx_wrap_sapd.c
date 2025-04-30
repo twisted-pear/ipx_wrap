@@ -304,11 +304,14 @@ static bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg
 	return true;
 }
 
-static bool prepare_sap_bcast_for_iface(struct if_entry *iface, int epoll_fd)
+static struct ipxw_mux_msg *mk_sap_bcast_pkt_for_iface(struct if_entry *iface)
 {
-	// TODO: actually fill the packet with data
 	struct ipxw_mux_msg *bcast = calloc(1, sizeof(struct ipxw_mux_msg) +
-			sizeof(struct srv_id_pkt));
+			sizeof(struct srv_id_pkt) + (sizeof(struct srv_data) *
+				SAP_MAX_SRVS_PER_PKT));
+	if (bcast == NULL) {
+		return false;
+	}
 	struct srv_id_pkt *sap = (struct srv_id_pkt *) bcast->data;
 
 	bcast->type = IPXW_MUX_XMIT;
@@ -317,9 +320,64 @@ static bool prepare_sap_bcast_for_iface(struct if_entry *iface, int epoll_fd)
 	bcast->xmit.daddr.sock = htons(SAP_SOCK);
 	bcast->xmit.pkt_type = SAP_PKT_TYPE;
 	bcast->xmit.data_len = sizeof(struct srv_id_pkt);
-
 	sap->rsp_type = SAP_RSP_TYPE_PERIODIC_BC;
 
+	return bcast;
+}
+
+static bool prepare_sap_bcast_for_iface(struct if_entry *iface, int epoll_fd)
+{
+	struct ipxw_mux_msg *bcast = NULL;
+	int i = 0;
+
+	struct srv_entry *se;
+	struct srv_entry *stmp;
+	HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
+		/* do not broadcast back to the interface from where we got the
+		 * server */
+		if (se->learned_from_net == iface->addr.net) {
+			continue;
+		}
+
+		/* start a new broadcast packet */
+		if (bcast == NULL) {
+			bcast = mk_sap_bcast_pkt_for_iface(iface);
+			if (bcast == NULL) {
+				return false;
+			}
+
+			i = 0;
+		}
+		assert(bcast != NULL);
+
+		struct srv_id_pkt *sap = (struct srv_id_pkt *) bcast->data;
+
+		/* fill in the data from the entry */
+		memcpy(&sap->data[i], &se->data, sizeof(struct srv_data));
+		/* increase hop counter */
+		sap->data[i].hops = htons(ntohs(sap->data[i].hops) + 1);
+		bcast->xmit.data_len += sizeof(struct srv_data);
+
+		/* ready for next entry */
+		i++;
+
+		/* broadcast packet is full, transmit */
+		if (i >= SAP_MAX_SRVS_PER_PKT) {
+			if (!queue_msg_on_iface(iface, bcast, epoll_fd)) {
+				free(bcast);
+				return false;
+			}
+
+			bcast = NULL;
+		}
+	}
+
+	/* no broadcast packet left, all were transmitted */
+	if (bcast == NULL) {
+		return true;
+	}
+
+	/* transmit last broadcast packet */
 	if (!queue_msg_on_iface(iface, bcast, epoll_fd)) {
 		free(bcast);
 		return false;
@@ -330,7 +388,7 @@ static bool prepare_sap_bcast_for_iface(struct if_entry *iface, int epoll_fd)
 
 static void prepare_sap_bcasts(int epoll_fd)
 {
-	printf("preparing SAP broadcast\n");
+	printf("Sending SAP broadcast.\n");
 
 	/* prepare broadcast for all interfaces */
 	struct if_entry *e;
@@ -622,9 +680,125 @@ static bool is_timeout_expired(time_t now_secs, time_t timeout_secs, time_t last
 	return false;
 }
 
-static _Noreturn void usage() {
+static _Noreturn void usage()
+{
 	printf("Usage: ipx_wrap_sapd <32-bit hex prefix>\n");
 	exit(1);
+}
+
+// TODO: remove
+static void init_db(void)
+{
+	time_t now_secs;
+	assert(get_now_secs(&now_secs));
+
+	struct srv_entry *s1 = calloc(1, sizeof(struct srv_entry));
+	assert(s1 != NULL);
+	s1->learned_from_net = htonl(1);
+	s1->last_seen = now_secs;
+	s1->data.srv_type = htons(0x1);
+	strcpy(s1->data.srv_name, "SRV01");
+	s1->data.srv_addr.net = htonl(1);
+	s1->data.srv_addr.node[5] = 0x01;
+	s1->data.srv_addr.sock = htons(0x01);
+	s1->data.hops = htons(0);
+	assert(update_srv_entry(s1));
+
+	struct srv_entry *s2 = calloc(1, sizeof(struct srv_entry));
+	assert(s2 != NULL);
+	s2->learned_from_net = htonl(2);
+	s2->last_seen = now_secs;
+	s2->data.srv_type = htons(0x2);
+	strcpy(s2->data.srv_name, "SRV02");
+	s2->data.srv_addr.net = htonl(2);
+	s2->data.srv_addr.node[5] = 0x02;
+	s2->data.srv_addr.sock = htons(0x02);
+	s2->data.hops = htons(0);
+	assert(update_srv_entry(s2));
+
+	struct srv_entry *s3 = calloc(1, sizeof(struct srv_entry));
+	assert(s3 != NULL);
+	s3->learned_from_net = htonl(2);
+	s3->last_seen = now_secs;
+	s3->data.srv_type = htons(0x3);
+	strcpy(s3->data.srv_name, "SRV03");
+	s3->data.srv_addr.net = htonl(3);
+	s3->data.srv_addr.node[5] = 0x03;
+	s3->data.srv_addr.sock = htons(0x03);
+	s3->data.hops = htons(0);
+	assert(update_srv_entry(s3));
+
+	struct srv_entry *s4 = calloc(1, sizeof(struct srv_entry));
+	assert(s4 != NULL);
+	s4->learned_from_net = htonl(4);
+	s4->last_seen = now_secs;
+	s4->data.srv_type = htons(0x4);
+	strcpy(s4->data.srv_name, "SRV04");
+	s4->data.srv_addr.net = htonl(4);
+	s4->data.srv_addr.node[5] = 0x04;
+	s4->data.srv_addr.sock = htons(0x04);
+	s4->data.hops = htons(0);
+	assert(update_srv_entry(s4));
+
+	struct srv_entry *s5 = calloc(1, sizeof(struct srv_entry));
+	assert(s5 != NULL);
+	s5->learned_from_net = htonl(5);
+	s5->last_seen = now_secs;
+	s5->data.srv_type = htons(0x5);
+	strcpy(s5->data.srv_name, "SRV05");
+	s5->data.srv_addr.net = htonl(5);
+	s5->data.srv_addr.node[5] = 0x05;
+	s5->data.srv_addr.sock = htons(0x05);
+	s5->data.hops = htons(0);
+	assert(update_srv_entry(s5));
+
+	struct srv_entry *s6 = calloc(1, sizeof(struct srv_entry));
+	assert(s6 != NULL);
+	s6->learned_from_net = htonl(6);
+	s6->last_seen = now_secs;
+	s6->data.srv_type = htons(0x6);
+	strcpy(s6->data.srv_name, "SRV06");
+	s6->data.srv_addr.net = htonl(6);
+	s6->data.srv_addr.node[5] = 0x06;
+	s6->data.srv_addr.sock = htons(0x06);
+	s6->data.hops = htons(0);
+	assert(update_srv_entry(s6));
+
+	struct srv_entry *s7 = calloc(1, sizeof(struct srv_entry));
+	assert(s7 != NULL);
+	s7->learned_from_net = htonl(7);
+	s7->last_seen = now_secs;
+	s7->data.srv_type = htons(0x7);
+	strcpy(s7->data.srv_name, "SRV07");
+	s7->data.srv_addr.net = htonl(7);
+	s7->data.srv_addr.node[5] = 0x07;
+	s7->data.srv_addr.sock = htons(0x07);
+	s7->data.hops = htons(0);
+	assert(update_srv_entry(s7));
+
+	struct srv_entry *s8 = calloc(1, sizeof(struct srv_entry));
+	assert(s8 != NULL);
+	s8->learned_from_net = htonl(8);
+	s8->last_seen = now_secs;
+	s8->data.srv_type = htons(0x8);
+	strcpy(s8->data.srv_name, "SRV08");
+	s8->data.srv_addr.net = htonl(8);
+	s8->data.srv_addr.node[5] = 0x08;
+	s8->data.srv_addr.sock = htons(0x08);
+	s8->data.hops = htons(0);
+	assert(update_srv_entry(s8));
+
+	struct srv_entry *s9 = calloc(1, sizeof(struct srv_entry));
+	assert(s9 != NULL);
+	s9->learned_from_net = htonl(9);
+	s9->last_seen = now_secs;
+	s9->data.srv_type = htons(0x9);
+	strcpy(s9->data.srv_name, "SRV09");
+	s9->data.srv_addr.net = htonl(9);
+	s9->data.srv_addr.node[5] = 0x09;
+	s9->data.srv_addr.sock = htons(0x09);
+	s9->data.hops = htons(0);
+	assert(update_srv_entry(s9));
 }
 
 int main(int argc, char **argv)
@@ -659,6 +833,9 @@ int main(int argc, char **argv)
 		perror("adding interfaces");
 		cleanup_and_exit(tmr_fd, epoll_fd, 4);
 	}
+
+	// TODO: remove
+	init_db();
 
 	time_t last_interface_scan = 0;
 	time_t last_service_bcast = 0;
@@ -724,6 +901,9 @@ int main(int argc, char **argv)
 								se->last_seen))
 					{
 						delete_srv_entry(se);
+					/* entries are ordered by last_seen */
+					} else {
+						break;
 					}
 				}
 
