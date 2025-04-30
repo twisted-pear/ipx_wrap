@@ -18,9 +18,9 @@
 #define SAP_SOCK 0x0452
 #define SAP_PKT_TYPE 0x04
 #define SAP_SRV_SHUTDOWN_HOPS htons(0x0010)
+#define SAP_SRV_EXPIRY_SECS (60*5)
 #define SAP_MAX_SRV_NAME_LEN 47
 #define SAP_MAX_SRVS_PER_PKT 7 /* max observed */
-#define SAP_EXPIRY_SECS (60*5)
 #define SAP_BCAST_INTERVAL_SECS 60
 
 #define SAP_SRV_TYPE_WILD htons(0xFFFF)
@@ -600,24 +600,26 @@ static int setup_timer(int epoll_fd, time_t secs)
 	return tmr;
 }
 
-static int check_timeout_expired(time_t timeout_secs, time_t last, time_t
-		*new_now)
+static bool get_now_secs(time_t *now_secs)
 {
 	struct timespec now;
 	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
-		return -1;
+		return false;
 	}
 
-	time_t now_secs = now.tv_sec;
+	*now_secs = now.tv_sec;
+	return true;
+}
 
+static bool is_timeout_expired(time_t now_secs, time_t timeout_secs, time_t last)
+{
 	time_t diff;
 	__builtin_sub_overflow(now_secs, last, &diff);
 	if (diff > timeout_secs) {
-		*new_now = now_secs;
-		return 1;
+		return true;
 	}
 
-	return 0;
+	return false;
 }
 
 static _Noreturn void usage() {
@@ -660,7 +662,7 @@ int main(int argc, char **argv)
 
 	time_t last_interface_scan = 0;
 	time_t last_service_bcast = 0;
-	time_t current_secs = 0;
+	time_t now_secs = 0;
 	ssize_t err;
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
 	while (1) {
@@ -684,15 +686,15 @@ int main(int argc, char **argv)
 					cleanup_and_exit(tmr_fd, epoll_fd, 6);
 				}
 
-				/* check if inferfaces need to be rescanned */
-				err = check_timeout_expired(
-						INTERFACE_RESCAN_SECS,
-						last_interface_scan,
-						&current_secs);
-				if (err < 0) {
-					perror("interface rescan timer");
+				if (!get_now_secs(&now_secs)) {
+					perror("getting current time");
 					cleanup_and_exit(tmr_fd, epoll_fd, 7);
-				} else if (err > 0) {
+				}
+
+				/* check if inferfaces need to be rescanned */
+				if (is_timeout_expired(now_secs,
+							INTERFACE_RESCAN_SECS,
+							last_interface_scan)) {
 					/* rescan the interfaces */
 					if (!scan_interfaces(prefix, epoll_fd))
 					{
@@ -700,21 +702,29 @@ int main(int argc, char **argv)
 						cleanup_and_exit(tmr_fd,
 								epoll_fd, 8);
 					}
-					last_interface_scan = current_secs;
+					last_interface_scan = now_secs;
 				}
 
-				err = check_timeout_expired(
-						SAP_BCAST_INTERVAL_SECS,
-						last_service_bcast,
-						&current_secs);
-				if (err < 0) {
-					perror("SAP expiry timer");
-					cleanup_and_exit(tmr_fd, epoll_fd, 9);
-				} else if (err > 0) {
+				/* check if we need to do the SAP broadcast */
+				if (is_timeout_expired(now_secs,
+							SAP_BCAST_INTERVAL_SECS,
+							last_service_bcast)) {
 					/* send the SAP broadcast on all
 					 * interfaces */
 					prepare_sap_bcasts(epoll_fd);
-					last_service_bcast = current_secs;
+					last_service_bcast = now_secs;
+				}
+
+				/* remove expired server entries */
+				struct srv_entry *se;
+				struct srv_entry *stmp;
+				HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
+					if (is_timeout_expired(now_secs,
+								SAP_SRV_EXPIRY_SECS,
+								se->last_seen))
+					{
+						delete_srv_entry(se);
+					}
 				}
 
 				/* consume all expirations */
