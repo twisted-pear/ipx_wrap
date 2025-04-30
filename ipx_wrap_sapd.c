@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ifaddrs.h>
@@ -16,8 +17,10 @@
 
 #define SAP_SOCK 0x0452
 #define SAP_PKT_TYPE 0x04
-#define SAP_EXPIRY_SECS (60*5)
+#define SAP_SRV_SHUTDOWN_HOPS htons(0x0010)
+#define SAP_MAX_SRV_NAME_LEN 47
 #define SAP_MAX_SRVS_PER_PKT 7 /* max observed */
+#define SAP_EXPIRY_SECS (60*5)
 #define SAP_BCAST_INTERVAL_SECS 60
 
 #define SAP_SRV_TYPE_WILD htons(0xFFFF)
@@ -32,18 +35,23 @@ STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct srv_data {
 	__be16 srv_type;
-	__u8 srv_name[48];
+	char srv_name[SAP_MAX_SRV_NAME_LEN + 1];
 	struct ipx_addr srv_addr;
-	__be16 intermediate_nets;
+	__be16 hops;
 } __attribute__((packed));
 
-// TODO: servers must unique by name and type
+struct srv_type_and_name_key {
+	__be16 srv_type;
+	char srv_name[SAP_MAX_SRV_NAME_LEN + 1];
+} __attribute__((packed));
+
 struct srv_entry {
 	struct srv_data data;
 	/* hash entry */
 	UT_hash_handle hh; /* by IPX addr */
+	UT_hash_handle h_srv_type_and_name; /* by server type and name */
 	/* list entry */
-	LIST_ENTRY(srv_entry) type_list_entry; /* list per server type */
+	TAILQ_ENTRY(srv_entry) type_list_entry; /* list per server type */
 	/* last time the server transmitted an advertisement */
 	time_t last_seen;
 	__be32 learned_from_net;
@@ -59,7 +67,7 @@ struct srv_query {
 	__be16 srv_type;
 } __attribute__((packed));
 
-LIST_HEAD(srv_entries, srv_entry);
+TAILQ_HEAD(srv_entries, srv_entry);
 
 struct srv_type_list {
 	/* server type */
@@ -69,6 +77,196 @@ struct srv_type_list {
 	/* list of servers of that type */
 	struct srv_entries entries;
 };
+
+static struct srv_entry *ht_ipx_addr_to_srv = NULL;
+static struct srv_entry *ht_srv_type_and_name_to_srv = NULL;
+static struct srv_type_list *ht_srv_type_to_srv_list = NULL;
+
+static struct srv_type_list *get_srv_type_list(__be16 srv_type)
+{
+	struct srv_type_list *l;
+	HASH_FIND(hh, ht_srv_type_to_srv_list, &srv_type, sizeof(srv_type), l);
+
+	/* create new list entry for the server type */
+	if (l == NULL) {
+		l = calloc(1, sizeof(struct srv_type_list));
+		if (l == NULL) {
+			return NULL;
+		}
+
+		l->srv_type = srv_type;
+		TAILQ_INIT(&l->entries);
+
+		HASH_ADD(hh, ht_srv_type_to_srv_list, srv_type,
+				sizeof(srv_type), l);
+	}
+
+	assert(l != NULL);
+	assert(l->srv_type == srv_type);
+
+	return l;
+}
+
+static int sort_srv_entry_by_last_seen(struct srv_entry *a, struct srv_entry
+		*b)
+{
+	return a->last_seen - b->last_seen;
+}
+
+static bool prepare_srv_type_and_name_key(__be16 srv_type, const char
+		*srv_name, struct srv_type_and_name_key *key)
+{
+	key->srv_type = srv_type;
+
+	size_t srv_name_len = strlen(srv_name);
+	if (srv_name_len > SAP_MAX_SRV_NAME_LEN) {
+		return false;
+	}
+
+	memcpy(key->srv_name, srv_name, srv_name_len);
+	memset(key->srv_name + srv_name_len, '\0', SAP_MAX_SRV_NAME_LEN -
+			srv_name_len + 1);
+
+	return true;
+}
+
+static struct srv_entry *get_srv_entry_by_ipx_addr(const struct ipx_addr *addr)
+{
+	struct srv_entry *e = NULL;
+	HASH_FIND(hh, ht_ipx_addr_to_srv, addr, sizeof(*addr), e);
+	return e;
+}
+
+static struct srv_entry *get_srv_entry_by_srv_type_and_name(__be16 srv_type,
+		const char *srv_name)
+{
+	struct srv_type_and_name_key key;
+
+	/* prepare the search key */
+	if (!prepare_srv_type_and_name_key(srv_type, srv_name, &key)) {
+		return NULL;
+	}
+
+	struct srv_entry *e = NULL;
+	HASH_FIND(h_srv_type_and_name, ht_srv_type_and_name_to_srv, &key,
+			sizeof(key), e);
+	return e;
+}
+
+static void delete_srv_entry(struct srv_entry *e)
+{
+	struct srv_type_list *l = get_srv_type_list(e->data.srv_type);
+	/* server type list must already exist */
+	assert(l != NULL);
+
+	HASH_DELETE(hh, ht_ipx_addr_to_srv, e);
+	HASH_DELETE(h_srv_type_and_name, ht_srv_type_and_name_to_srv, e);
+	TAILQ_REMOVE(&l->entries, e, type_list_entry);
+	free(e);
+}
+
+static bool insert_srv_entry(struct srv_entry *e)
+{
+	/* service must not exist already */
+
+	struct srv_entry *found_addr = get_srv_entry_by_ipx_addr(&e->data.srv_addr);
+	assert(found_addr == NULL);
+
+	struct srv_entry *found_type_and_name =
+		get_srv_entry_by_srv_type_and_name(e->data.srv_type,
+				e->data.srv_name);
+	assert(found_type_and_name == NULL);
+
+	/* add new entry to all the data structures */
+
+	/* the by IPX addr hash */
+	HASH_ADD_KEYPTR_INORDER(hh, ht_ipx_addr_to_srv, &e->data.srv_addr,
+			sizeof(struct ipx_addr), e,
+			sort_srv_entry_by_last_seen);
+
+	/* the by server type and name hash */
+	/* make sure the server name is NULL-terminated */
+	e->data.srv_name[SAP_MAX_SRV_NAME_LEN] = '\0';
+	struct srv_type_and_name_key *key = (struct srv_type_and_name_key *)
+		&e->data.srv_type;
+	HASH_ADD_KEYPTR(h_srv_type_and_name, ht_srv_type_and_name_to_srv, key,
+			sizeof(*key), e);
+
+	/* the by server type ordered list */
+	struct srv_type_list *l = get_srv_type_list(e->data.srv_type);
+	if (l == NULL) {
+		return false;
+	}
+
+	bool inserted = false;
+	struct srv_entry *i;
+	TAILQ_FOREACH(i, &l->entries, type_list_entry) {
+		/* insert before the first entry with a higher hop
+		 * count */
+		if (i->data.hops > e->data.hops) {
+			TAILQ_INSERT_BEFORE(i, e, type_list_entry);
+			inserted = true;
+			break;
+		}
+	}
+
+	/* no entries with a higher hop count, insert at the end */
+	if (!inserted) {
+		TAILQ_INSERT_TAIL(&l->entries, e, type_list_entry);
+	}
+
+	return true;
+}
+
+static bool update_srv_entry(struct srv_entry *e)
+{
+	/* try to find an existing entry by IPX addr... */
+	struct srv_entry *found_addr = get_srv_entry_by_ipx_addr(&e->data.srv_addr);
+	/* ... and by server type and name */
+	struct srv_entry *found_type_and_name =
+		get_srv_entry_by_srv_type_and_name(e->data.srv_type,
+				e->data.srv_name);
+
+	struct srv_entry *found = NULL;
+	if (found_addr == NULL && found_type_and_name == NULL) {
+		/* server does not exist yet */
+		found = NULL;
+	} else if (found_addr == NULL && found_type_and_name != NULL) {
+		/* existing server changed address */
+		found = found_type_and_name;
+	} else if (found_addr != NULL && found_type_and_name == NULL) {
+		/* existing server changed name or type */
+		found = found_addr;
+	} else if (found_addr != NULL && found_type_and_name != NULL) {
+		/* server exists, no change in addr, name or type, only hop
+		 * count might have changed */
+		assert(found_addr == found_type_and_name);
+		found = found_addr;
+
+		/* if we got a server shutdown packet from the same network we
+		 * received the server from, remove the server */
+		if (found->learned_from_net == e->learned_from_net &&
+				e->data.hops == SAP_SRV_SHUTDOWN_HOPS) {
+			delete_srv_entry(found);
+			return false;
+		}
+	} else {
+		assert(0);
+	}
+
+	if (found != NULL) {
+		/* if the old entry has a better hop count, discard the new
+		 * entry */
+		if (found->data.hops < e->data.hops) {
+			return false;
+		}
+
+		/* otherwise replace the entry */
+		delete_srv_entry(found);
+	}
+
+	return insert_srv_entry(e);
+}
 
 struct if_entry {
 	/* the handle for the binding */
@@ -83,9 +281,6 @@ struct if_entry {
 	/* whether to keep the interface after the if-scan */
 	bool keep;
 };
-
-static struct srv_entry *ht_ipx_addr_to_srv = NULL;
-static struct srv_type_list *ht_srv_type_to_srv_list = NULL;
 
 static struct if_entry *ht_sock_to_if = NULL;
 static struct if_entry *ht_ipx_addr_to_if = NULL;
@@ -111,6 +306,7 @@ static bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg
 
 static bool prepare_sap_bcast_for_iface(struct if_entry *iface, int epoll_fd)
 {
+	// TODO: actually fill the packet with data
 	struct ipxw_mux_msg *bcast = calloc(1, sizeof(struct ipxw_mux_msg) +
 			sizeof(struct srv_id_pkt));
 	struct srv_id_pkt *sap = (struct srv_id_pkt *) bcast->data;
@@ -203,14 +399,12 @@ static void cleanup_iface(struct if_entry *iface)
 
 static void cleanup_srv_type_list(struct srv_type_list *l)
 {
-	while (!LIST_EMPTY(&l->entries)) {
-		struct srv_entry *e = LIST_FIRST(&l->entries);
-		HASH_DEL(ht_ipx_addr_to_srv, e);
-		LIST_REMOVE(e, type_list_entry);
-		free(e);
+	while (!TAILQ_EMPTY(&l->entries)) {
+		struct srv_entry *e = TAILQ_FIRST(&l->entries);
+		delete_srv_entry(e);
 	}
 
-	HASH_DEL(ht_srv_type_to_srv_list, l);
+	HASH_DELETE(hh, ht_srv_type_to_srv_list, l);
 	free(l);
 }
 
@@ -541,7 +735,7 @@ int main(int argc, char **argv)
 				continue;
 			}
 
-			/* can xmit */
+			/* can receive */
 			if (evs[i].events & EPOLLIN) {
 				// TODO
 			}
