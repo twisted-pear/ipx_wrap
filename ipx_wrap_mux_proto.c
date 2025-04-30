@@ -1028,7 +1028,7 @@ ssize_t ipxw_mux_peek_xmit_len(struct ipxw_mux_handle h)
 }
 
 ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		int (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
+		bool (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
 			ipxw_mux_msg *msg, void *ctx), void *conf_ctx)
 {
 	/* check if the message buffer is ok */
@@ -1074,7 +1074,7 @@ ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	}
 
 	/* handle the message */
-	if (handle_conf_msg_cb(h, msg, conf_ctx) < 0) {
+	if (!handle_conf_msg_cb(h, msg, conf_ctx)) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -1083,7 +1083,7 @@ ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 }
 
 ssize_t ipxw_mux_do_xmit(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		int (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
+		bool (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
 			*msg, void *ctx), void *tx_ctx)
 {
 	/* check if the message buffer is ok */
@@ -1125,7 +1125,7 @@ ssize_t ipxw_mux_do_xmit(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	}
 
 	/* handle the message */
-	if (tx_msg_cb(h, msg, tx_ctx) < 0) {
+	if (!tx_msg_cb(h, msg, tx_ctx)) {
 		errno = EINVAL;
 		return -1;
 	}

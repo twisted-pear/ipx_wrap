@@ -376,13 +376,13 @@ static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
 	return len;
 }
 
-static int tx_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg, void
+static bool tx_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg, void
 		*ctx)
 {
 	struct do_ctx *context = (struct do_ctx *) ctx;
 	struct bind_entry *be_xmit = context->be;
 	if (be_xmit == NULL) {
-		return -1;
+		return false;
 	}
 
 	assert(msg->type == IPXW_MUX_XMIT);
@@ -397,13 +397,13 @@ static int tx_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg, void
 		.data.fd = udp_sock
 	};
 	if (epoll_ctl(context->epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev) < 0) {
-		return -1;
+		return false;
 	}
 
 	/* queue the message on the interface */
 	STAILQ_INSERT_TAIL(&be_xmit->iface->out_queue, msg, q_entry);
 
-	return 0;
+	return true;
 }
 
 static ssize_t peek_udp_recv_len(int udp_sock)
@@ -540,6 +540,8 @@ static ssize_t udp_recv_uc(struct if_entry *iface, int epoll_fd)
 
 static void unbind_entry(struct bind_entry *e)
 {
+	assert(e != NULL);
+
 	/* remove all undelivered messages */
 	while (!STAILQ_EMPTY(&e->in_queue)) {
 		struct ipxw_mux_msg *msg = STAILQ_FIRST(&e->in_queue);
@@ -568,17 +570,6 @@ static void unbind_entry(struct bind_entry *e)
 			ipxw_mux_handle_conf(h));
 }
 
-static void handle_unbind(int data_sock)
-{
-	struct bind_entry *e = get_bind_entry_by_sock(data_sock);
-	if (e == NULL) {
-		/* already unbound */
-		return;
-	}
-
-	unbind_entry(e);
-}
-
 static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int epoll_fd)
 {
 	/* reregister for ready-to-write events, now that config messages are
@@ -598,13 +589,13 @@ static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int 
 	return true;
 }
 
-static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
+static bool handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 		void *ctx)
 {
 	struct do_ctx *context = (struct do_ctx *) ctx;
 	struct bind_entry *be_conf = context->be;
 	if (be_conf == NULL) {
-		return -1;
+		return false;
 	}
 
 	/* check message type and prepare response */
@@ -612,11 +603,11 @@ static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	switch (msg->type) {
 		case IPXW_MUX_UNBIND:
 			unbind_entry(be_conf);
-			return 0;
+			return true;
 		case IPXW_MUX_GETSOCKNAME:
 			rsp_msg = calloc(1, sizeof(struct ipxw_mux_msg));
 			if (rsp_msg == NULL) {
-				return -1;
+				return false;
 			}
 
 			rsp_msg->type = IPXW_MUX_GETSOCKNAME;
@@ -633,7 +624,7 @@ static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 
 			break;
 		default:
-			return -1;
+			return false;
 	}
 
 	/* if we reach this code there must be a response message */
@@ -642,19 +633,15 @@ static int handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	int epoll_fd = context->epoll_fd;
 	if (!queue_conf_msg(be_conf, rsp_msg, epoll_fd)) {
 		free(rsp_msg);
-		return -1;
+		return false;
 	}
 
-	return 0;
+	return true;
 }
 
-static ssize_t conf_msg(int data_sock, int epoll_fd)
+static ssize_t conf_msg(struct bind_entry *be_conf, int epoll_fd)
 {
-	struct bind_entry *be_conf = get_bind_entry_by_sock(data_sock);
-	if (be_conf == NULL) {
-		errno = ENOENT;
-		return -1;
-	}
+	assert(be_conf != NULL);
 
 	ssize_t expected = ipxw_mux_peek_conf_len(be_conf->h);
 	if (expected < 0) {
@@ -683,13 +670,9 @@ static ssize_t conf_msg(int data_sock, int epoll_fd)
 	return err;
 }
 
-static ssize_t conf_rsp(int data_sock, int epoll_fd)
+static ssize_t conf_rsp(struct bind_entry *be, int epoll_fd)
 {
-	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
-	if (be == NULL) {
-		/* already unbound */
-		return 0;
-	}
+	assert(be != NULL);
 
 	/* no conf msgs to send */
 	if (STAILQ_EMPTY(&be->conf_queue)) {
@@ -697,7 +680,7 @@ static ssize_t conf_rsp(int data_sock, int epoll_fd)
 		 */
 		struct epoll_event ev = {
 			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
-			.data.fd = -data_sock
+			.data.fd = -ipxw_mux_handle_data(be->h)
 		};
 		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_conf(be->h),
 				&ev);
@@ -724,13 +707,9 @@ static ssize_t conf_rsp(int data_sock, int epoll_fd)
 	return err;
 }
 
-static ssize_t xmit_msg(int data_sock, int epoll_fd)
+static ssize_t xmit_msg(struct bind_entry *be_xmit, int epoll_fd)
 {
-	struct bind_entry *be_xmit = get_bind_entry_by_sock(data_sock);
-	if (be_xmit == NULL) {
-		errno = ENOENT;
-		return -1;
-	}
+	assert(be_xmit != NULL);
 
 	ssize_t expected = ipxw_mux_peek_xmit_len(be_xmit->h);
 	if (expected < 0) {
@@ -763,13 +742,9 @@ static ssize_t xmit_msg(int data_sock, int epoll_fd)
 	return err;
 }
 
-static ssize_t recv_msg(int data_sock, int epoll_fd)
+static ssize_t recv_msg(struct bind_entry *be, int epoll_fd)
 {
-	struct bind_entry *be = get_bind_entry_by_sock(data_sock);
-	if (be == NULL) {
-		/* already unbound */
-		return 0;
-	}
+	assert(be != NULL);
 
 	/* no msgs to receive */
 	if (STAILQ_EMPTY(&be->in_queue)) {
@@ -777,9 +752,10 @@ static ssize_t recv_msg(int data_sock, int epoll_fd)
 		 */
 		struct epoll_event ev = {
 			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
-			.data.fd = data_sock
+			.data.fd = ipxw_mux_handle_data(be->h)
 		};
-		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, data_sock, &ev);
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_data(be->h),
+				&ev);
 
 		return 0;
 	}
@@ -1329,26 +1305,42 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* one of the config sockets */
 			if (evs[i].data.fd < 0) {
+				struct bind_entry *e =
+					get_bind_entry_by_sock(-evs[i].data.fd);
+				/* bindind already deleted */
+				if (e == NULL) {
+					continue;
+				}
+
 				/* incoming conf msg */
 				if (evs[i].events & EPOLLIN) {
-					err = conf_msg(-evs[i].data.fd,
-							epoll_fd);
+					err = conf_msg(e, epoll_fd);
 					if (err < 0 && errno != EINTR) {
 						perror("handling conf msg");
 					} else if (err == 0) {
 						/* should not happen */
 						continue;
 					}
+
+
+					/* this is important!
+					 * conf_msg could have deleted the
+					 * binding, therefore we need to check
+					 * if it still exists at this point */
+					e = get_bind_entry_by_sock(
+							-evs[i].data.fd);
+					if (e == NULL) {
+						continue;
+					}
 				}
 
 				/* outgoing conf response */
 				if (evs[i].events & EPOLLOUT) {
-					err = conf_rsp(-evs[i].data.fd,
-							epoll_fd);
+					err = conf_rsp(e, epoll_fd);
 					if (err < 0) {
 						/* get rid of the client */
 						perror("sending conf msg");
-						handle_unbind(-evs[i].data.fd);
+						unbind_entry(e);
 						continue;
 					} else if (err == 0) {
 						/* nothing happened */
@@ -1357,7 +1349,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 				/* something went wrong, unbind */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					handle_unbind(-evs[i].data.fd);
+					unbind_entry(e);
 					continue;
 				}
 
@@ -1365,10 +1357,16 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 			}
 
 			/* one of the data sockets */
+			struct bind_entry *e =
+				get_bind_entry_by_sock(evs[i].data.fd);
+			/* bindind already deleted */
+			if (e == NULL) {
+				continue;
+			}
 
 			/* can xmit */
 			if (evs[i].events & EPOLLIN) {
-				err = xmit_msg(evs[i].data.fd, epoll_fd);
+				err = xmit_msg(e, epoll_fd);
 				if (err < 0 && errno != EINTR) {
 					perror("xmitting data");
 				} else if (err == 0) {
@@ -1379,11 +1377,11 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* can recv */
 			if (evs[i].events & EPOLLOUT) {
-				err = recv_msg(evs[i].data.fd, epoll_fd);
+				err = recv_msg(e, epoll_fd);
 				if (err < 0) {
 					/* get rid of the client */
 					perror("recving data");
-					handle_unbind(evs[i].data.fd);
+					unbind_entry(e);
 					continue;
 				} else if (err == 0) {
 					/* nothing happened */
@@ -1392,7 +1390,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 			/* something went wrong, unbind */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-				handle_unbind(evs[i].data.fd);
+				unbind_entry(e);
 				continue;
 			}
 		}

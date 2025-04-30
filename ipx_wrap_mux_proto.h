@@ -199,14 +199,14 @@ ssize_t ipxw_mux_peek_conf_len(struct ipxw_mux_handle h);
 ssize_t ipxw_mux_peek_xmit_len(struct ipxw_mux_handle h);
 
 ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		int (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
+		bool (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
 			ipxw_mux_msg *msg, void *ctx), void *conf_ctx);
 
 /* receive xmit msgs, turn them into IPX messages and attempt to send them
  * (using transmit_msg_cb), this blocks if the caller did not check that data
  * is avaiable to read */
 ssize_t ipxw_mux_do_xmit(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		int (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
+		bool (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
 			*msg, void *ctx), void *tx_ctx);
 
 /* turn an xmit message into an ipx message, conversion happens in place */
