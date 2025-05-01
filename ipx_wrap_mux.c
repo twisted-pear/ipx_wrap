@@ -1,20 +1,21 @@
 #define _GNU_SOURCE
 #include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
 #include <arpa/inet.h>
-#include <sys/queue.h>
-#include <sys/epoll.h>
 #include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/capability.h>
-#include <sys/timerfd.h>
-#include <sys/wait.h>
+#include <sys/epoll.h>
 #include <sys/prctl.h>
+#include <sys/queue.h>
+#include <sys/socket.h>
+#include <sys/timerfd.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
@@ -93,6 +94,8 @@ static struct sub_process *ht_ipx_addr_to_sub = NULL;
 static struct sub_process *ht_sock_to_sub = NULL;
 
 static int tmr_fd = -1;
+static bool rescan_now = false;
+static bool keep_going = true;
 
 static int sort_bind_entry_by_ipx_sock(struct bind_entry *a, struct bind_entry
 		*b)
@@ -1212,17 +1215,26 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
 	}
 
+	/* ignore SIGHUP, keep handler for SIGINT, SIGQUIT and SIGTERM */
+	struct sigaction sig_act;
+	memset(&sig_act, 0, sizeof(sig_act));
+	sig_act.sa_handler = SIG_IGN;
+	if (sigaction(SIGHUP, &sig_act, NULL) < 0) {
+		perror("resetting signal handler");
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 6);
+	}
+
 	ssize_t err;
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
-	while (1) {
+	while (keep_going) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
-			if (errno == -EINTR) {
+			if (errno == EINTR) {
 				continue;
 			}
 
 			perror("event polling");
-			cleanup_and_exit(iface, epoll_fd, ctrl_sock, 6);
+			cleanup_and_exit(iface, epoll_fd, ctrl_sock, 7);
 		}
 
 		int i;
@@ -1233,7 +1245,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
 					cleanup_and_exit(iface, epoll_fd,
-							ctrl_sock, 7);
+							ctrl_sock, 8);
 				}
 
 				/* incoming bind msg */
@@ -1253,7 +1265,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 					fprintf(stderr, "multicast UDP socket "
 							"error\n");
 					cleanup_and_exit(iface, epoll_fd,
-							ctrl_sock, 7);
+							ctrl_sock, 9);
 				}
 
 				/* can recv */
@@ -1276,7 +1288,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "UDP socket error\n");
 					cleanup_and_exit(iface, epoll_fd,
-							ctrl_sock, 8);
+							ctrl_sock, 10);
 				}
 
 				/* can recv */
@@ -1612,7 +1624,24 @@ static int setup_timer(int epoll_fd)
 	return tmr;
 }
 
-static _Noreturn void usage() {
+static void signal_handler(int signal)
+{
+	switch (signal) {
+		case SIGHUP:
+			rescan_now = true;
+			break;
+		case SIGINT:
+		case SIGQUIT:
+		case SIGTERM:
+			keep_going = false;
+			break;
+		default:
+			assert(0);
+	}
+}
+
+static _Noreturn void usage()
+{
 	printf("Usage: ipx_wrap_mux <32-bit hex prefix>\n");
 	exit(1);
 }
@@ -1667,17 +1696,37 @@ int main(int argc, char **argv)
 		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
 	}
 
+	struct sigaction sig_act;
+	memset(&sig_act, 0, sizeof(sig_act));
+	sig_act.sa_handler = signal_handler;
+	if (sigaction(SIGHUP, &sig_act, NULL) < 0
+			|| sigaction(SIGINT, &sig_act, NULL) < 0
+			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
+			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
+		perror("setting signal handler");
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 7);
+	}
+
 	ssize_t err;
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
-	while (1) {
+	while (keep_going) {
+		/* received SIGHUP, do interface rescan immediately */
+		if (rescan_now) {
+			if (!scan_interfaces(prefix, epoll_fd, ctrl_sock)) {
+				perror("adding sub-process");
+				cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 8);
+			}
+			rescan_now = false;
+		}
+
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
-			if (errno == -EINTR) {
+			if (errno == EINTR) {
 				continue;
 			}
 
 			perror("event polling");
-			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 7);
+			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 9);
 		}
 
 		int i;
@@ -1688,7 +1737,7 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 8);
+							ctrl_sock, 10);
 				}
 
 				/* incoming bind msg */
@@ -1706,15 +1755,15 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "timer fd error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 9);
+							ctrl_sock, 11);
 				}
 
-				/* incoming rescan the interfaces */
+				/* rescan the interfaces */
 				if (!scan_interfaces(prefix, epoll_fd,
 							ctrl_sock)) {
 					perror("adding sub-process");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 10);
+							ctrl_sock, 12);
 				}
 
 				/* consume all expirations */

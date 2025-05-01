@@ -845,7 +845,7 @@ int main(int argc, char **argv)
 	while (1) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
-			if (errno == -EINTR) {
+			if (errno == EINTR) {
 				continue;
 			}
 
