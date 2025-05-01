@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ifaddrs.h>
+#include <signal.h>
 #include <stdio.h>
 #include <sys/epoll.h>
 #include <sys/queue.h>
@@ -81,6 +82,26 @@ struct srv_type_list {
 static struct srv_entry *ht_ipx_addr_to_srv = NULL;
 static struct srv_entry *ht_srv_type_and_name_to_srv = NULL;
 static struct srv_type_list *ht_srv_type_to_srv_list = NULL;
+
+struct if_entry {
+	/* the handle for the binding */
+	struct ipxw_mux_handle mux_handle;
+	/* ipx address we are bound to */
+	struct ipx_addr addr;
+	/* hash entry */
+	UT_hash_handle h_data_sock; /* by data socket */
+	UT_hash_handle h_ipx_addr; /* by IPX addr */
+	/* msgs to send */
+	struct ipxw_msg_queue out_queue;
+	/* whether to keep the interface after the if-scan */
+	bool keep;
+};
+
+static struct if_entry *ht_sock_to_if = NULL;
+static struct if_entry *ht_ipx_addr_to_if = NULL;
+
+static bool reload_now = false;
+static bool keep_going = true;
 
 static struct srv_type_list *get_srv_type_list(__be16 srv_type)
 {
@@ -203,7 +224,7 @@ static bool insert_srv_entry(struct srv_entry *e)
 	TAILQ_FOREACH(i, &l->entries, type_list_entry) {
 		/* insert before the first entry with a higher hop
 		 * count */
-		if (i->data.hops > e->data.hops) {
+		if (ntohs(i->data.hops) > ntohs(e->data.hops)) {
 			TAILQ_INSERT_BEFORE(i, e, type_list_entry);
 			inserted = true;
 			break;
@@ -255,35 +276,27 @@ static bool update_srv_entry(struct srv_entry *e)
 	}
 
 	if (found != NULL) {
-		/* if the old entry has a better hop count, discard the new
-		 * entry */
-		if (found->data.hops < e->data.hops) {
-			return false;
+		/* we always replace existing entries with an entry from the
+		 * config */
+		if (e->learned_from_net != htonl(0)) {
+			/* never update an entry from the config file */
+			if (found->learned_from_net == htonl(0)) {
+				return false;
+			}
+
+			/* if the old entry has a better hop count, discard the new
+			 * entry */
+			if (ntohs(found->data.hops) < ntohs(e->data.hops)) {
+				return false;
+			}
 		}
 
-		/* otherwise replace the entry */
+		/* replace the entry */
 		delete_srv_entry(found);
 	}
 
 	return insert_srv_entry(e);
 }
-
-struct if_entry {
-	/* the handle for the binding */
-	struct ipxw_mux_handle mux_handle;
-	/* ipx address we are bound to */
-	struct ipx_addr addr;
-	/* hash entry */
-	UT_hash_handle h_data_sock; /* by data socket */
-	UT_hash_handle h_ipx_addr; /* by IPX addr */
-	/* msgs to send */
-	struct ipxw_msg_queue out_queue;
-	/* whether to keep the interface after the if-scan */
-	bool keep;
-};
-
-static struct if_entry *ht_sock_to_if = NULL;
-static struct if_entry *ht_ipx_addr_to_if = NULL;
 
 static bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg
 		*msg, int epoll_fd)
@@ -632,6 +645,140 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd)
 	return true;
 }
 
+static int parse_next_line_from_cfg(FILE *cfg, struct srv_entry *e)
+{
+	char *line = NULL;
+	size_t len;
+
+	errno = 0;
+	ssize_t res = getline(&line, &len, cfg);
+	if (res < 0) {
+		free(line);
+		if (errno != 0) {
+			perror("read config");
+		}
+		return -1;
+	}
+
+	/* skip comments and empty lines */
+	if (len == 0 || line[0] == '#') {
+		free(line);
+		return 0;
+	}
+
+	__u32 srv_net;
+	char srv_node[IPX_ADDR_NODE_BYTES];
+	__u16 srv_sock;
+	__u16 srv_hops;
+	__u16 srv_type;
+	char srv_name[SAP_MAX_SRV_NAME_LEN + 1];
+#define __STRINGIFY__(X) #X
+#define __STRINGIFY(X) __STRINGIFY__(X)
+	res = sscanf(line, "%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx "
+			"%04hx %04hx %" __STRINGIFY(SAP_MAX_SRV_NAME_LEN) "s",
+			&srv_net, &srv_node[0], &srv_node[1], &srv_node[2],
+			&srv_node[3], &srv_node[4], &srv_node[5], &srv_sock,
+			&srv_hops, &srv_type, srv_name);
+	free(line);
+	if (res != 11) {
+		fprintf(stderr, "failed to parse config entry\n");
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* don't allow equivalent of server shutdown packet in the config */
+	if (htons(srv_hops) == SAP_SRV_SHUTDOWN_HOPS) {
+		fprintf(stderr, "config entry has invalid hop count\n");
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* fill in the entry */
+
+	memset(e, 0, sizeof(*e));
+
+	/* fill in the data section */
+	e->data.srv_addr.net = htonl(srv_net);
+	memcpy(e->data.srv_addr.node, srv_node, IPX_ADDR_NODE_BYTES);
+	e->data.srv_addr.sock = htons(srv_sock);
+	e->data.hops = htons(srv_hops);
+	e->data.srv_type = htons(srv_type);
+	strncpy(e->data.srv_name, srv_name, SAP_MAX_SRV_NAME_LEN);
+
+	/* fill in the meta data */
+	e->last_seen = 0;
+	e->learned_from_net = htonl(0);
+
+	return 1;
+}
+
+static bool read_cfg(const char *cfg_path)
+{
+	/* remove all configured entries from the database */
+	struct srv_entry *se;
+	struct srv_entry *stmp;
+	HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
+		if (se->learned_from_net == htonl(0)) {
+			delete_srv_entry(se);
+		}
+	}
+
+	FILE *cfg = NULL;
+	do {
+		cfg = fopen(cfg_path, "r");
+	} while (cfg == NULL && errno == EINTR);
+
+	if (cfg == NULL) {
+		perror("opening config file");
+		return false;
+	}
+
+	bool ret = false;
+	int res = 0;
+	for (;;) {
+		struct srv_entry *e = calloc(1, sizeof(struct srv_entry));
+		if (e == NULL) {
+			break;
+		}
+
+		res = parse_next_line_from_cfg(cfg, e);
+
+		/* error or EOF */
+		if (res < 0) {
+			free(e);
+			if (errno == 0) {
+				/* EOF */
+				ret = true;
+				break;
+			}
+
+			/* error */
+			break;
+		}
+
+		/* entry was successfully parsed, try to insert it */
+		if (res == 1) {
+			if (!update_srv_entry(e)) {
+				free(e);
+				break;
+			}
+
+			continue;
+		}
+
+		/* line was not parsed because it was empty or a comment */
+		if (res == 0) {
+			free(e);
+			continue;
+		}
+
+		assert(0);
+	}
+
+	fclose(cfg);
+	return ret;
+}
+
 static int setup_timer(int epoll_fd, time_t secs)
 {
 	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
@@ -684,130 +831,52 @@ static bool is_timeout_expired(time_t now_secs, time_t timeout_secs, time_t last
 	return false;
 }
 
-static _Noreturn void usage()
+static void timeout_srv_entries(time_t now_secs)
 {
-	printf("Usage: ipx_wrap_sapd <32-bit hex prefix>\n");
-	exit(1);
+	struct srv_entry *se;
+	struct srv_entry *stmp;
+	HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
+		/* never delete entries from the config */
+		if (se->learned_from_net == htonl(0)) {
+			continue;
+		}
+
+		if (is_timeout_expired(now_secs, SAP_SRV_EXPIRY_SECS,
+					se->last_seen))
+		{
+			delete_srv_entry(se);
+		} else {
+			/* entries are ordered by last_seen */
+			break;
+		}
+	}
 }
 
-// TODO: remove
-static void init_db(void)
+static void signal_handler(int signal)
 {
-	time_t now_secs;
-	assert(get_now_secs(&now_secs));
+	switch (signal) {
+		case SIGHUP:
+			reload_now = true;
+			break;
+		case SIGINT:
+		case SIGQUIT:
+		case SIGTERM:
+			keep_going = false;
+			break;
+		default:
+			assert(0);
+	}
+}
 
-	struct srv_entry *s1 = calloc(1, sizeof(struct srv_entry));
-	assert(s1 != NULL);
-	s1->learned_from_net = htonl(1);
-	s1->last_seen = now_secs;
-	s1->data.srv_type = htons(0x1);
-	strcpy(s1->data.srv_name, "SRV01");
-	s1->data.srv_addr.net = htonl(1);
-	s1->data.srv_addr.node[5] = 0x01;
-	s1->data.srv_addr.sock = htons(0x01);
-	s1->data.hops = htons(0);
-	assert(update_srv_entry(s1));
-
-	struct srv_entry *s2 = calloc(1, sizeof(struct srv_entry));
-	assert(s2 != NULL);
-	s2->learned_from_net = htonl(2);
-	s2->last_seen = now_secs;
-	s2->data.srv_type = htons(0x2);
-	strcpy(s2->data.srv_name, "SRV02");
-	s2->data.srv_addr.net = htonl(2);
-	s2->data.srv_addr.node[5] = 0x02;
-	s2->data.srv_addr.sock = htons(0x02);
-	s2->data.hops = htons(0);
-	assert(update_srv_entry(s2));
-
-	struct srv_entry *s3 = calloc(1, sizeof(struct srv_entry));
-	assert(s3 != NULL);
-	s3->learned_from_net = htonl(2);
-	s3->last_seen = now_secs;
-	s3->data.srv_type = htons(0x3);
-	strcpy(s3->data.srv_name, "SRV03");
-	s3->data.srv_addr.net = htonl(3);
-	s3->data.srv_addr.node[5] = 0x03;
-	s3->data.srv_addr.sock = htons(0x03);
-	s3->data.hops = htons(0);
-	assert(update_srv_entry(s3));
-
-	struct srv_entry *s4 = calloc(1, sizeof(struct srv_entry));
-	assert(s4 != NULL);
-	s4->learned_from_net = htonl(4);
-	s4->last_seen = now_secs;
-	s4->data.srv_type = htons(0x4);
-	strcpy(s4->data.srv_name, "SRV04");
-	s4->data.srv_addr.net = htonl(4);
-	s4->data.srv_addr.node[5] = 0x04;
-	s4->data.srv_addr.sock = htons(0x04);
-	s4->data.hops = htons(0);
-	assert(update_srv_entry(s4));
-
-	struct srv_entry *s5 = calloc(1, sizeof(struct srv_entry));
-	assert(s5 != NULL);
-	s5->learned_from_net = htonl(5);
-	s5->last_seen = now_secs;
-	s5->data.srv_type = htons(0x5);
-	strcpy(s5->data.srv_name, "SRV05");
-	s5->data.srv_addr.net = htonl(5);
-	s5->data.srv_addr.node[5] = 0x05;
-	s5->data.srv_addr.sock = htons(0x05);
-	s5->data.hops = htons(0);
-	assert(update_srv_entry(s5));
-
-	struct srv_entry *s6 = calloc(1, sizeof(struct srv_entry));
-	assert(s6 != NULL);
-	s6->learned_from_net = htonl(6);
-	s6->last_seen = now_secs;
-	s6->data.srv_type = htons(0x6);
-	strcpy(s6->data.srv_name, "SRV06");
-	s6->data.srv_addr.net = htonl(6);
-	s6->data.srv_addr.node[5] = 0x06;
-	s6->data.srv_addr.sock = htons(0x06);
-	s6->data.hops = htons(0);
-	assert(update_srv_entry(s6));
-
-	struct srv_entry *s7 = calloc(1, sizeof(struct srv_entry));
-	assert(s7 != NULL);
-	s7->learned_from_net = htonl(7);
-	s7->last_seen = now_secs;
-	s7->data.srv_type = htons(0x7);
-	strcpy(s7->data.srv_name, "SRV07");
-	s7->data.srv_addr.net = htonl(7);
-	s7->data.srv_addr.node[5] = 0x07;
-	s7->data.srv_addr.sock = htons(0x07);
-	s7->data.hops = htons(0);
-	assert(update_srv_entry(s7));
-
-	struct srv_entry *s8 = calloc(1, sizeof(struct srv_entry));
-	assert(s8 != NULL);
-	s8->learned_from_net = htonl(8);
-	s8->last_seen = now_secs;
-	s8->data.srv_type = htons(0x8);
-	strcpy(s8->data.srv_name, "SRV08");
-	s8->data.srv_addr.net = htonl(8);
-	s8->data.srv_addr.node[5] = 0x08;
-	s8->data.srv_addr.sock = htons(0x08);
-	s8->data.hops = htons(0);
-	assert(update_srv_entry(s8));
-
-	struct srv_entry *s9 = calloc(1, sizeof(struct srv_entry));
-	assert(s9 != NULL);
-	s9->learned_from_net = htonl(9);
-	s9->last_seen = now_secs;
-	s9->data.srv_type = htons(0x9);
-	strcpy(s9->data.srv_name, "SRV09");
-	s9->data.srv_addr.net = htonl(9);
-	s9->data.srv_addr.node[5] = 0x09;
-	s9->data.srv_addr.sock = htons(0x09);
-	s9->data.hops = htons(0);
-	assert(update_srv_entry(s9));
+static _Noreturn void usage()
+{
+	printf("Usage: ipx_wrap_sapd <32-bit hex prefix> <cfg file>\n");
+	exit(1);
 }
 
 int main(int argc, char **argv)
 {
-	if (argc != 2) {
+	if (argc != 3) {
 		usage();
 	}
 
@@ -838,15 +907,44 @@ int main(int argc, char **argv)
 		cleanup_and_exit(tmr_fd, epoll_fd, 4);
 	}
 
-	// TODO: remove
-	init_db();
+	struct sigaction sig_act;
+	memset(&sig_act, 0, sizeof(sig_act));
+	sig_act.sa_handler = signal_handler;
+	if (sigaction(SIGHUP, &sig_act, NULL) < 0
+			|| sigaction(SIGINT, &sig_act, NULL) < 0
+			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
+			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
+		perror("setting signal handler");
+		cleanup_and_exit(tmr_fd, epoll_fd, 5);
+	}
+
+	char *cfg_path = argv[2];
+	if (!read_cfg(cfg_path)) {
+		fprintf(stderr, "failed to read config file\n");
+		cleanup_and_exit(tmr_fd, epoll_fd, 6);
+	}
 
 	time_t last_interface_scan = 0;
 	time_t last_service_bcast = 0;
 	time_t now_secs = 0;
 	ssize_t err;
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
-	while (1) {
+	while (keep_going) {
+		/* received SIGHUP, do interface rescan and reload config */
+		if (reload_now) {
+			if (!scan_interfaces(prefix, epoll_fd)) {
+				perror("scanning interfaces");
+				cleanup_and_exit(tmr_fd, epoll_fd, 7);
+			}
+
+			if (!read_cfg(cfg_path)) {
+				fprintf(stderr, "failed to read config file\n");
+				cleanup_and_exit(tmr_fd, epoll_fd, 8);
+			}
+
+			reload_now = false;
+		}
+
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
 			if (errno == EINTR) {
@@ -854,7 +952,7 @@ int main(int argc, char **argv)
 			}
 
 			perror("event polling");
-			cleanup_and_exit(tmr_fd, epoll_fd, 5);
+			cleanup_and_exit(tmr_fd, epoll_fd, 9);
 		}
 
 		int i;
@@ -864,12 +962,12 @@ int main(int argc, char **argv)
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "timer fd error\n");
-					cleanup_and_exit(tmr_fd, epoll_fd, 6);
+					cleanup_and_exit(tmr_fd, epoll_fd, 10);
 				}
 
 				if (!get_now_secs(&now_secs)) {
 					perror("getting current time");
-					cleanup_and_exit(tmr_fd, epoll_fd, 7);
+					cleanup_and_exit(tmr_fd, epoll_fd, 11);
 				}
 
 				/* check if inferfaces need to be rescanned */
@@ -881,7 +979,7 @@ int main(int argc, char **argv)
 					{
 						perror("scanning interfaces");
 						cleanup_and_exit(tmr_fd,
-								epoll_fd, 8);
+								epoll_fd, 12);
 					}
 					last_interface_scan = now_secs;
 				}
@@ -897,19 +995,7 @@ int main(int argc, char **argv)
 				}
 
 				/* remove expired server entries */
-				struct srv_entry *se;
-				struct srv_entry *stmp;
-				HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
-					if (is_timeout_expired(now_secs,
-								SAP_SRV_EXPIRY_SECS,
-								se->last_seen))
-					{
-						delete_srv_entry(se);
-					/* entries are ordered by last_seen */
-					} else {
-						break;
-					}
-				}
+				timeout_srv_entries(now_secs);
 
 				/* consume all expirations */
 				__u64 dummy;
