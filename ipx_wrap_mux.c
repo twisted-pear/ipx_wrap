@@ -1541,7 +1541,11 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
 	struct ifaddrs *addrs;
 	struct ifaddrs *iter;
 
-	if (getifaddrs(&addrs) < 0) {
+	int err = -1;
+	do {
+		err = getifaddrs(&addrs);
+	} while (err < 0 && errno == EINTR);
+	if (err < 0) {
 		return false;
 	}
 
