@@ -139,7 +139,7 @@ static bool prepare_srv_type_and_name_key(__be16 srv_type, const char
 {
 	key->srv_type = srv_type;
 
-	size_t srv_name_len = strlen(srv_name);
+	size_t srv_name_len = strnlen(srv_name, SAP_MAX_SRV_NAME_LEN + 1);
 	if (srv_name_len > SAP_MAX_SRV_NAME_LEN) {
 		return false;
 	}
@@ -298,6 +298,17 @@ static bool update_srv_entry(struct srv_entry *e)
 	return insert_srv_entry(e);
 }
 
+static bool get_now_secs(time_t *now_secs)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+		return false;
+	}
+
+	*now_secs = now.tv_sec;
+	return true;
+}
+
 static bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg
 		*msg, int epoll_fd)
 {
@@ -411,6 +422,138 @@ static void prepare_sap_bcasts(int epoll_fd)
 			perror("sending SAP bcast");
 		}
 	}
+}
+
+static ssize_t insert_srv_entries_from_sap_rsp(struct srv_id_pkt *sap_rsp,
+		size_t nentries, __be32 in_net)
+{
+	time_t now_secs;
+	if (!get_now_secs(&now_secs)) {
+		return -1;
+	}
+
+	if (nentries > SAP_MAX_SRVS_PER_PKT) {
+		return -1;
+	}
+
+	size_t ninserted = 0;
+
+	size_t i;
+	for (i = 0; i < nentries; i++) {
+		struct srv_entry *e = calloc(1, sizeof(struct srv_entry));
+		if (e == NULL) {
+			continue;
+		}
+
+		memcpy(&e->data, &sap_rsp->data[i], sizeof(struct srv_data));
+		e->learned_from_net = in_net;
+		e->last_seen = now_secs;
+
+		if (!update_srv_entry(e)) {
+			free(e);
+			continue;
+		}
+
+		ninserted++;
+	}
+
+	return ninserted;
+}
+
+static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if)
+{
+	fprintf(stderr, "Received SAP message from "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx: ",
+			ntohl(msg->recv.saddr.net), msg->recv.saddr.node[0],
+			msg->recv.saddr.node[1], msg->recv.saddr.node[2],
+			msg->recv.saddr.node[3], msg->recv.saddr.node[4],
+			msg->recv.saddr.node[5], ntohs(msg->recv.saddr.sock));
+
+	/* not a valid SAP message */
+	if (msg->recv.data_len < sizeof(struct srv_id_pkt) &&
+			msg->recv.data_len < sizeof(struct srv_query)) {
+		fprintf(stderr, "invalid.\n");
+		return;
+	}
+
+	struct srv_id_pkt *sap_rsp_pkt = (struct srv_id_pkt *) msg->data;
+	struct srv_query *sap_query_pkt = (struct srv_query *) msg->data;
+	do {
+		if (sap_rsp_pkt->rsp_type == SAP_PKT_TYPE_GENERAL_SQ) {
+			/* reply with all servers of the correct type */
+			// TODO
+			fprintf(stderr, "type not supported");
+			break;
+		} else if (sap_rsp_pkt->rsp_type == SAP_PKT_TYPE_NEAREST_SQ) {
+			/* reply with the nearest server of the correct type */
+			// TODO
+			fprintf(stderr, "type not supported");
+			break;
+		} else if (sap_rsp_pkt->rsp_type == SAP_RSP_TYPE_NEAREST_SQ ||
+			sap_rsp_pkt->rsp_type == SAP_RSP_TYPE_PERIODIC_BC ||
+			sap_rsp_pkt->rsp_type == SAP_RSP_TYPE_GENERAL_SQ) {
+			/* try to enter all services into the DB */
+
+			if (msg->recv.data_len < sizeof(struct srv_id_pkt)) {
+				/* too short */
+				fprintf(stderr, "response too short");
+				break;
+			}
+
+			if ((msg->recv.data_len - sizeof(struct srv_id_pkt)) %
+					sizeof(struct srv_data) != 0) {
+				/* incomplete server entries */
+				fprintf(stderr, "response malformed");
+				break;
+			}
+
+			size_t nentries = (msg->recv.data_len - sizeof(struct
+						srv_id_pkt)) / sizeof(struct
+						srv_data);
+
+			size_t ninserted = insert_srv_entries_from_sap_rsp(
+					sap_rsp_pkt, nentries,
+					in_if->addr.net);
+
+			if (ninserted < 0) {
+				fprintf(stderr, "response malformed");
+				break;
+			}
+
+			fprintf(stderr, "added %lu of %lu servers", ninserted,
+					nentries);
+			break;
+		} else {
+			/* invalid SAP message type */
+			fprintf(stderr, "invalid type");
+			break;
+		}
+	} while(0);
+
+	fprintf(stderr, ".\n");
+}
+
+static struct ipxw_mux_msg *recv_msg(struct if_entry *iface)
+{
+	ssize_t expected = ipxw_mux_peek_recvd_len(iface->mux_handle, false);
+	if (expected < 0) {
+		return NULL;
+	}
+
+	struct ipxw_mux_msg *msg = calloc(1, expected);
+	if (msg == NULL) {
+		return NULL;
+	}
+
+	msg->type = IPXW_MUX_RECV;
+	msg->recv.data_len = expected - sizeof(*msg);
+	ssize_t msg_len = ipxw_mux_get_recvd(iface->mux_handle, msg, false);
+	if (msg_len < 0) {
+		free(msg);
+		return NULL;
+	}
+
+	return msg;
 }
 
 static ssize_t send_queued_msgs(struct if_entry *iface, int epoll_fd)
@@ -809,17 +952,6 @@ static int setup_timer(int epoll_fd, time_t secs)
 	return tmr;
 }
 
-static bool get_now_secs(time_t *now_secs)
-{
-	struct timespec now;
-	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
-		return false;
-	}
-
-	*now_secs = now.tv_sec;
-	return true;
-}
-
 static bool is_timeout_expired(time_t now_secs, time_t timeout_secs, time_t last)
 {
 	time_t diff;
@@ -842,12 +974,8 @@ static void timeout_srv_entries(time_t now_secs)
 		}
 
 		if (is_timeout_expired(now_secs, SAP_SRV_EXPIRY_SECS,
-					se->last_seen))
-		{
+					se->last_seen)) {
 			delete_srv_entry(se);
-		} else {
-			/* entries are ordered by last_seen */
-			break;
 		}
 	}
 }
@@ -1017,15 +1145,21 @@ int main(int argc, char **argv)
 
 			/* can receive */
 			if (evs[i].events & EPOLLIN) {
-				// TODO
+				struct ipxw_mux_msg *msg = recv_msg(iface);
+				if (msg == NULL) {
+					perror("receiving SAP msg");
+				} else {
+					handle_sap_msg(msg, iface);
+					free(msg);
+				}
 			}
 
 			/* send queued pkts */
 			if (evs[i].events & EPOLLOUT) {
 				err = send_queued_msgs(iface, epoll_fd);
 				if (err < 0) {
-					/* get rid of the client */
-					perror("recving data");
+					/* get rid of the interface */
+					perror("sending SAP msg");
 					cleanup_iface(iface);
 					continue;
 				} else if (err == 0) {
