@@ -30,7 +30,7 @@
 #define RIP_METRIC_MULT 2048
 #define RIP_INVALID_TIMER_MULT 100
 
-#define MAX_ROUTES 64
+#define MAX_ROUTES 50
 
 struct rip_entry {
 	__be32 net;
