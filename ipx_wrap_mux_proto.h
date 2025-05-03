@@ -1,8 +1,11 @@
 #ifndef __IPX_WRAP_MUX_PROTO_H__
 #define __IPX_WRAP_MUX_PROTO_H__
 
-#include <sys/queue.h>
+#include <arpa/inet.h>
 #include <bpf/bpf.h>
+#include <errno.h>
+#include <ifaddrs.h>
+#include <sys/queue.h>
 
 #include "common.h"
 

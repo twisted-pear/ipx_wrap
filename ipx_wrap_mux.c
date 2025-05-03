@@ -1,8 +1,5 @@
 #define _GNU_SOURCE
 #include <assert.h>
-#include <arpa/inet.h>
-#include <errno.h>
-#include <ifaddrs.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
