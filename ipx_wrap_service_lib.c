@@ -144,6 +144,7 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 {
 	struct if_entry *iface = calloc(1, sizeof(struct if_entry));
 	if (iface == NULL) {
+		fprintf(stderr, "failed to allocate interface\n");
 		return NULL;
 	}
 
@@ -209,6 +210,13 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 		return iface;
 	} while (0);
 
+	fprintf(stderr, "failed to add interface "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
+			ntohl(iface->addr.net), iface->addr.node[0],
+			iface->addr.node[1], iface->addr.node[2],
+			iface->addr.node[3], iface->addr.node[4],
+			iface->addr.node[5], ntohs(iface->addr.sock));
+
 	ipxw_mux_handle_close(iface->mux_handle);
 	free(iface);
 
@@ -251,10 +259,10 @@ static bool scan_interfaces(const struct if_bind_config *ifcfg, int epoll_fd)
 
 		/* get or create a new interface for this address */
 		struct if_entry *iface = add_iface(ipv6_addr, ifcfg, epoll_fd);
-		/* an error occurred during interface creation, abort */
+		/* an error occurred during interface creation, try next
+		 * interface */
 		if (iface == NULL) {
-			freeifaddrs(addrs);
-			return false;
+			continue;
 		}
 
 		/* mark the returned interface, so that we keep it */

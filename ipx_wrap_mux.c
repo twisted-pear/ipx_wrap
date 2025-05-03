@@ -1413,6 +1413,7 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 {
 	struct sub_process *sub = calloc(1, sizeof(struct sub_process));
 	if (sub == NULL) {
+		fprintf(stderr, "failed to allocate sub-process\n");
 		return NULL;
 	}
 
@@ -1516,6 +1517,13 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 		return sub;
 	} while (0);
 
+	fprintf(stderr, "failed to add interface "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx\n",
+			ntohl(sub->addr.net), sub->addr.node[0],
+			sub->addr.node[1], sub->addr.node[2],
+			sub->addr.node[3], sub->addr.node[4],
+			sub->addr.node[5]);
+
 	if (sv[1] >= 0) {
 		close(sv[1]);
 	}
@@ -1570,10 +1578,10 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
 		/* get or create a new sub-process for this address */
 		struct sub_process *if_sub = add_sub(ipv6_addr, iter->ifa_name,
 				epoll_fd, ctrl_sock);
-		/* an error occurred during process creation, abort */
+		/* an error occurred during process creation, try next
+		 * interface address */
 		if (if_sub == NULL) {
-			freeifaddrs(addrs);
-			return false;
+			continue;
 		}
 
 		/* mark the returned sub-process, so that we keep it */
