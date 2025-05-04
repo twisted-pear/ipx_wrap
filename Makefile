@@ -8,8 +8,8 @@ LIBBPF_PREFIX ?= /usr
 VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/btf/vmlinux" || echo "vmlinux.btf")
 
 USER_TARGETS = ipx_wrap_if_config
-MUX_TARGETS = ipx_wrap_ripd ipx_wrap_tx_client ipx_wrap_rx_client
-SERVICE_TARGETS = ipx_wrap_sapd
+MUX_TARGETS = ipx_wrap_tx_client ipx_wrap_rx_client
+SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd
 MUXER_TARGETS = ipx_wrap_mux
 TC_OBJ = ipx_wrap_kern.o
 
