@@ -3,6 +3,10 @@
 #include "uthash.h"
 #include "ipx_wrap_service_lib.h"
 
+enum service_sap_error_codes {
+	SAP_ERR_READ_CFG = SRVC_ERR_MAX
+};
+
 #define MAINTENANCE_INTERVAL_SECS 10
 
 #define SAP_SOCK 0x0452
@@ -721,7 +725,7 @@ int main(int argc, char **argv)
 	char *cfg_path = argv[2];
 	if (!read_cfg(cfg_path)) {
 		fprintf(stderr, "failed to read config file\n");
-		cleanup_and_exit(-1, -1, &service_ctx, 6);
+		cleanup_and_exit(-1, -1, &service_ctx, SAP_ERR_READ_CFG);
 	}
 
 	run_service(&service_ctx, &ifcfg, MAINTENANCE_INTERVAL_SECS);

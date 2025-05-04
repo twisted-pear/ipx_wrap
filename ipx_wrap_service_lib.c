@@ -365,20 +365,23 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
-		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, 2);
+		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
+				SRVC_ERR_EPOLL_FD);
 	}
 
 	tmr_fd = setup_timer(epoll_fd, maintenance_interval_secs);
 	if (tmr_fd < 0) {
 		perror("creating maintenance timer");
-		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, 3);
+		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
+				SRVC_ERR_TMR_FD);
 	}
 
 	/* scan all interfaces for addresses within the prefix, we manage those
 	 * interfaces */
 	if (!scan_interfaces(ifcfg, epoll_fd)) {
 		perror("adding interfaces");
-		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, 4);
+		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
+				SRVC_ERR_IFACE_SCAN);
 	}
 
 	struct sigaction sig_act;
@@ -389,7 +392,8 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
 			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
 		perror("setting signal handler");
-		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, 5);
+		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
+				SRVC_ERR_SIG_HANDLER);
 	}
 
 	time_t last_interface_scan = 0;
@@ -402,13 +406,13 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 			if (!scan_interfaces(ifcfg, epoll_fd)) {
 				perror("scanning interfaces");
 				cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
-						7);
+						SRVC_ERR_IFACE_SCAN);
 			}
 
 			if (!service_reload(service_ctx)) {
 				fprintf(stderr, "failed to reload service\n");
 				cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
-						8);
+						SRVC_ERR_RELOAD);
 			}
 
 			reload_now = false;
@@ -421,7 +425,8 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 			}
 
 			perror("event polling");
-			cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, 9);
+			cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
+					SRVC_ERR_EPOLL_WAIT);
 		}
 
 		int i;
@@ -432,13 +437,15 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "timer fd error\n");
 					cleanup_and_exit(tmr_fd, epoll_fd,
-							service_ctx, 10);
+							service_ctx,
+							SRVC_ERR_TMR_FAILURE);
 				}
 
 				if (!get_now_secs(&now_secs)) {
 					perror("getting current time");
 					cleanup_and_exit(tmr_fd, epoll_fd,
-							service_ctx, 11);
+							service_ctx,
+							SRVC_ERR_GET_TIME);
 				}
 
 				/* check if inferfaces need to be rescanned */
@@ -452,7 +459,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 						cleanup_and_exit(tmr_fd,
 								epoll_fd,
 								service_ctx,
-								12);
+								SRVC_ERR_IFACE_SCAN);
 					}
 					last_interface_scan = now_secs;
 				}
@@ -520,5 +527,5 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 		}
 	}
 
-	cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, 0);
+	cleanup_and_exit(tmr_fd, epoll_fd, service_ctx, SRVC_ERR_OK);
 }

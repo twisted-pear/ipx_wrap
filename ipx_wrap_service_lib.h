@@ -17,6 +17,19 @@
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
 
+enum service_general_error_codes {
+	SRVC_ERR_OK = 0,
+	SRVC_ERR_EPOLL_FD,
+	SRVC_ERR_TMR_FD,
+	SRVC_ERR_IFACE_SCAN,
+	SRVC_ERR_SIG_HANDLER,
+	SRVC_ERR_RELOAD,
+	SRVC_ERR_EPOLL_WAIT,
+	SRVC_ERR_TMR_FAILURE,
+	SRVC_ERR_GET_TIME,
+	SRVC_ERR_MAX
+};
+
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct if_bind_config {
