@@ -3,6 +3,9 @@
 #include "uthash.h"
 #include "ipx_wrap_service_lib.h"
 
+// TODO: add a user defined signal that prints the service table?
+// TODO: send an initial general service query at interface startup?
+
 enum service_sap_error_codes {
 	SAP_ERR_READ_CFG = SRVC_ERR_MAX
 };
@@ -395,6 +398,10 @@ static ssize_t insert_srv_entries_from_sap_rsp(struct srv_id_pkt *sap_rsp,
 		if (e == NULL) {
 			continue;
 		}
+
+		// TODO: add some plausibility checks
+		// is the net one of our own but the hop count is higher?
+		// do we have a route to the source net?
 
 		memcpy(&e->data, &sap_rsp->data[i], sizeof(struct srv_data));
 		e->learned_from_net = in_net;

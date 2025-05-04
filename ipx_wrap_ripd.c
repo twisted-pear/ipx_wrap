@@ -6,6 +6,8 @@
 #include "uthash.h"
 #include "ipx_wrap_service_lib.h"
 
+// TODO: send an initial request for all routes at interface startup?
+
 #define MAINTENANCE_INTERVAL_SECS 10
 
 #define RTABLE_FILE "/proc/net/ipv6_route"
@@ -62,10 +64,6 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 
 	/* set metric from the hopcount */
 	rt.rtmsg_metric = ntohs(hops) * RIP_METRIC_MULT;
-
-	// TODO
-	///* set interface */
-	//rt.rtmsg_ifindex = ifidx;
 
 	/* we want to add the route, add flags */
 	rt.rtmsg_flags = RTMSG_NEWROUTE | RTF_UP | RTF_GATEWAY | RTF_EXPIRES;
@@ -147,6 +145,7 @@ static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 					nentries);
 			break;
 		} else {
+			// TODO
 			fprintf(stderr, "type not supported");
 			break;
 		}
