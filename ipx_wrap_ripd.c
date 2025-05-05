@@ -22,6 +22,7 @@
 #define RIP_INVALID_TIMER_MULT 100
 
 #define RIP_PKT_TYPE_RESPONSE htons(2)
+#define RIP_DEFAULT_ROUTE htonl(0xFFFFFFFE)
 
 struct rip_service_context {
 	__be32 prefix;
@@ -48,7 +49,21 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 	/* set destination net */
 	struct ipv6_eui64_addr *ip6 = (struct ipv6_eui64_addr *) &rt.rtmsg_dst;
 	ip6->prefix = prefix;
-	ip6->ipx_net = net;
+
+	if (net == RIP_DEFAULT_ROUTE) {
+		/* insert the default route for everything in the prefix */
+		/* network part remains 0 */
+
+		/* set mask */
+		rt.rtmsg_dst_len = 32;
+
+	} else {
+		/* insert a regular route for a single network */
+		ip6->ipx_net = net;
+
+		/* set mask */
+		rt.rtmsg_dst_len = 64;
+	}
 
 	/* set gateway */
 	ip6 = (struct ipv6_eui64_addr *) &rt.rtmsg_gateway;
@@ -58,9 +73,6 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 	ip6->fffe = htons(0xfffe);
 	memcpy(ip6->ipx_node_snd, gw->node + (sizeof(gw->node) / 2),
 			sizeof(gw->node) / 2);
-
-	/* set mask */
-	rt.rtmsg_dst_len = 64;
 
 	/* set metric from the hopcount */
 	rt.rtmsg_metric = ntohs(hops) * RIP_METRIC_MULT;
@@ -208,13 +220,19 @@ static int get_next_rip_entry(FILE *rtable, struct rip_entry *re, __u32
 		return -1;
 	}
 
-	/* don't advertise strange subnets, we only support /64 */
-	if (dst_mask != 64) {
+	/* only advertise within the prefix */
+	if (dst_prefix != my_prefix) {
 		return 0;
 	}
 
-	/* only advertise within the prefix */
-	if (dst_prefix != my_prefix) {
+	/* special case for the default route */
+	if (dst_mask == 32 && dst_net == 0) {
+		dst_net = ntohl(RIP_DEFAULT_ROUTE);
+		dst_mask = 64;
+	}
+
+	/* don't advertise strange subnets, we only support /64 */
+	if (dst_mask != 64) {
 		return 0;
 	}
 
