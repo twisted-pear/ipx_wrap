@@ -663,6 +663,11 @@ static void timeout_srv_entries(time_t now_secs)
 	}
 }
 
+void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
+{
+	// TODO
+}
+
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 {
 	assert(ctx != NULL);
@@ -683,8 +688,8 @@ bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 	return true;
 }
 
-bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, void
-		*ctx)
+bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, int
+		epoll_fd, void *ctx)
 {
 	handle_sap_msg(msg, iface);
 

@@ -67,9 +67,10 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 		*ifcfg, int maintenance_interval_secs);
 
 extern void service_cleanup_and_exit(void *ctx);
+extern void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx);
 extern bool service_reload(void *ctx);
 extern bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd);
 extern bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry
-		*iface, void *ctx);
+		*iface, int epoll_fd, void *ctx);
 
 #endif /* __IPX_WRAP_SERVICE_LIB_H__ */

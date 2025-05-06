@@ -140,7 +140,7 @@ _Noreturn void cleanup_and_exit(int tmr_fd, int epoll_fd, void *service_ctx,
 }
 
 static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
-		struct if_bind_config *ifcfg, int epoll_fd)
+		struct if_bind_config *ifcfg, int epoll_fd, void *service_ctx)
 {
 	struct if_entry *iface = calloc(1, sizeof(struct if_entry));
 	if (iface == NULL) {
@@ -207,6 +207,8 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 				iface->addr.node[3], iface->addr.node[4],
 				iface->addr.node[5], ntohs(iface->addr.sock));
 
+		service_ifup(iface, epoll_fd, service_ctx);
+
 		return iface;
 	} while (0);
 
@@ -226,7 +228,8 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 
 /* FIXME: we cannot handle an address migrating from one interface to another,
  * but this should not happen with IPX anyway */
-static bool scan_interfaces(const struct if_bind_config *ifcfg, int epoll_fd)
+static bool scan_interfaces(const struct if_bind_config *ifcfg, int epoll_fd,
+		void *service_ctx)
 {
 	/* iterate over all addresses to find the interface to our IPv6 addr */
 	struct ifaddrs *addrs;
@@ -258,7 +261,8 @@ static bool scan_interfaces(const struct if_bind_config *ifcfg, int epoll_fd)
 		}
 
 		/* get or create a new interface for this address */
-		struct if_entry *iface = add_iface(ipv6_addr, ifcfg, epoll_fd);
+		struct if_entry *iface = add_iface(ipv6_addr, ifcfg, epoll_fd,
+				service_ctx);
 		/* an error occurred during interface creation, try next
 		 * interface */
 		if (iface == NULL) {
@@ -378,7 +382,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 
 	/* scan all interfaces for addresses within the prefix, we manage those
 	 * interfaces */
-	if (!scan_interfaces(ifcfg, epoll_fd)) {
+	if (!scan_interfaces(ifcfg, epoll_fd, service_ctx)) {
 		perror("adding interfaces");
 		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
 				SRVC_ERR_IFACE_SCAN);
@@ -403,7 +407,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 	while (keep_going) {
 		/* received SIGHUP, do interface rescan and reload service */
 		if (reload_now) {
-			if (!scan_interfaces(ifcfg, epoll_fd)) {
+			if (!scan_interfaces(ifcfg, epoll_fd, service_ctx)) {
 				perror("scanning interfaces");
 				cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
 						SRVC_ERR_IFACE_SCAN);
@@ -453,8 +457,8 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 							INTERFACE_RESCAN_SECS,
 							last_interface_scan)) {
 					/* rescan the interfaces */
-					if (!scan_interfaces(ifcfg, epoll_fd))
-					{
+					if (!scan_interfaces(ifcfg, epoll_fd,
+								service_ctx)) {
 						perror("scanning interfaces");
 						cleanup_and_exit(tmr_fd,
 								epoll_fd,
@@ -496,6 +500,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 					perror("receiving msg");
 				} else {
 					if (!service_handle_msg(msg, iface,
+								epoll_fd,
 								service_ctx)) {
 						fprintf(stderr, "failed to "
 								"handle "

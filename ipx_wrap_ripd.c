@@ -6,8 +6,6 @@
 #include "uthash.h"
 #include "ipx_wrap_service_lib.h"
 
-// TODO: send an initial request for all routes at interface startup?
-
 #define MAINTENANCE_INTERVAL_SECS 10
 
 #define RTABLE_FILE "/proc/net/ipv6_route"
@@ -21,8 +19,10 @@
 #define RIP_METRIC_MULT 2048
 #define RIP_INVALID_TIMER_MULT 100
 
+#define RIP_PKT_TYPE_REQUEST htons(1)
 #define RIP_PKT_TYPE_RESPONSE htons(2)
 #define RIP_DEFAULT_ROUTE htonl(0xFFFFFFFE)
+#define RIP_ALL_ROUTES htonl(0xFFFFFFFF)
 
 struct rip_service_context {
 	__be32 prefix;
@@ -34,6 +34,11 @@ struct rip_entry {
 	__be16 hops;
 	__be16 ticks;
 } __attribute__((packed));
+
+struct rip_req_pkt {
+	__be16 rip_type;
+	struct rip_entry rip_entry;
+};
 
 struct rip_rsp_pkt {
 	__be16 rip_type;
@@ -97,94 +102,47 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 	return true;
 }
 
-static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
-		__be32 prefix)
+static struct ipxw_mux_msg *mk_rip_request_for_iface(struct if_entry *iface,
+		__be32 req_net)
 {
-	fprintf(stderr, "Received RIP message from "
-			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx: ",
-			ntohl(msg->recv.saddr.net), msg->recv.saddr.node[0],
-			msg->recv.saddr.node[1], msg->recv.saddr.node[2],
-			msg->recv.saddr.node[3], msg->recv.saddr.node[4],
-			msg->recv.saddr.node[5], ntohs(msg->recv.saddr.sock));
-
-	/* not a valid RIP message */
-	if (msg->recv.data_len < sizeof(struct rip_rsp_pkt)) {
-		fprintf(stderr, "invalid.\n");
-		return;
-	}
-
-	struct rip_rsp_pkt *rip_rsp_pkt = (struct rip_rsp_pkt *) msg->data;
-	do {
-		if (rip_rsp_pkt->rip_type == RIP_PKT_TYPE_RESPONSE) {
-			/* RIP response, fill routing table */
-			if (msg->recv.data_len < sizeof(struct rip_rsp_pkt)) {
-				/* too short */
-				fprintf(stderr, "response too short");
-				break;
-			}
-
-			if ((msg->recv.data_len - sizeof(struct rip_rsp_pkt)) %
-					sizeof(struct rip_entry) != 0) {
-				/* incomplete server entries */
-				fprintf(stderr, "response malformed");
-				break;
-			}
-
-			struct ipx_addr *gw = &msg->recv.saddr;
-			size_t nentries = (msg->recv.data_len - sizeof(struct
-						rip_rsp_pkt)) / sizeof(struct
-						rip_entry);
-
-			size_t ninserted = 0;
-			size_t i;
-			for (i = 0; i < nentries; i++) {
-				__be32 net = rip_rsp_pkt->rip_entries[i].net;
-				__be16 hops = rip_rsp_pkt->rip_entries[i].hops;
-				/* skip routes that have too many hops */
-				if (ntohs(hops) > RIP_MAX_HOPS) {
-					continue;
-				}
-				if (!add_route(net, gw, hops, prefix)) {
-					fprintf(stderr, "\nfailed to add route "
-							"for net %08x\n",
-							ntohl(net));
-				} else {
-					ninserted++;
-				}
-			}
-
-			fprintf(stderr, "added %lu of %lu routes", ninserted,
-					nentries);
-			break;
-		} else {
-			// TODO
-			fprintf(stderr, "type not supported");
-			break;
-		}
-	} while(0);
-
-	fprintf(stderr, ".\n");
-}
-
-static struct ipxw_mux_msg *mk_rip_update_pkt_for_iface(struct if_entry *iface)
-{
-	struct ipxw_mux_msg *bcast = calloc(1, sizeof(struct ipxw_mux_msg) +
-			sizeof(struct rip_rsp_pkt) + (sizeof(struct rip_entry)
-				* RIP_MAX_ROUTES_PER_PKT));
-	if (bcast == NULL) {
+	struct ipxw_mux_msg *req = calloc(1, sizeof(struct ipxw_mux_msg) +
+			sizeof(struct rip_req_pkt));
+	if (req == NULL) {
 		return false;
 	}
-	struct rip_rsp_pkt *rip = (struct rip_rsp_pkt *) bcast->data;
+	struct rip_req_pkt *rip = (struct rip_req_pkt *) req->data;
 
-	bcast->type = IPXW_MUX_XMIT;
-	bcast->xmit.daddr.net = iface->addr.net;
-	memcpy(bcast->xmit.daddr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
-	bcast->xmit.daddr.sock = htons(RIP_SOCK);
-	bcast->xmit.pkt_type = RIP_PKT_TYPE;
-	bcast->xmit.data_len = sizeof(struct rip_rsp_pkt);
+	req->type = IPXW_MUX_XMIT;
+	req->xmit.daddr.net = iface->addr.net;
+	memcpy(req->xmit.daddr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
+	req->xmit.daddr.sock = htons(RIP_SOCK);
+	req->xmit.pkt_type = RIP_PKT_TYPE;
+	req->xmit.data_len = sizeof(struct rip_req_pkt);
+	rip->rip_type = RIP_PKT_TYPE_REQUEST;
+	rip->rip_entry.net = req_net;
+
+	return req;
+}
+
+static struct ipxw_mux_msg *mk_rip_response_to_addr(struct ipx_addr *addr)
+{
+	struct ipxw_mux_msg *rsp = calloc(1, sizeof(struct ipxw_mux_msg) +
+			sizeof(struct rip_rsp_pkt) + (sizeof(struct rip_entry)
+				* RIP_MAX_ROUTES_PER_PKT));
+	if (rsp == NULL) {
+		return false;
+	}
+	struct rip_rsp_pkt *rip = (struct rip_rsp_pkt *) rsp->data;
+
+	rsp->type = IPXW_MUX_XMIT;
+	rsp->xmit.daddr.net = addr->net;
+	memcpy(rsp->xmit.daddr.node, addr->node, IPX_ADDR_NODE_BYTES);
+	rsp->xmit.daddr.sock = addr->sock;
+	rsp->xmit.pkt_type = RIP_PKT_TYPE;
+	rsp->xmit.data_len = sizeof(struct rip_rsp_pkt);
 	rip->rip_type = RIP_PKT_TYPE_RESPONSE;
 
-	return bcast;
+	return rsp;
 }
 
 static int get_next_rip_entry(FILE *rtable, struct rip_entry *re, __u32
@@ -269,7 +227,7 @@ static int get_next_rip_entry(FILE *rtable, struct rip_entry *re, __u32
 }
 
 static bool prepare_rip_update_for_iface(struct if_entry *iface, __be32 prefix,
-		int epoll_fd)
+		struct ipx_addr *daddr, int epoll_fd)
 {
 	struct ipxw_mux_msg *bcast = NULL;
 	int i = 0;
@@ -280,14 +238,13 @@ static bool prepare_rip_update_for_iface(struct if_entry *iface, __be32 prefix,
 		rtable = fopen(RTABLE_FILE, "r");
 	} while (rtable == NULL && errno == EINTR);
 	if (rtable == NULL) {
-		perror("open routing table");
 		return false;
 	}
 
 	while (1) {
 		/* start a new broadcast packet */
 		if (bcast == NULL) {
-			bcast = mk_rip_update_pkt_for_iface(iface);
+			bcast = mk_rip_response_to_addr(daddr);
 			if (bcast == NULL) {
 				fclose(rtable);
 				return false;
@@ -341,6 +298,160 @@ static bool prepare_rip_update_for_iface(struct if_entry *iface, __be32 prefix,
 	return true;
 }
 
+static bool prepare_rip_response_for_iface(struct if_entry *iface, __be32
+		prefix, struct ipx_addr *daddr, __be32 network, int epoll_fd)
+{
+	struct ipxw_mux_msg *rsp = mk_rip_response_to_addr(daddr);
+	if (rsp == NULL) {
+		return false;
+	}
+
+	/* open the routing table */
+	FILE *rtable = NULL;
+	do {
+		rtable = fopen(RTABLE_FILE, "r");
+	} while (rtable == NULL && errno == EINTR);
+	if (rtable == NULL) {
+		free(rsp);
+		return false;
+	}
+
+	while (1) {
+		struct rip_rsp_pkt *rip = (struct rip_rsp_pkt *) rsp->data;
+
+		int err = get_next_rip_entry(rtable, &rip->rip_entries[0],
+				ntohl(prefix), ntohl(iface->addr.net));
+		if (err < 0) {
+			/* end of routing table or error */
+			fclose(rtable);
+			free(rsp);
+			return false;
+		} else if (err == 0) {
+			/* route not taken */
+			continue;
+		} else {
+			/* not the network we're looking for */
+			if (rip->rip_entries[0].net != network) {
+				continue;
+			}
+
+			/* route taken */
+			rsp->xmit.data_len += sizeof(struct rip_entry);
+			break;
+		}
+	}
+
+	assert(rsp != NULL);
+
+	fclose(rtable);
+
+	/* transmit last update packet */
+	if (!queue_msg_on_iface(iface, rsp, epoll_fd)) {
+		free(rsp);
+		return false;
+	}
+
+	return true;
+}
+
+static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
+		__be32 prefix, int epoll_fd)
+{
+	fprintf(stderr, "Received RIP message from "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx: ",
+			ntohl(msg->recv.saddr.net), msg->recv.saddr.node[0],
+			msg->recv.saddr.node[1], msg->recv.saddr.node[2],
+			msg->recv.saddr.node[3], msg->recv.saddr.node[4],
+			msg->recv.saddr.node[5], ntohs(msg->recv.saddr.sock));
+
+	/* not a valid RIP message */
+	if (msg->recv.data_len < sizeof(struct rip_rsp_pkt)) {
+		fprintf(stderr, "invalid.\n");
+		return;
+	}
+
+	struct rip_rsp_pkt *rip_rsp_pkt = (struct rip_rsp_pkt *) msg->data;
+	struct rip_req_pkt *rip_req_pkt = (struct rip_req_pkt *) msg->data;
+	do {
+		if (rip_rsp_pkt->rip_type == RIP_PKT_TYPE_RESPONSE) {
+			/* RIP response, fill routing table */
+			if (msg->recv.data_len < sizeof(struct rip_rsp_pkt)) {
+				/* too short */
+				fprintf(stderr, "response too short");
+				break;
+			}
+
+			if ((msg->recv.data_len - sizeof(struct rip_rsp_pkt)) %
+					sizeof(struct rip_entry) != 0) {
+				/* incomplete server entries */
+				fprintf(stderr, "response malformed");
+				break;
+			}
+
+			struct ipx_addr *gw = &msg->recv.saddr;
+			size_t nentries = (msg->recv.data_len - sizeof(struct
+						rip_rsp_pkt)) / sizeof(struct
+						rip_entry);
+
+			size_t ninserted = 0;
+			size_t i;
+			for (i = 0; i < nentries; i++) {
+				__be32 net = rip_rsp_pkt->rip_entries[i].net;
+				__be16 hops = rip_rsp_pkt->rip_entries[i].hops;
+				/* skip routes that have too many hops */
+				if (ntohs(hops) > RIP_MAX_HOPS) {
+					continue;
+				}
+				if (!add_route(net, gw, hops, prefix)) {
+					fprintf(stderr, "\nfailed to add route "
+							"for net %08x\n",
+							ntohl(net));
+				} else {
+					ninserted++;
+				}
+			}
+
+			fprintf(stderr, "added %lu of %lu routes", ninserted,
+					nentries);
+			break;
+		} else if (rip_rsp_pkt->rip_type == RIP_PKT_TYPE_REQUEST) {
+			if (msg->recv.data_len != sizeof(struct rip_req_pkt)) {
+				/* wrong size */
+				fprintf(stderr, "request has invalid size");
+				break;
+			}
+
+			if (rip_req_pkt->rip_entry.net == IPX_NET_ALL_ROUTES) {
+				if (!prepare_rip_update_for_iface(in_if,
+							prefix,
+							&msg->recv.saddr,
+							epoll_fd)) {
+					fprintf(stderr, "\n");
+					perror("sending RIP response");
+				} else {
+					fprintf(stderr, "sending response");
+				}
+				break;
+			}
+
+			if (!prepare_rip_response_for_iface(in_if, prefix,
+						&msg->recv.saddr,
+						rip_req_pkt->rip_entry.net,
+						epoll_fd)) {
+				fprintf(stderr, "\n");
+				perror("sending RIP response");
+			} else {
+				fprintf(stderr, "sending response");
+			}
+		} else {
+			fprintf(stderr, "type not supported");
+			break;
+		}
+	} while(0);
+
+	fprintf(stderr, ".\n");
+}
+
 struct per_iface_update_ctx {
 	__be32 prefix;
 	int epoll_fd;
@@ -350,7 +461,13 @@ static bool per_iface_rip_update(struct if_entry *iface, void *ctx)
 {
 	struct per_iface_update_ctx *per_if_ctx = ctx;
 
-	if (!prepare_rip_update_for_iface(iface, per_if_ctx->prefix,
+	struct ipx_addr daddr = {
+		.net = iface->addr.net,
+		.sock = htons(RIP_SOCK)
+	};
+	memcpy(daddr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
+
+	if (!prepare_rip_update_for_iface(iface, per_if_ctx->prefix, &daddr,
 				per_if_ctx->epoll_fd)) {
 		perror("sending RIP update");
 	}
@@ -376,6 +493,19 @@ void service_cleanup_and_exit(void *ctx)
 	/* do nothing */
 }
 
+void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
+{
+	struct ipxw_mux_msg *msg = mk_rip_request_for_iface(iface,
+			IPX_NET_ALL_ROUTES);
+	if (msg == NULL) {
+		return;
+	}
+
+	if (!queue_msg_on_iface(iface, msg, epoll_fd)) {
+		free(msg);
+	}
+}
+
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 {
 	assert(ctx != NULL);
@@ -392,12 +522,12 @@ bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 	return true;
 }
 
-bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, void
-		*ctx)
+bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, int
+		epoll_fd, void *ctx)
 {
 	struct rip_service_context *service_ctx = ctx;
 
-	handle_rip_msg(msg, iface, service_ctx->prefix);
+	handle_rip_msg(msg, iface, service_ctx->prefix, epoll_fd);
 
 	return true;
 }
