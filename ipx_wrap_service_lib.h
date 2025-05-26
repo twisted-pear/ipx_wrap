@@ -70,6 +70,7 @@ extern void service_cleanup_and_exit(void *ctx);
 extern void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx);
 extern bool service_reload(void *ctx);
 extern bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd);
+extern void service_handle_signal(int signal);
 extern bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry
 		*iface, int epoll_fd, void *ctx);
 

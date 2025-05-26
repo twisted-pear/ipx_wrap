@@ -340,6 +340,10 @@ static void signal_handler(int signal)
 		case SIGTERM:
 			keep_going = false;
 			break;
+		case SIGUSR1:
+		case SIGUSR2:
+			service_handle_signal(signal);
+			break;
 		default:
 			assert(0);
 	}
@@ -394,7 +398,9 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 	if (sigaction(SIGHUP, &sig_act, NULL) < 0
 			|| sigaction(SIGINT, &sig_act, NULL) < 0
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
-			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
+			|| sigaction(SIGTERM, &sig_act, NULL) < 0
+			|| sigaction(SIGUSR1, &sig_act, NULL) < 0
+			|| sigaction(SIGUSR2, &sig_act, NULL) < 0) {
 		perror("setting signal handler");
 		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
 				SRVC_ERR_SIG_HANDLER);

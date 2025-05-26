@@ -522,6 +522,11 @@ bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 	return true;
 }
 
+void service_handle_signal(int signal)
+{
+	/* do nothing */
+}
+
 bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, int
 		epoll_fd, void *ctx)
 {

@@ -3,13 +3,11 @@
 #include "uthash.h"
 #include "ipx_wrap_service_lib.h"
 
-// TODO: add a user defined signal that prints the service table?
-
 enum service_sap_error_codes {
 	SAP_ERR_READ_CFG = SRVC_ERR_MAX
 };
 
-#define MAINTENANCE_INTERVAL_SECS 10
+#define MAINTENANCE_INTERVAL_SECS 2
 
 #define SAP_SOCK 0x0452
 #define SAP_PKT_TYPE 0x04
@@ -80,6 +78,7 @@ struct srv_type_list {
 static struct srv_entry *ht_ipx_addr_to_srv = NULL;
 static struct srv_entry *ht_srv_type_and_name_to_srv = NULL;
 static struct srv_type_list *ht_srv_type_to_srv_list = NULL;
+static bool print_database = false;
 
 static struct srv_type_list *get_srv_type_list(__be16 srv_type)
 {
@@ -299,7 +298,8 @@ static struct ipxw_mux_msg *mk_sap_request_for_iface(struct if_entry *iface,
 	return req;
 }
 
-static struct ipxw_mux_msg *mk_sap_response_to_addr(struct ipx_addr *daddr)
+static struct ipxw_mux_msg *mk_sap_response_to_addr(struct ipx_addr *daddr,
+		bool nearest)
 {
 	struct ipxw_mux_msg *rsp = calloc(1, sizeof(struct ipxw_mux_msg) +
 			sizeof(struct srv_id_pkt) + (sizeof(struct srv_data) *
@@ -315,29 +315,79 @@ static struct ipxw_mux_msg *mk_sap_response_to_addr(struct ipx_addr *daddr)
 	rsp->xmit.daddr.sock = htons(SAP_SOCK);
 	rsp->xmit.pkt_type = SAP_PKT_TYPE;
 	rsp->xmit.data_len = sizeof(struct srv_id_pkt);
-	sap->rsp_type = SAP_RSP_TYPE_GENERAL_SQ;
+	sap->rsp_type = (nearest ? SAP_RSP_TYPE_NEAREST_SQ :
+			SAP_RSP_TYPE_GENERAL_SQ);
 
 	return rsp;
 }
 
-static bool prepare_sap_wild_gsq_response_for_iface(struct if_entry *iface,
-		struct ipx_addr *daddr, int epoll_fd)
+static bool prepare_sap_nsq_response_for_iface(struct if_entry *iface, struct
+		ipx_addr *daddr, __be16 srv_type, int epoll_fd)
+{
+	struct srv_type_list *type_list = get_srv_type_list(srv_type);
+	if (type_list == NULL) {
+		/* could not allocate type list entry */
+		return false;
+	}
+
+	struct srv_entry *se = TAILQ_FIRST(&type_list->entries);
+	if (se == NULL) {
+		/* no service of the type is known, return true, as this is not
+		 * an error */
+		return true;
+	}
+
+	/* do not send a server back to the interface from where we got it */
+	if (se->learned_from_net == iface->addr.net) {
+		/* not an error, just no appropriate service */
+		return true;
+	}
+
+	struct ipxw_mux_msg *rsp = mk_sap_response_to_addr(daddr, true);
+	if (rsp == NULL) {
+		return false;
+	}
+
+	struct srv_id_pkt *sap = (struct srv_id_pkt *) rsp->data;
+
+	/* fill in the data from the entry */
+	memcpy(&sap->data[0], &se->data, sizeof(struct srv_data));
+	/* increase hop counter */
+	sap->data[0].hops = htons(ntohs(sap->data[0].hops) + 1);
+	rsp->xmit.data_len += sizeof(struct srv_data);
+
+	/* transmit response packet */
+	if (!queue_msg_on_iface(iface, rsp, epoll_fd)) {
+		free(rsp);
+		return false;
+	}
+
+	return true;
+}
+
+static bool prepare_sap_gsq_response_for_iface(struct if_entry *iface, struct
+		ipx_addr *daddr, __be16 srv_type, int epoll_fd)
 {
 	struct ipxw_mux_msg *rsp = NULL;
 	int i = 0;
 
+	struct srv_type_list *type_list = get_srv_type_list(srv_type);
+	if (type_list == NULL) {
+		/* could not allocate type list entry */
+		return false;
+	}
+
 	struct srv_entry *se;
-	struct srv_entry *stmp;
-	HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
-		/* do not broadcast back to the interface from where we got the
-		 * server */
+	TAILQ_FOREACH(se, &type_list->entries, type_list_entry) {
+		/* do not send a server back to the interface from where we got
+		 * it */
 		if (se->learned_from_net == iface->addr.net) {
 			continue;
 		}
 
-		/* start a new broadcast packet */
+		/* start a new response packet */
 		if (rsp == NULL) {
-			rsp = mk_sap_response_to_addr(daddr);
+			rsp = mk_sap_response_to_addr(daddr, false);
 			if (rsp == NULL) {
 				return false;
 			}
@@ -357,7 +407,7 @@ static bool prepare_sap_wild_gsq_response_for_iface(struct if_entry *iface,
 		/* ready for next entry */
 		i++;
 
-		/* broadcast packet is full, transmit */
+		/* response packet is full, transmit */
 		if (i >= SAP_MAX_SRVS_PER_PKT) {
 			if (!queue_msg_on_iface(iface, rsp, epoll_fd)) {
 				free(rsp);
@@ -368,12 +418,74 @@ static bool prepare_sap_wild_gsq_response_for_iface(struct if_entry *iface,
 		}
 	}
 
-	/* no broadcast packet left, all were transmitted */
+	/* no response packet left, all were transmitted */
 	if (rsp == NULL) {
 		return true;
 	}
 
-	/* transmit last broadcast packet */
+	/* transmit last response packet */
+	if (!queue_msg_on_iface(iface, rsp, epoll_fd)) {
+		free(rsp);
+		return false;
+	}
+
+	return true;
+}
+
+static bool prepare_sap_wild_gsq_response_for_iface(struct if_entry *iface,
+		struct ipx_addr *daddr, int epoll_fd)
+{
+	struct ipxw_mux_msg *rsp = NULL;
+	int i = 0;
+
+	struct srv_entry *se;
+	struct srv_entry *stmp;
+	HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
+		/* do not send a server back to the interface from where we got
+		 * it */
+		if (se->learned_from_net == iface->addr.net) {
+			continue;
+		}
+
+		/* start a new response packet */
+		if (rsp == NULL) {
+			rsp = mk_sap_response_to_addr(daddr, false);
+			if (rsp == NULL) {
+				return false;
+			}
+
+			i = 0;
+		}
+		assert(rsp != NULL);
+
+		struct srv_id_pkt *sap = (struct srv_id_pkt *) rsp->data;
+
+		/* fill in the data from the entry */
+		memcpy(&sap->data[i], &se->data, sizeof(struct srv_data));
+		/* increase hop counter */
+		sap->data[i].hops = htons(ntohs(sap->data[i].hops) + 1);
+		rsp->xmit.data_len += sizeof(struct srv_data);
+
+		/* ready for next entry */
+		i++;
+
+		/* response packet is full, transmit */
+		if (i >= SAP_MAX_SRVS_PER_PKT) {
+			if (!queue_msg_on_iface(iface, rsp, epoll_fd)) {
+				free(rsp);
+				return false;
+			}
+
+			rsp = NULL;
+		}
+	}
+
+	/* no response packet left, all were transmitted */
+	if (rsp == NULL) {
+		return true;
+	}
+
+	/* response last broadcast packet */
 	if (!queue_msg_on_iface(iface, rsp, epoll_fd)) {
 		free(rsp);
 		return false;
@@ -476,14 +588,25 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 							&msg->recv.saddr,
 							epoll_fd)) {
 					fprintf(stderr, "\n");
-					perror("sending SAP response");
+					perror("sending wild GSQ SAP "
+							"response");
 				} else {
-					fprintf(stderr, "sending response");
+					fprintf(stderr, "sending wild GSQ "
+							"response");
 				}
 				break;
 			}
-			// TODO
-			fprintf(stderr, "type not supported");
+
+			if (!prepare_sap_gsq_response_for_iface(in_if,
+						&msg->recv.saddr,
+						sap_query_pkt->srv_type,
+						epoll_fd)) {
+				fprintf(stderr, "\n");
+				perror("sending GSQ SAP response");
+			} else {
+				fprintf(stderr, "sending GSQ response");
+			}
+
 			break;
 		} else if (sap_rsp_pkt->rsp_type == SAP_PKT_TYPE_NEAREST_SQ) {
 			/* reply with the nearest server of the correct type */
@@ -493,8 +616,17 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 						" query");
 				break;
 			}
-			// TODO
-			fprintf(stderr, "type not supported");
+
+			if (!prepare_sap_nsq_response_for_iface(in_if,
+						&msg->recv.saddr,
+						sap_query_pkt->srv_type,
+						epoll_fd)) {
+				fprintf(stderr, "\n");
+				perror("sending NSQ SAP response");
+			} else {
+				fprintf(stderr, "sending NSQ response");
+			}
+
 			break;
 		} else if (sap_rsp_pkt->rsp_type == SAP_RSP_TYPE_NEAREST_SQ ||
 			sap_rsp_pkt->rsp_type == SAP_RSP_TYPE_PERIODIC_BC ||
@@ -580,6 +712,10 @@ static int parse_next_line_from_cfg(FILE *cfg, struct srv_entry *e)
 	if (len == 0 || line[0] == '#') {
 		free(line);
 		return 0;
+	}
+	char *comment_start = strchr(line, '#');
+	if (comment_start != NULL) {
+		*comment_start = '\0';
 	}
 
 	__u32 srv_net;
@@ -725,6 +861,29 @@ void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 	}
 }
 
+void do_print_database(void)
+{
+	printf("# Service Database\n");
+	printf("# IPX_addr hops type name # learned_from_net last_seen_secs\n");
+
+	struct srv_entry *se;
+	struct srv_entry *stmp;
+	HASH_ITER(hh, ht_ipx_addr_to_srv, se, stmp) {
+		struct ipx_addr *addr = &se->data.srv_addr;
+
+		printf("%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx ",
+				ntohl(addr->net), addr->node[0], addr->node[1],
+				addr->node[2], addr->node[3], addr->node[4],
+				addr->node[5], ntohs(addr->sock));
+		printf("%04hx ", ntohs(se->data.hops));
+		printf("%04hx ", ntohs(se->data.srv_type));
+		printf("%s ", se->data.srv_name);
+		printf("# ");
+		printf("%08x ", ntohl(se->learned_from_net));
+		printf("%ld\n", se->last_seen);
+	}
+}
+
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 {
 	assert(ctx != NULL);
@@ -742,7 +901,22 @@ bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 	/* remove expired server entries */
 	timeout_srv_entries(now_secs);
 
+	/* print out the service database if requested */
+	if (print_database) {
+		do_print_database();
+		print_database = false;
+	}
+
 	return true;
+}
+
+void service_handle_signal(int signal)
+{
+	if (signal != SIGUSR1) {
+		return;
+	}
+
+	print_database = true;
 }
 
 bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, int
@@ -777,6 +951,8 @@ int main(int argc, char **argv)
 	if (prefix == 0) {
 		usage();
 	}
+
+	print_database = false;
 
 	struct sap_service_context service_ctx = {
 		.cfg_path = argv[2],
