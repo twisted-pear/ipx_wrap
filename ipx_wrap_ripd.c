@@ -354,6 +354,9 @@ static bool prepare_rip_response_for_iface(struct if_entry *iface, __be32
 	return true;
 }
 
+static void prepare_rip_propagate(struct if_entry *in_if, struct ipxw_mux_msg
+		*in_msg, __be32 prefix, size_t nentries,  int epoll_fd);
+
 static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 		__be32 prefix, int epoll_fd)
 {
@@ -413,6 +416,12 @@ static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 
 			fprintf(stderr, "added %lu of %lu routes", ninserted,
 					nentries);
+
+			if (msg->recv.is_bcast) {
+				prepare_rip_propagate(in_if, msg, prefix,
+						nentries, epoll_fd);
+			}
+
 			break;
 		} else if (rip_rsp_pkt->rip_type == RIP_PKT_TYPE_REQUEST) {
 			if (msg->recv.data_len != sizeof(struct rip_req_pkt)) {
@@ -450,6 +459,91 @@ static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 	} while(0);
 
 	fprintf(stderr, ".\n");
+}
+
+struct per_iface_propagate_ctx {
+	struct if_entry *in_if;
+	struct ipxw_mux_msg *in_msg;
+	size_t in_nentries;
+	__be32 prefix;
+	int epoll_fd;
+};
+
+static bool per_iface_rip_propagate(struct if_entry *iface, void *ctx)
+{
+	struct per_iface_propagate_ctx *per_if_ctx = ctx;
+
+	if (iface == per_if_ctx->in_if) {
+		return true;
+	}
+
+	struct ipx_addr out_bcast_addr = {
+		.net = iface->addr.net,
+		.sock = htons(RIP_SOCK)
+	};
+	memcpy(out_bcast_addr.node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
+	struct ipxw_mux_msg *out_msg =
+		mk_rip_response_to_addr(&out_bcast_addr);
+	if (out_msg == NULL) {
+		return false;
+	}
+
+	struct rip_rsp_pkt *in_rsp = (struct rip_rsp_pkt *)
+		per_if_ctx->in_msg->data;
+	struct rip_rsp_pkt *out_rsp = (struct rip_rsp_pkt *) out_msg->data;
+
+	/* copy all routes, except the one for the interface's network into
+	 * output packet */
+	size_t i_out = 0;
+	size_t i;
+	for (i = 0; i < per_if_ctx->in_nentries && i <
+			RIP_MAX_ROUTES_PER_PKT; i++) {
+		__be32 net = in_rsp->rip_entries[i].net;
+		__be16 hops = htons(ntohs(in_rsp->rip_entries[i].hops) + 1);
+		__be16 ticks = htons(ntohs(in_rsp->rip_entries[i].ticks) + 1);
+
+		/* don't send routes to the interface's own network */
+		if (net == iface->addr.net) {
+			continue;
+		}
+
+		out_rsp->rip_entries[i_out].net = net;
+		out_rsp->rip_entries[i_out].hops = hops;
+		out_rsp->rip_entries[i_out].ticks = ticks;
+		i_out++;
+	}
+
+	/* adjust packet length */
+	out_msg->xmit.data_len += sizeof(struct rip_entry) * i_out;
+
+	/* no routes for this interface */
+	if (i_out == 0) {
+		free(out_msg);
+		return true;
+	}
+
+	/* propagate the routes */
+	if (!queue_msg_on_iface(iface, out_msg, per_if_ctx->epoll_fd)) {
+		free(out_msg);
+		return false;
+	}
+
+	return true;
+}
+
+static void prepare_rip_propagate(struct if_entry *in_if, struct ipxw_mux_msg
+		*in_msg, __be32 prefix, size_t nentries,  int epoll_fd)
+{
+	struct per_iface_propagate_ctx ctx = {
+		.in_if = in_if,
+		.in_msg = in_msg,
+		.in_nentries = nentries,
+		.prefix = prefix,
+		.epoll_fd = epoll_fd
+	};
+
+	/* propagate in_msg to all other interfaces */
+	for_each_iface(per_iface_rip_propagate, &ctx);
 }
 
 struct per_iface_update_ctx {
