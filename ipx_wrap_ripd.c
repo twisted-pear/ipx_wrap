@@ -24,6 +24,9 @@
 #define RIP_DEFAULT_ROUTE htonl(0xFFFFFFFE)
 #define RIP_ALL_ROUTES htonl(0xFFFFFFFF)
 
+#define RIP_REQ_HOPS htons(0xFFFF)
+#define RIP_REQ_TICKS htons(0xFFFF)
+
 struct rip_service_context {
 	__be32 prefix;
 	time_t last_update_bcast;
@@ -120,6 +123,8 @@ static struct ipxw_mux_msg *mk_rip_request_for_iface(struct if_entry *iface,
 	req->xmit.data_len = sizeof(struct rip_req_pkt);
 	rip->rip_type = RIP_PKT_TYPE_REQUEST;
 	rip->rip_entry.net = req_net;
+	rip->rip_entry.hops = RIP_REQ_HOPS;
+	rip->rip_entry.ticks = RIP_REQ_TICKS;
 
 	return req;
 }
