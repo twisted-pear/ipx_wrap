@@ -27,6 +27,9 @@
 #define RIP_REQ_HOPS htons(0xFFFF)
 #define RIP_REQ_TICKS htons(0xFFFF)
 
+_Static_assert(RIP_MAX_ROUTES_PER_PKT <= (sizeof(__u64) * 8),
+		"too many routes per packet");
+
 struct rip_service_context {
 	__be32 prefix;
 	time_t last_update_bcast;
@@ -48,7 +51,7 @@ struct rip_rsp_pkt {
 	struct rip_entry rip_entries[0];
 };
 
-static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
+static int add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 		prefix)
 {
 	struct in6_rtmsg rt;
@@ -92,17 +95,21 @@ static bool add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 	/* try to insert the route */
 	int sock = socket(AF_INET6, SOCK_DGRAM, 0);
 	if (sock < 0) {
-		return false;
+		return -1;
 	}
+
+	int ret = 0;
 	if (ioctl(sock, SIOCADDRT, &rt) < 0) {
 		if (errno != EEXIST) {
 			close(sock);
-			return false;
+			return -1;
 		}
+
+		ret = 1;
 	}
 
 	close(sock);
-	return true;
+	return ret;
 }
 
 static struct ipxw_mux_msg *mk_rip_request_for_iface(struct if_entry *iface,
@@ -360,7 +367,8 @@ static bool prepare_rip_response_for_iface(struct if_entry *iface, __be32
 }
 
 static void prepare_rip_propagate(struct if_entry *in_if, struct ipxw_mux_msg
-		*in_msg, __be32 prefix, size_t nentries,  int epoll_fd);
+		*in_msg, __be32 prefix, size_t nentries, __u64 prop_route_bits,
+		int epoll_fd);
 
 static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 		__be32 prefix, int epoll_fd)
@@ -401,6 +409,7 @@ static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 						rip_rsp_pkt)) / sizeof(struct
 						rip_entry);
 
+			__u64 prop_route_bits = 0;
 			size_t ninserted = 0;
 			size_t i;
 			for (i = 0; i < nentries; i++) {
@@ -410,12 +419,19 @@ static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 				if (ntohs(hops) > RIP_MAX_HOPS) {
 					continue;
 				}
-				if (!add_route(net, gw, hops, prefix)) {
+				int route_status = add_route(net, gw, hops, prefix);
+				if (route_status < 0) {
 					fprintf(stderr, "\nfailed to add route "
 							"for net %08x\n",
 							ntohl(net));
 				} else {
 					ninserted++;
+
+					/* new, previously unknown route, mark
+					 * for propagation */
+					if (route_status == 0) {
+						prop_route_bits |= (1 << i);
+					}
 				}
 			}
 
@@ -424,7 +440,8 @@ static void handle_rip_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 
 			if (msg->recv.is_bcast) {
 				prepare_rip_propagate(in_if, msg, prefix,
-						nentries, epoll_fd);
+						nentries, prop_route_bits,
+						epoll_fd);
 			}
 
 			break;
@@ -470,6 +487,7 @@ struct per_iface_propagate_ctx {
 	struct if_entry *in_if;
 	struct ipxw_mux_msg *in_msg;
 	size_t in_nentries;
+	__u64 in_prop_route_bits;
 	__be32 prefix;
 	int epoll_fd;
 };
@@ -512,6 +530,11 @@ static bool per_iface_rip_propagate(struct if_entry *iface, void *ctx)
 			continue;
 		}
 
+		/* route is already known, don't propagate */
+		if (((1 << i) & per_if_ctx->in_prop_route_bits) == 0) {
+			continue;
+		}
+
 		out_rsp->rip_entries[i_out].net = net;
 		out_rsp->rip_entries[i_out].hops = hops;
 		out_rsp->rip_entries[i_out].ticks = ticks;
@@ -537,12 +560,14 @@ static bool per_iface_rip_propagate(struct if_entry *iface, void *ctx)
 }
 
 static void prepare_rip_propagate(struct if_entry *in_if, struct ipxw_mux_msg
-		*in_msg, __be32 prefix, size_t nentries,  int epoll_fd)
+		*in_msg, __be32 prefix, size_t nentries, __u64 prop_route_bits,
+		int epoll_fd)
 {
 	struct per_iface_propagate_ctx ctx = {
 		.in_if = in_if,
 		.in_msg = in_msg,
 		.in_nentries = nentries,
+		.in_prop_route_bits = prop_route_bits,
 		.prefix = prefix,
 		.epoll_fd = epoll_fd
 	};
