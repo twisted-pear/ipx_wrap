@@ -12,36 +12,20 @@
 #define TC_ACT_SHOT 2
 
 struct {
-	__uint(type, BPF_MAP_TYPE_SOCKHASH);
-	__type(key, __u64);
-	__type(value, __u32);
-	__uint(max_entries, 1);
+	__uint(type, BPF_MAP_TYPE_SOCKMAP);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, IFINDEX_MAX);
 	//__uint(map_flags, BPF_F_RDONLY_PROG);
 } ipx_wrap_mux_sock_egress SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_SOCKHASH);
-	__type(key, __u64);
-	__type(value, __u32);
+	__type(key, struct ipx_addr);
+	__type(value, __u64);
 	__uint(max_entries, IPX_SOCKETS_MAX);
 	//__uint(map_flags, BPF_F_RDONLY_PROG);
 } ipx_wrap_mux_sock_ingress SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
-	__type(key, __u32);
-	__type(value, struct ipx_addr);
-	__uint(max_entries, 0);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} ipx_wrap_mux_bind_ingress_uc SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
-	__type(key, __u32);
-	__type(value, struct ipx_addr);
-	__uint(max_entries, 0);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} ipx_wrap_mux_bind_ingress_mc SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
@@ -70,23 +54,28 @@ int ipw_wrap_demux(struct __sk_buff *skb)
 
 	struct bpf_sock *sock = skb->sk;
 	if (sock == NULL) {
-		bpf_printk("demux unicast no socket");
+		bpf_printk("demux no socket");
 		return TC_ACT_UNSPEC;
 	}
 
-	/* get the UDP socket */
-	struct ipx_addr *ipx_addr =
-		bpf_sk_storage_get(&ipx_wrap_mux_bind_ingress_uc, sock, NULL,
-				0);
-	if (ipx_addr == NULL) {
-		ipx_addr = bpf_sk_storage_get(&ipx_wrap_mux_bind_ingress_mc,
-				sock, NULL, 0);
-	}
-
-	if (ipx_addr == NULL) {
-		bpf_printk("demux unicast failed");
+	struct bpf_sock *fullsock = bpf_sk_fullsock(sock);
+	if (fullsock == NULL) {
+		bpf_printk("no fullsock");
 		return TC_ACT_UNSPEC;
 	}
+
+	bpf_printk("proto: %d", fullsock->protocol);
+	bpf_printk("dport: %d", fullsock->dst_port);
+	bpf_printk("daddr: %08x", fullsock->dst_ip6[0]);
+	bpf_printk("daddr: %08x", fullsock->dst_ip6[1]);
+	bpf_printk("daddr: %08x", fullsock->dst_ip6[2]);
+	bpf_printk("daddr: %08x", fullsock->dst_ip6[3]);
+	bpf_printk("sport: %d", fullsock->src_port);
+	bpf_printk("saddr: %08x", fullsock->src_ip6[0]);
+	bpf_printk("saddr: %08x", fullsock->src_ip6[1]);
+	bpf_printk("saddr: %08x", fullsock->src_ip6[2]);
+	bpf_printk("saddr: %08x", fullsock->src_ip6[3]);
+	bpf_printk("type: %d", skb->pkt_type);
 
 	/* TODO: get IPX dst sock and retrieve bind entry */
 

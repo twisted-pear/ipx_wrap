@@ -66,6 +66,10 @@ struct sub_process {
 	pid_t sub_pid;
 	/* whether to keep the process after the if-scan */
 	bool keep;
+	/* ifindex */
+	__u32 ifidx;
+	/* BPF link for the program attached to the interface */
+	struct bpf_link *link;
 };
 
 struct if_entry {
@@ -81,8 +85,6 @@ struct if_entry {
 	struct bind_entry *ht_ipx_sock_to_bind;
 	/* IPv6 prefix */
 	__be32 prefix;
-	/* Ifindex */
-	__u32 ifidx;
 };
 
 struct do_ctx {
@@ -95,6 +97,8 @@ static struct sub_process *ht_ipx_addr_to_sub = NULL;
 static struct sub_process *ht_sock_to_sub = NULL;
 
 static int tmr_fd = -1;
+static struct ipx_wrap_mux_kern *bpf_kern = NULL;
+
 static bool rescan_now = false;
 static bool keep_going = true;
 
@@ -796,6 +800,11 @@ static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 				sub->addr.node[1], sub->addr.node[2],
 				sub->addr.node[3], sub->addr.node[4],
 				sub->addr.node[5]);
+
+		bpf_link__detach(sub->link);
+		bpf_link__destroy(sub->link);
+		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_egress,
+				&(sub->ifidx), sizeof(__u32), 0);
 	}
 
 	int cpid = sub->sub_pid;
@@ -859,6 +868,12 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 	/* remove the interface (if any) */
 	if (iface != NULL) {
 		cleanup_iface(iface);
+	/* main process exiting */
+	} else {
+		/* close and remove all BPF objects */
+		if (bpf_kern != NULL) {
+			ipx_wrap_mux_kern__destroy(bpf_kern);
+		}
 	}
 
 	/* close the timer fd */
@@ -971,13 +986,6 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 
 	STAILQ_INIT(&iface->out_queue);
 
-	/* determine the ifindex */
-	__u32 ifidx = if_nametoindex(ifname);
-	if (ifidx == 0) {
-		free(iface);
-		return NULL;
-	}
-
 	/* make and bind the UDP socket for our interface */
 	int mcast_udp_sock = mk_mcast_udp_socket(ifname);
 	if (mcast_udp_sock < 0) {
@@ -994,7 +1002,6 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 
 	iface->mcast_udp_sock = mcast_udp_sock;
 	iface->udp_sock = udp_sock;
-	iface->ifidx = ifidx;
 
 	return iface;
 }
@@ -1191,21 +1198,6 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 {
 	int epoll_fd = -1;
-
-	struct ipx_wrap_mux_kern *bpf_kern =
-		ipx_wrap_mux_kern__open_and_load();
-	if (bpf_kern == NULL) {
-		perror("load BPF kernel objects");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
-	}
-
-	struct bpf_link *bpf_link =
-		bpf_program__attach_tcx(bpf_kern->progs.ipw_wrap_demux,
-				iface->ifidx, NULL);
-	if (bpf_link == NULL) {
-		perror("attach BPF program to interface");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
-	}
 
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
@@ -1479,8 +1471,32 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 			break;
 		}
 
+		sub->ifidx = if_nametoindex(ifname);
+		if (sub->ifidx == 0) {
+			break;
+		}
+
 		iface = mk_iface(ipv6_addr, ifname);
 		if (iface == NULL) {
+			break;
+		}
+
+		/* attach the ingress demuxer to the interface */
+		sub->link =
+			bpf_program__attach_tcx(bpf_kern->progs.ipw_wrap_demux,
+					sub->ifidx, NULL);
+		if (sub->link == NULL) {
+			break;
+		}
+
+		/* insert the interface unicast socket into the egress map */
+		__u64 sock_fd = iface->udp_sock;
+		int err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_sock_egress,
+					&(sub->ifidx), sizeof(__u32), &sock_fd,
+					sizeof(__u64), 0);
+		if (err != 0) {
+			errno = -err;
 			break;
 		}
 
@@ -1553,6 +1569,13 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 
 	if (sv[1] >= 0) {
 		close(sv[1]);
+	}
+	if (sub->link != NULL) {
+		bpf_link__destroy(sub->link);
+	}
+	if (sub->ifidx != 0) {
+		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_egress,
+				&(sub->ifidx), sizeof(__u32), 0);
 	}
 	if (iface != NULL) {
 		cleanup_iface(iface);
@@ -1676,6 +1699,36 @@ static void signal_handler(int signal)
 	}
 }
 
+static bool setup_bpf(void)
+{
+	/* load the muxer/demuxer bpf programs and maps */
+	bpf_kern = ipx_wrap_mux_kern__open_and_load();
+	if (bpf_kern == NULL) {
+		return false;
+	}
+
+	/* attach the egress muxer to the map of client sockets */
+	int bpf_prog_fd = bpf_program__fd(bpf_kern->progs.ipx_wrap_mux);
+	if (bpf_prog_fd < 0) {
+		errno = -bpf_prog_fd;
+		return false;
+	}
+	int bpf_map_fd =
+		bpf_map__fd(bpf_kern->maps.ipx_wrap_mux_sock_ingress);
+	if (bpf_map_fd < 0) {
+		errno = -bpf_map_fd;
+		return false;
+	}
+	int err = bpf_prog_attach(bpf_prog_fd, bpf_map_fd, BPF_SK_MSG_VERDICT,
+			0);
+	if (err != 0) {
+		errno = -err;
+		return false;
+	}
+
+	return true;
+}
+
 static _Noreturn void usage()
 {
 	printf("Usage: ipx_wrap_mux <32-bit hex prefix>\n");
@@ -1696,29 +1749,34 @@ int main(int argc, char **argv)
 	int ctrl_sock = -1;
 	int epoll_fd = -1;
 
+	if (!setup_bpf()) {
+		perror("load BPF kernel objects");
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 2);
+	}
+
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 2);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
 	}
 
 	tmr_fd = setup_timer(epoll_fd);
 	if (tmr_fd < 0) {
 		perror("creating interface rescan timer");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
 	}
 
 	/* scan all interfaces for addresses within the prefix, we manage those
 	 * interfaces */
 	if (!scan_interfaces(prefix, epoll_fd, ctrl_sock)) {
 		perror("adding sub-process");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 5);
 	}
 
 	ctrl_sock = ipxw_mux_mk_ctrl_sock();
 	if (ctrl_sock < 0) {
 		perror("creating ctrl socket");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 5);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
 	}
 
 	struct epoll_event ev = {
@@ -1729,7 +1787,7 @@ int main(int argc, char **argv)
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
 		perror("registering ctrl socket for event polling");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 7);
 	}
 
 	struct sigaction sig_act;
@@ -1740,7 +1798,7 @@ int main(int argc, char **argv)
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
 			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
 		perror("setting signal handler");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 7);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 8);
 	}
 
 	ssize_t err;
@@ -1750,7 +1808,7 @@ int main(int argc, char **argv)
 		if (rescan_now) {
 			if (!scan_interfaces(prefix, epoll_fd, ctrl_sock)) {
 				perror("adding sub-process");
-				cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 8);
+				cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 9);
 			}
 			rescan_now = false;
 		}
@@ -1762,7 +1820,7 @@ int main(int argc, char **argv)
 			}
 
 			perror("event polling");
-			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 9);
+			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 10);
 		}
 
 		int i;
@@ -1773,7 +1831,7 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 10);
+							ctrl_sock, 11);
 				}
 
 				/* incoming bind msg */
@@ -1791,7 +1849,7 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "timer fd error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 11);
+							ctrl_sock, 12);
 				}
 
 				/* rescan the interfaces */
@@ -1799,7 +1857,7 @@ int main(int argc, char **argv)
 							ctrl_sock)) {
 					perror("adding sub-process");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 12);
+							ctrl_sock, 13);
 				}
 
 				/* consume all expirations */
