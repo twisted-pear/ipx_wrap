@@ -54,4 +54,33 @@ struct if_config {
 	__be32 network;
 } __attribute__((packed));
 
+struct bpf_cb_info {
+	union {
+		__u32 cb[5];
+		struct {
+			__u16 mark;
+			__u16 data_len;
+			struct ipx_addr saddr;
+			__be16 dst_sock;
+			__u8 pkt_type;
+			__u8 is_bcast:1,
+			     reserved:7;
+		} __attribute__((packed));
+	};
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct bpf_cb_info) == (sizeof(__u32) * 5),
+		"bpf_cb_info has invalid size");
+
+#define IPX_TO_IPV6_REINJECT_MARK 0x4774
+#define IPX_TO_IPV6UDP_REINJECT_MARK 0x7447
+
+struct bpf_bind_entry {
+	struct ipx_addr addr;
+	__u8 pkt_type;
+	__u8 recv_bcast:1,
+	     pkt_type_any:1,
+	     reserved:6;
+};
+
 #endif /* __COMMON_H__ */

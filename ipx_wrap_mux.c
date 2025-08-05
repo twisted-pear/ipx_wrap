@@ -17,6 +17,8 @@
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
 
+#include "ipx_wrap_mux_kern.skel.h"
+
 #define INTERFACE_RESCAN_SECS 30
 #define MAX_EPOLL_EVENTS 64
 
@@ -79,6 +81,8 @@ struct if_entry {
 	struct bind_entry *ht_ipx_sock_to_bind;
 	/* IPv6 prefix */
 	__be32 prefix;
+	/* Ifindex */
+	__u32 ifidx;
 };
 
 struct do_ctx {
@@ -967,6 +971,13 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 
 	STAILQ_INIT(&iface->out_queue);
 
+	/* determine the ifindex */
+	__u32 ifidx = if_nametoindex(ifname);
+	if (ifidx == 0) {
+		free(iface);
+		return NULL;
+	}
+
 	/* make and bind the UDP socket for our interface */
 	int mcast_udp_sock = mk_mcast_udp_socket(ifname);
 	if (mcast_udp_sock < 0) {
@@ -983,6 +994,7 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 
 	iface->mcast_udp_sock = mcast_udp_sock;
 	iface->udp_sock = udp_sock;
+	iface->ifidx = ifidx;
 
 	return iface;
 }
@@ -1179,6 +1191,21 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 {
 	int epoll_fd = -1;
+
+	struct ipx_wrap_mux_kern *bpf_kern =
+		ipx_wrap_mux_kern__open_and_load();
+	if (bpf_kern == NULL) {
+		perror("load BPF kernel objects");
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
+	}
+
+	struct bpf_link *bpf_link =
+		bpf_program__attach_tcx(bpf_kern->progs.ipw_wrap_demux,
+				iface->ifidx, NULL);
+	if (bpf_link == NULL) {
+		perror("attach BPF program to interface");
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
+	}
 
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {

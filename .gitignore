@@ -1,6 +1,7 @@
 *.swp
 *.ll
 *.o
+*.skel.h
 /ipx_wrap_if_config
 /ipx_wrap_ripd
 /ipx_wrap_sapd
