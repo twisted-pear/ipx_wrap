@@ -67,8 +67,9 @@ int ipw_wrap_demux(struct __sk_buff *skb)
 	cb.cb[3] = skb->cb[3];
 	cb.cb[4] = skb->cb[4];
 
-	if (cb.ipxhdr_ofs < sizeof(struct udphdr) || cb.ipxhdr_ofs >
-			sizeof(struct ipv6hdr) + sizeof(struct udphdr)) {
+	if (cb.ipxhdr_ofs < sizeof(struct ethhdr) || cb.ipxhdr_ofs >
+			sizeof(struct ethhdr) + sizeof(struct ipv6hdr) +
+			sizeof(struct udphdr)) {
 		return TC_ACT_UNSPEC;
 	}
 
@@ -93,7 +94,7 @@ int ipw_wrap_demux(struct __sk_buff *skb)
 	} else {
 		/* try to get entry for unicast dst address */
 		e = bpf_map_lookup_elem(&ipx_wrap_mux_bind_entries_uc,
-				&(ipxh->saddr));
+				&(ipxh->daddr));
 	}
 
 	/* TODO: put more effort into finding out if a packet is for the local

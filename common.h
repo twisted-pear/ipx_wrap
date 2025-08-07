@@ -81,7 +81,7 @@ _Static_assert(sizeof(struct bpf_cb_info) == (sizeof(__u32) * 5),
 struct mc_bind_entry_key {
 	__u32 ifidx;
 	__be16 dst_sock;
-};
+} __attribute__((packed));
 
 struct bpf_bind_entry {
 	struct ipx_addr addr;

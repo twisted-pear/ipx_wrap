@@ -85,6 +85,8 @@ struct if_entry {
 	struct bind_entry *ht_ipx_sock_to_bind;
 	/* IPv6 prefix */
 	__be32 prefix;
+	/* ifindex */
+	__u32 ifidx;
 };
 
 struct do_ctx {
@@ -266,6 +268,37 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	e->recv_bcast = bind_msg->recv_bcast;
 	STAILQ_INIT(&e->in_queue);
 	STAILQ_INIT(&e->conf_queue);
+
+	/* register the binding in the BPF maps */
+	struct bpf_bind_entry be = {
+		.addr = bind_msg->addr,
+		.pkt_type = bind_msg->pkt_type,
+		.pkt_type_any = bind_msg->pkt_type_any,
+		.recv_bcast = bind_msg->recv_bcast
+	};
+	int err =
+		bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
+				&(bind_msg->addr), sizeof(struct ipx_addr),
+				&be, sizeof(struct bpf_bind_entry), 0);
+	if (err != 0) {
+		errno = -err;
+		perror("registering unicast binding in BPF map");
+		free(e);
+		return false;
+	}
+	struct mc_bind_entry_key map_key_mc = {
+		.ifidx = iface->ifidx,
+		.dst_sock = bind_msg->addr.sock
+	};
+	err = bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
+			&map_key_mc, sizeof(struct mc_bind_entry_key), &be,
+			sizeof(struct bpf_bind_entry), 0);
+	if (err != 0) {
+		errno = -err;
+		perror("registering multicast binding in BPF map");
+		free(e);
+		return false;
+	}
 
 	/* register for epoll */
 	/* data socket */
@@ -563,6 +596,22 @@ static void unbind_entry(struct bind_entry *e)
 		STAILQ_REMOVE_HEAD(&e->conf_queue, q_entry);
 		free(msg);
 	}
+
+	/* remove the bind entries from the BPF maps */
+	struct ipx_addr map_key_uc = {
+		.net = e->iface->addr.net,
+		.sock = e->ipx_sock
+	};
+	memcpy(map_key_uc.node, e->iface->addr.node, IPX_ADDR_NODE_BYTES);
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
+			&map_key_uc, sizeof(struct ipx_addr), 0);
+
+	struct mc_bind_entry_key map_key_mc = {
+		.ifidx = e->iface->ifidx,
+		.dst_sock = e->ipx_sock
+	};
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
+			&map_key_mc, sizeof(struct mc_bind_entry_key), 0);
 
 	/* remove the bind entry from all data structures */
 	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
@@ -986,6 +1035,13 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 
 	STAILQ_INIT(&iface->out_queue);
 
+	/* determine the ifindex */
+	__u32 ifidx = if_nametoindex(ifname);
+	if (ifidx == 0) {
+		free(iface);
+		return NULL;
+	}
+
 	/* make and bind the UDP socket for our interface */
 	int mcast_udp_sock = mk_mcast_udp_socket(ifname);
 	if (mcast_udp_sock < 0) {
@@ -1002,6 +1058,7 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 
 	iface->mcast_udp_sock = mcast_udp_sock;
 	iface->udp_sock = udp_sock;
+	iface->ifidx = ifidx;
 
 	return iface;
 }

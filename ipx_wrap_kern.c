@@ -447,7 +447,6 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 	 * will handle redirecting to the appropriate socket */
 	__builtin_memset(cb_info, 0, sizeof(struct bpf_cb_info));
 	cb_info->data_len = bpf_ntohs(ipxh->pktlen) - sizeof(struct ipxhdr);
-	cb_info->ipxhdr_ofs = ((void *) ipxh) - ((void *)(long) ctx->data);
 	cb_info->dst_sock = ipxh->daddr.sock;
 	cb_info->pkt_type = ipxh->type;
 	cb_info->is_bcast = false;
@@ -663,6 +662,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	if (ipv6_in_ipx) {
 		CB_INFO(ctx)->mark = IPX_TO_IPV6_REINJECT_MARK;
 	} else {
+		cb_info.ipxhdr_ofs = (cur.pos + newhdr_size) - data;
 		cb_info.mark = IPX_TO_IPV6UDP_REINJECT_MARK;
 		__u32 *cb_info_u32 = (__u32 *) &cb_info;
 
