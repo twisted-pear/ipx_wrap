@@ -41,7 +41,15 @@ struct {
 	__type(value, struct bpf_bind_entry);
 	__uint(max_entries, IPX_SOCKETS_MAX);
 	__uint(map_flags, BPF_F_RDONLY_PROG);
-} ipx_wrap_mux_bind_entries SEC(".maps");
+} ipx_wrap_mux_bind_entries_uc SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct mc_bind_entry_key);
+	__type(value, struct bpf_bind_entry);
+	__uint(max_entries, IPX_SOCKETS_MAX);
+	__uint(map_flags, BPF_F_RDONLY_PROG);
+} ipx_wrap_mux_bind_entries_mc SEC(".maps");
 
 #define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
 
@@ -52,32 +60,57 @@ int ipw_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	struct bpf_sock *sock = skb->sk;
-	if (sock == NULL) {
-		bpf_printk("demux no socket");
+	struct bpf_cb_info cb;
+	cb.cb[0] = skb->cb[0];
+	cb.cb[1] = skb->cb[1];
+	cb.cb[2] = skb->cb[2];
+	cb.cb[3] = skb->cb[3];
+	cb.cb[4] = skb->cb[4];
+
+	if (cb.ipxhdr_ofs < sizeof(struct udphdr) || cb.ipxhdr_ofs >
+			sizeof(struct ipv6hdr) + sizeof(struct udphdr)) {
 		return TC_ACT_UNSPEC;
 	}
 
-	struct bpf_sock *fullsock = bpf_sk_fullsock(sock);
-	if (fullsock == NULL) {
-		bpf_printk("no fullsock");
+	void *data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	struct ipxhdr *ipxh = data + cb.ipxhdr_ofs;
+	if (ipxh < data || (ipxh + 1) > data_end) {
 		return TC_ACT_UNSPEC;
 	}
 
-	bpf_printk("proto: %d", fullsock->protocol);
-	bpf_printk("dport: %d", fullsock->dst_port);
-	bpf_printk("daddr: %08x", fullsock->dst_ip6[0]);
-	bpf_printk("daddr: %08x", fullsock->dst_ip6[1]);
-	bpf_printk("daddr: %08x", fullsock->dst_ip6[2]);
-	bpf_printk("daddr: %08x", fullsock->dst_ip6[3]);
-	bpf_printk("sport: %d", fullsock->src_port);
-	bpf_printk("saddr: %08x", fullsock->src_ip6[0]);
-	bpf_printk("saddr: %08x", fullsock->src_ip6[1]);
-	bpf_printk("saddr: %08x", fullsock->src_ip6[2]);
-	bpf_printk("saddr: %08x", fullsock->src_ip6[3]);
-	bpf_printk("type: %d", skb->pkt_type);
+	struct bpf_bind_entry *e = NULL;
 
-	/* TODO: get IPX dst sock and retrieve bind entry */
+	if (cb.is_bcast && cb.is_for_local) {
+		struct mc_bind_entry_key key = {
+			.ifidx = skb->ingress_ifindex,
+			.dst_sock = cb.dst_sock
+		};
+
+		/* try to get entry for broadcast */
+		e = bpf_map_lookup_elem(&ipx_wrap_mux_bind_entries_mc, &key);
+	} else {
+		/* try to get entry for unicast dst address */
+		e = bpf_map_lookup_elem(&ipx_wrap_mux_bind_entries_uc,
+				&(ipxh->saddr));
+	}
+
+	/* TODO: put more effort into finding out if a packet is for the local
+	 * machine (i.e. do a FIB lookup) */
+
+	/* no bindging entry */
+	if (e == NULL) {
+		/* if packet was for the local machine, drop it */
+		if (cb.is_for_local) {
+			bpf_printk("no bind entry for local machine");
+			return TC_ACT_SHOT;
+		}
+
+		/* else handle the packet normally (i.e. route it) */
+		bpf_printk("packet is not for this machine, handle normally");
+		return TC_ACT_UNSPEC;
+	}
 
 	bpf_printk("demux unicast, len: %u", skb->len);
 	return TC_ACT_OK;

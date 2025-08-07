@@ -447,10 +447,11 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 	 * will handle redirecting to the appropriate socket */
 	__builtin_memset(cb_info, 0, sizeof(struct bpf_cb_info));
 	cb_info->data_len = bpf_ntohs(ipxh->pktlen) - sizeof(struct ipxhdr);
-	cb_info->saddr = ipxh->saddr;
+	cb_info->ipxhdr_ofs = ((void *) ipxh) - ((void *)(long) ctx->data);
 	cb_info->dst_sock = ipxh->daddr.sock;
 	cb_info->pkt_type = ipxh->type;
 	cb_info->is_bcast = false;
+	cb_info->is_for_local = false;
 
 	/* destination node is broadcast... */
 	if (__builtin_memcmp(ipxh->daddr.node, IPX_BCAST_NODE,
@@ -463,6 +464,7 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 					IPV6_MCAST_ALL_NODES,
 					sizeof(newhdr->ip6h.daddr));
 			cb_info->is_bcast = true;
+			cb_info->is_for_local = true;
 		}
 	}
 

@@ -62,11 +62,12 @@ struct bpf_cb_info {
 		struct {
 			__u16 mark;
 			__u16 data_len;
-			struct ipx_addr saddr;
+			size_t ipxhdr_ofs;
 			__be16 dst_sock;
 			__u8 pkt_type;
 			__u8 is_bcast:1,
-			     reserved:7;
+			     is_for_local:1,
+			     reserved:6;
 		} __attribute__((packed));
 	};
 } __attribute__((packed));
@@ -76,6 +77,11 @@ _Static_assert(sizeof(struct bpf_cb_info) == (sizeof(__u32) * 5),
 
 #define IPX_TO_IPV6_REINJECT_MARK 0x4774
 #define IPX_TO_IPV6UDP_REINJECT_MARK 0x7447
+
+struct mc_bind_entry_key {
+	__u32 ifidx;
+	__be16 dst_sock;
+};
 
 struct bpf_bind_entry {
 	struct ipx_addr addr;
