@@ -68,19 +68,14 @@ struct sub_process {
 	bool keep;
 	/* ifindex */
 	__u32 ifidx;
-	/* BPF link for the program attached to the interface */
-	struct bpf_link *link;
+	/* BPF links for the programs attached to the interface */
+	struct bpf_link *ingress_link;
+	struct bpf_link *egress_link;
 };
 
 struct if_entry {
 	/* net and node IPX addr */
 	struct ipx_if_addr addr;
-	/* the UDP socket for receiving multicast */
-	int mcast_udp_sock;
-	/* the actual UDP socket */
-	int udp_sock;
-	/* msgs to send */
-	struct ipxw_msg_queue out_queue;
 	/* bindings indexed by the IPX socket */
 	struct bind_entry *ht_ipx_sock_to_bind;
 	/* IPv6 prefix */
@@ -381,77 +376,6 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	return false;
 }
 
-static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
-{
-	int udp_sock = iface->udp_sock;
-
-	/* no msgs to send */
-	if (STAILQ_EMPTY(&iface->out_queue)) {
-		/* unregister from ready-to-write events to avoid busy polling
-		 */
-		struct epoll_event ev = {
-			.events = EPOLLERR | EPOLLHUP,
-			.data.fd = udp_sock
-		};
-		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev);
-
-		return 0;
-	}
-
-	struct ipxw_mux_msg *xmit_msg = STAILQ_FIRST(&iface->out_queue);
-
-	/* have to remove the message from the queue as we are going to rewrite
-	 * it */
-	STAILQ_REMOVE_HEAD(&iface->out_queue, q_entry);
-
-	/* turn xmit msg into an ipx message */
-	struct ipx_addr saddr = {
-		.net = iface->addr.net,
-		.sock = xmit_msg->xmit.ssock
-	};
-	memcpy(&saddr.node, iface->addr.node, IPX_ADDR_NODE_BYTES);
-	struct ipxhdr *ipx_msg = ipxw_mux_xmit_msg_to_ipxh(xmit_msg, &saddr);
-
-	/* build IPv6 destination addr */
-	struct sockaddr_in6 ipv6_dst = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(IPX_IN_IPV6_PORT),
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
-	struct ipv6_eui64_addr *send_addr = (struct ipv6_eui64_addr *)
-		&ipv6_dst.sin6_addr;
-	send_addr->prefix = iface->prefix;
-	send_addr->ipx_net = ipx_msg->daddr.net;
-	memcpy(send_addr->ipx_node_fst, ipx_msg->daddr.node,
-			sizeof(send_addr->ipx_node_fst));
-	send_addr->fffe = htons(0xfffe);
-	memcpy(send_addr->ipx_node_snd, ipx_msg->daddr.node +
-			sizeof(send_addr->ipx_node_fst),
-			sizeof(send_addr->ipx_node_snd));
-
-	size_t pktlen = ntohs(ipx_msg->pktlen);
-
-	/* retry if we get EINTR */
-	ssize_t len;
-	do {
-		len = sendto(udp_sock, ipx_msg, pktlen, 0, (struct sockaddr *)
-				&ipv6_dst,
-				sizeof(ipv6_dst));
-	} while (len < 0 && errno == EINTR);
-
-	/* free the msg, we can't do anything about potential errors now */
-	free(ipx_msg);
-
-	/* didn't send the whole packet */
-	if (len >= 0 && len != pktlen) {
-		len = -1;
-		errno = ECOMM;
-	}
-
-	return len;
-}
-
 static void unbind_entry(struct bind_entry *e)
 {
 	assert(e != NULL);
@@ -645,10 +569,10 @@ static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 				sub->addr.node[3], sub->addr.node[4],
 				sub->addr.node[5]);
 
-		bpf_link__detach(sub->link);
-		bpf_link__destroy(sub->link);
-		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_egress,
-				&(sub->ifidx), sizeof(__u32), 0);
+		bpf_link__detach(sub->ingress_link);
+		bpf_link__detach(sub->egress_link);
+		bpf_link__destroy(sub->ingress_link);
+		bpf_link__destroy(sub->egress_link);
 	}
 
 	int cpid = sub->sub_pid;
@@ -680,24 +604,11 @@ static void cleanup_sub_processes(bool sub_setup)
 
 static void cleanup_iface(struct if_entry *iface)
 {
-	/* close multicast UDP socket */
-	close(iface->mcast_udp_sock);
-
-	/* close UDP socket */
-	close(iface->udp_sock);
-
 	/* remove all bindings */
 	struct bind_entry *e;
 	struct bind_entry *tmp;
 	HASH_ITER(h_ipx_sock, iface->ht_ipx_sock_to_bind, e, tmp) {
 		unbind_entry(e);
-	}
-
-	/* remove all undelivered messages */
-	while (!STAILQ_EMPTY(&iface->out_queue)) {
-		struct ipxw_mux_msg *msg = STAILQ_FIRST(&iface->out_queue);
-		STAILQ_REMOVE_HEAD(&iface->out_queue, q_entry);
-		free(msg);
 	}
 
 	free(iface);
@@ -738,79 +649,6 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 	exit(exit_code);
 }
 
-static int mk_mcast_udp_socket(const char *ifname)
-{
-	/* determine the ifindex */
-	__u32 ifidx = if_nametoindex(ifname);
-	if (ifidx == 0) {
-		return -1;
-	}
-
-	/* prepare the UDP socket */
-	int udp_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (udp_sock < 0) {
-		return -1;
-	}
-
-	/* bind the socket to the interface */
-	if (setsockopt(udp_sock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
-				strlen(ifname)) < 0) {
-		close(udp_sock);
-		return -1;
-	}
-
-	/* join the all nodes multicast group */
-	struct ipv6_mreq group;
-	group.ipv6mr_interface = ifidx;
-	memcpy(&group.ipv6mr_multiaddr, IPV6_MCAST_ALL_NODES,
-			sizeof(group.ipv6mr_multiaddr));
-	if (setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &group,
-				sizeof(group)) < 0) {
-		close(udp_sock);
-		return -1;
-	}
-
-	/* bind to the port (but not the interface IP) */
-	struct sockaddr_in6 source = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(IPX_IN_IPV6_PORT),
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
-	memcpy(&source.sin6_addr, IPV6_MCAST_ALL_NODES,
-			sizeof(source.sin6_addr));
-	if (bind(udp_sock, (struct sockaddr *) &source, sizeof(source)) < 0) {
-		close(udp_sock);
-		return -1;
-	}
-
-	return udp_sock;
-}
-
-static int mk_udp_socket(struct ipv6_eui64_addr *ipv6_addr)
-{
-	/* prepare the UDP socket */
-	int udp_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (udp_sock < 0) {
-		return -1;
-	}
-
-	/* bind to the port (but not the interface IP) */
-	struct sockaddr_in6 source = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(IPX_IN_IPV6_PORT),
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
-	memcpy(&source.sin6_addr, ipv6_addr, sizeof(source.sin6_addr));
-	if (bind(udp_sock, (struct sockaddr *) &source, sizeof(source)) < 0) {
-		close(udp_sock);
-		return -1;
-	}
-
-	return udp_sock;
-}
-
 static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 		*ifname)
 {
@@ -828,8 +666,6 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 			ipv6_addr->ipx_node_snd,
 			sizeof(ipv6_addr->ipx_node_snd));
 
-	STAILQ_INIT(&iface->out_queue);
-
 	/* determine the ifindex */
 	__u32 ifidx = if_nametoindex(ifname);
 	if (ifidx == 0) {
@@ -837,22 +673,6 @@ static struct if_entry *mk_iface(struct ipv6_eui64_addr *ipv6_addr, const char
 		return NULL;
 	}
 
-	/* make and bind the UDP socket for our interface */
-	int mcast_udp_sock = mk_mcast_udp_socket(ifname);
-	if (mcast_udp_sock < 0) {
-		free(iface);
-		return NULL;
-	}
-
-	int udp_sock = mk_udp_socket(ipv6_addr);
-	if (udp_sock < 0) {
-		close(mcast_udp_sock);
-		free(iface);
-		return NULL;
-	}
-
-	iface->mcast_udp_sock = mcast_udp_sock;
-	iface->udp_sock = udp_sock;
 	iface->ifidx = ifidx;
 
 	return iface;
@@ -1071,21 +891,6 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
 	}
 
-	ev.events = EPOLLERR | EPOLLHUP;
-	ev.data.fd = iface->mcast_udp_sock;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->mcast_udp_sock, &ev) < 0)
-	{
-		perror("registering multicast UDP socket for event polling");
-		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
-	}
-
-	ev.events = EPOLLOUT | EPOLLERR | EPOLLHUP;
-	ev.data.fd = iface->udp_sock;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->udp_sock, &ev) < 0) {
-		perror("registering UDP socket for event polling");
-		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
-	}
-
 	/* ignore SIGHUP, keep handler for SIGINT, SIGQUIT and SIGTERM */
 	struct sigaction sig_act;
 	memset(&sig_act, 0, sizeof(sig_act));
@@ -1127,43 +932,6 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				}
 
 				continue;
-			}
-
-			/* multicast UDP socket */
-			if (evs[i].data.fd == iface->mcast_udp_sock) {
-				/* something went wrong */
-				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					fprintf(stderr, "multicast UDP socket "
-							"error\n");
-					cleanup_and_exit(iface, epoll_fd,
-							ctrl_sock, 9);
-				}
-
-				continue;
-
-			}
-
-			/* UDP socket */
-			if (evs[i].data.fd == iface->udp_sock) {
-				/* something went wrong */
-				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					fprintf(stderr, "UDP socket error\n");
-					cleanup_and_exit(iface, epoll_fd,
-							ctrl_sock, 10);
-				}
-
-				/* can xmit */
-				if (evs[i].events & EPOLLOUT) {
-					err = udp_send(iface, epoll_fd);
-					if (err < 0) {
-						perror("UDP send");
-					} else if (err == 0) {
-						/* nothing happend */
-					}
-				}
-
-				continue;
-
 			}
 
 			/* one of the config sockets */
@@ -1274,29 +1042,18 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 		}
 
 		/* attach the ingress demuxer to the interface */
-		sub->link =
+		sub->ingress_link =
 			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_demux,
 					sub->ifidx, NULL);
-		if (sub->link == NULL) {
+		if (sub->ingress_link == NULL) {
 			break;
 		}
 
 		/* attach the egress muxer to the interface */
-		sub->link =
+		sub->egress_link =
 			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_mux,
 					sub->ifidx, NULL);
-		if (sub->link == NULL) {
-			break;
-		}
-
-		/* insert the interface unicast socket into the egress map */
-		__u64 sock_fd = iface->udp_sock;
-		int err =
-			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_sock_egress,
-					&(sub->ifidx), sizeof(__u32), &sock_fd,
-					sizeof(__u64), 0);
-		if (err != 0) {
-			errno = -err;
+		if (sub->egress_link == NULL) {
 			break;
 		}
 
@@ -1370,12 +1127,13 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 	if (sv[1] >= 0) {
 		close(sv[1]);
 	}
-	if (sub->link != NULL) {
-		bpf_link__destroy(sub->link);
+	if (sub->ingress_link != NULL) {
+		bpf_link__detach(sub->ingress_link);
+		bpf_link__destroy(sub->ingress_link);
 	}
-	if (sub->ifidx != 0) {
-		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_egress,
-				&(sub->ifidx), sizeof(__u32), 0);
+	if (sub->egress_link != NULL) {
+		bpf_link__detach(sub->egress_link);
+		bpf_link__destroy(sub->egress_link);
 	}
 	if (iface != NULL) {
 		cleanup_iface(iface);

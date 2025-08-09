@@ -14,14 +14,6 @@
 #define TC_ACT_SHOT 2
 
 struct {
-	__uint(type, BPF_MAP_TYPE_SOCKMAP);
-	__type(key, __u32);
-	__type(value, __u64);
-	__uint(max_entries, IFINDEX_MAX);
-	//__uint(map_flags, BPF_F_RDONLY_PROG);
-} ipx_wrap_mux_sock_egress SEC(".maps");
-
-struct {
 	__uint(type, BPF_MAP_TYPE_SOCKHASH);
 	__type(key, struct ipx_addr);
 	__type(value, __u64);
@@ -144,6 +136,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 	bpf_sk_release(sock);
+
+	bpf_printk("socket assigned!");
 
 	return TC_ACT_OK;
 }
