@@ -180,10 +180,6 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 		(*handle_conf_msg_cb)(int conf_sock, struct ipxw_mux_msg *msg,
 			void *ctx), void *conf_ctx);
 
-/* turn an xmit message into an ipx message, conversion happens in place */
-struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
-		ipx_addr *saddr);
-
 /* turn an ipx message into a recv message, conversion happens in place */
 struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 

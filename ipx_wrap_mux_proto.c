@@ -1092,34 +1092,6 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 	return rcvd_msg_len;
 }
 
-struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
-		ipx_addr *saddr)
-{
-	if (xmit_msg->type != IPXW_MUX_XMIT) {
-		return NULL;
-	}
-
-	struct ipx_addr daddr = xmit_msg->xmit.daddr;
-	__u8 pkt_type = xmit_msg->xmit.pkt_type;
-
-	/* get the correct length for the ipx header */
-	if (xmit_msg->xmit.data_len > IPX_MAX_DATA_LEN) {
-		return NULL;
-	}
-	__u16 msg_len = xmit_msg->xmit.data_len + sizeof(struct ipxhdr);
-
-	/* rewrite to ipx msg */
-	struct ipxhdr *ipx_msg = (struct ipxhdr *) xmit_msg;
-	ipx_msg->csum = IPX_CSUM_NONE;
-	ipx_msg->pktlen = htons(msg_len);
-	ipx_msg->tc = 0;
-	ipx_msg->type = pkt_type;
-	ipx_msg->daddr = daddr;
-	ipx_msg->saddr = *saddr;
-
-	return ipx_msg;
-}
-
 struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
 {
 	struct ipx_addr saddr = ipx_msg->saddr;
