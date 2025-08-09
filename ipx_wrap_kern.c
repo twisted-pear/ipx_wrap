@@ -4,11 +4,8 @@
 #include <bpf/bpf_endian.h>
 
 #include "common.h"
+#include "ipx_wrap_common_kern.h"
 
-#define ETH_ALEN 6
-#define ETH_P_IP 0x0800
-#define ETH_P_IPV6 0x86DD
-#define ETH_P_IPX 0x8137
 #define IPPROTO_ICMPV6 58
 #define ICMPV6_ND_SOL 135
 #define ICMPV6_ND_ADV 136
@@ -56,59 +53,6 @@ struct ipv6_and_udphdr {
 	struct udphdr udph;
 } __attribute__((packed));
 
-struct hdr_cursor {
-	void *pos;
-};
-
-static __always_inline int parse_ethhdr(struct hdr_cursor *cur, void *data_end, struct
-		ethhdr **ethhdr)
-{
-	struct ethhdr *eth = cur->pos;
-	if (eth + 1 > data_end)
-		return -1;
-
-	cur->pos = eth + 1;
-	*ethhdr = eth;
-
-	return eth->h_proto;
-}
-
-static __always_inline int parse_ip6hdr(struct hdr_cursor *cur, void *data_end,
-		struct ipv6hdr **ip6hdr)
-{
-	struct ipv6hdr *ip6h = cur->pos;
-	if (ip6h + 1 > data_end)
-		return -1;
-
-	cur->pos = ip6h + 1;
-	*ip6hdr = ip6h;
-
-	return ip6h->nexthdr;
-}
-
-static __always_inline int parse_ipxhdr(struct hdr_cursor *cur, void *data_end,
-		struct ipxhdr **ipxhdr)
-{
-	struct ipxhdr *ipxh = cur->pos;
-
-	if (ipxh + 1 > data_end) {
-		return -1;
-	}
-
-	int pktsize = (__u16) bpf_ntohs(ipxh->pktlen);
-	/* hack so that the verifier knows this value's bounds */
-	asm volatile("%0 &= 0xffff" : "=r"(pktsize) : "0"(pktsize));
-
-	if (pktsize < sizeof(*ipxh)) {
-		return -1;
-	}
-
-	cur->pos = ipxh + 1;
-	*ipxhdr = ipxh;
-
-	return ipxh->type;
-}
-
 static __always_inline int parse_icmp6hdr(struct hdr_cursor *cur, void
 		*data_end, struct icmp6hdr **icmp6hdr)
 {
@@ -124,24 +68,6 @@ static __always_inline int parse_icmp6hdr(struct hdr_cursor *cur, void
 	*icmp6hdr = icmp6h;
 
 	return icmp6h->icmp6_type;
-}
-
-static __always_inline int parse_udphdr(struct hdr_cursor *cur, void *data_end,
-		struct udphdr **udphdr)
-{
-	struct udphdr *udph = cur->pos;
-
-	if (udph + 1 > data_end)
-		return -1;
-
-	cur->pos = udph + 1;
-	*udphdr = udph;
-
-	int len = bpf_ntohs(udph->len) - sizeof(struct udphdr);
-	if (len < 0)
-		return -1;
-
-	return len;
 }
 
 static __always_inline int mk_nd_adv(struct __sk_buff *ctx, struct ethhdr *eth,

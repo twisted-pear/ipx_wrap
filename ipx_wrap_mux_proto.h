@@ -8,25 +8,12 @@
 #include <sys/queue.h>
 
 #include "common.h"
+#include "ipx_wrap_common_proto.h"
 
 #define IPXW_MUX_CTRL_SOCK_NAME "ipxw_mux_ctrl"
-#define IPXW_MUX_MSG_LEN (65535 - 8) /* more will not fit into a UDP packet,
-					without extension header trickery */
-
-enum ipxw_mux_msg_type {
-	IPXW_MUX_BIND_ACK = 0,
-	IPXW_MUX_BIND_ERR,
-	IPXW_MUX_BIND,
-	IPXW_MUX_UNBIND,
-	IPXW_MUX_CONF,
-	IPXW_MUX_GETSOCKNAME,
-	IPXW_MUX_XMIT,
-	IPXW_MUX_RECV,
-	IPXW_MUX_MAX
-};
 
 struct ipxw_mux_msg_bind_ack {
-	// empty
+	__be32 prefix;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_bind_err {
@@ -64,14 +51,6 @@ struct ipxw_mux_msg_getsockname {
 	__u16 reserved3;
 } __attribute__((packed));
 
-struct ipxw_mux_msg_xmit {
-	struct ipx_addr daddr;
-	__u8 pkt_type;
-	__u8 reserved;
-	__u16 data_len;
-	__be16 ssock;
-} __attribute__((packed));
-
 struct ipxw_mux_msg_recv {
 	struct ipx_addr saddr;
 	__u8 pkt_type;
@@ -105,11 +84,13 @@ struct ipxw_mux_msg {
 _Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
 		"ipxw_mux_msg too large");
 
-#define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg))
+_Static_assert(IPX_MAX_DATA_LEN == (IPXW_MUX_MSG_LEN - sizeof(struct
+				ipxw_mux_msg)), "ipxw_mux_msg size mismatch");
 
 struct ipxw_mux_handle {
 	int data_sock;
 	int conf_sock;
+	__be32 prefix;
 };
 
 void ipxw_mux_handle_close(struct ipxw_mux_handle h);
@@ -144,18 +125,16 @@ int ipxw_mux_sk_close(int fd);
 
 /* client functions */
 
-/* makes the initial socket pair, the first is to be kept, the second will be
- * sent to the muxer */
-int ipxw_mux_mk_socketpair(int *sv);
+/* makes the initial data sockete */
+int ipxw_mux_mk_data_sock(void);
 
-/* send sv[1] to the muxer, returns sv[0] as data socket or negative error, may
- * block until an answer is received from the muxer, if successful sv[1] will
- * be closed, if an error occurrs both sv[0] and sv[1] will be closed, this
- * blocks */
-struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
-		*bind_msg, int *sv);
+/* send data_sock to the muxer, returns it in the handle as data socket or
+ * negative error, may block until an answer is received from the muxer, if an
+ * error occurrs both data_sock will be closed, this blocks */
+struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
+		*bind_msg, int datao_sock);
 
-/* like ipxw_mux_bind_socketpair but creates and manages the socketpair
+/* like ipxw_mux_bind_data_sock but creates and manages the data socket
  * internally */
 struct ipxw_mux_handle ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg);
 
@@ -187,30 +166,19 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 int ipxw_mux_mk_ctrl_sock();
 
 /* send a response to a bind message */
-void ipxw_mux_send_bind_resp(struct ipxw_mux_handle h, const struct
-		ipxw_mux_msg *resp_msg);
+void ipxw_mux_send_bind_resp(int conf_sock, const struct ipxw_mux_msg
+		*resp_msg);
 
 /* receive bind message, this blocks on if the caller didn't check if data is
  * available */
 struct ipxw_mux_handle ipxw_mux_recv_bind_msg(int ctrl_sock, struct
 		ipxw_mux_msg *bind_msg);
 
-ssize_t ipxw_mux_peek_conf_len(struct ipxw_mux_handle h);
+ssize_t ipxw_mux_peek_conf_len(int conf_sock);
 
-/* get the length of the message to xmit from the header, blocks if the caller
- * did not check that data is available to read */
-ssize_t ipxw_mux_peek_xmit_len(struct ipxw_mux_handle h);
-
-ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		bool (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
-			ipxw_mux_msg *msg, void *ctx), void *conf_ctx);
-
-/* receive xmit msgs, turn them into IPX messages and attempt to send them
- * (using transmit_msg_cb), this blocks if the caller did not check that data
- * is avaiable to read */
-ssize_t ipxw_mux_do_xmit(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		bool (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
-			*msg, void *ctx), void *tx_ctx);
+ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
+		(*handle_conf_msg_cb)(int conf_sock, struct ipxw_mux_msg *msg,
+			void *ctx), void *conf_ctx);
 
 /* turn an xmit message into an ipx message, conversion happens in place */
 struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
@@ -219,12 +187,6 @@ struct ipxhdr *ipxw_mux_xmit_msg_to_ipxh(struct ipxw_mux_msg *xmit_msg, struct
 /* turn an ipx message into a recv message, conversion happens in place */
 struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 
-ssize_t ipxw_mux_recv_conf(struct ipxw_mux_handle h, const struct ipxw_mux_msg
-		*msg);
-
-/* send the recv msg to the client, will block if the data socket is not
- * writeable */
-ssize_t ipxw_mux_recv(struct ipxw_mux_handle h, const struct ipxw_mux_msg
-		*msg);
+ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

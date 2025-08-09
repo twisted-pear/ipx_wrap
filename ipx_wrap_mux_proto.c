@@ -19,10 +19,15 @@ void ipxw_mux_handle_close(struct ipxw_mux_handle h)
 	if (h.conf_sock >= 0) {
 		close(h.conf_sock);
 	}
+
+	h.data_sock = -1;
+	h.conf_sock = -1;
+	h.prefix = 0;
 }
 
 bool ipxw_mux_handle_is_error(struct ipxw_mux_handle h)
 {
+	// TODO: only for conf sock?
 	return (h.data_sock < 0) || (h.conf_sock < 0);
 }
 
@@ -45,7 +50,6 @@ struct ipxw_mux_sk {
 	UT_hash_handle hh; /* by data socket */
 	struct ipx_addr bind_addr;
 	struct ipxw_mux_handle h;
-	int paired_data_sock;
 	bool bound;
 	bool cloexec;
 };
@@ -84,28 +88,28 @@ int ipxw_mux_sk_socket(int domain, int type, int protocol)
 		return -1;
 	}
 
-	int sv[2];
-	if (ipxw_mux_mk_socketpair(sv) < 0) {
+	int data_sock = ipxw_mux_mk_data_sock();
+	if (data_sock < 0) {
 		return -1;
 	}
 
 	struct ipxw_mux_sk *sk = NULL;
 	do {
 		if ((type & SOCK_NONBLOCK) != 0) {
-			if (fcntl(sv[0], F_SETFL, O_NONBLOCK) < 0) {
+			if (fcntl(data_sock, F_SETFL, O_NONBLOCK) < 0) {
 				break;
 			}
 		}
 
 		if ((type & SOCK_CLOEXEC) != 0) {
-			if (fcntl(sv[0], F_SETFL, FD_CLOEXEC) < 0) {
+			if (fcntl(data_sock, F_SETFL, FD_CLOEXEC) < 0) {
 				break;
 			}
 		}
 
 		/* a previous IPX socket wasn't closed properly and now there
 		 * is a conflict, can't do anything here */
-		HASH_FIND_INT(ht_fd_to_mux_sk, &sv[0], sk);
+		HASH_FIND_INT(ht_fd_to_mux_sk, &data_sock, sk);
 		if (sk != NULL) {
 			sk = NULL;
 			break;
@@ -116,8 +120,7 @@ int ipxw_mux_sk_socket(int domain, int type, int protocol)
 			break;
 		}
 
-		sk->data_sock = sv[0];
-		sk->paired_data_sock = sv[1];
+		sk->data_sock = data_sock;
 		sk->cloexec = (type & SOCK_CLOEXEC) != 0;
 
 		HASH_ADD_INT(ht_fd_to_mux_sk, data_sock, sk);
@@ -129,8 +132,7 @@ int ipxw_mux_sk_socket(int domain, int type, int protocol)
 		free(sk);
 	}
 
-	close(sv[0]);
-	close(sv[1]);
+	close(data_sock);
 
 	return -1;
 }
@@ -169,8 +171,8 @@ int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 	bind_msg.bind.recv_bcast = 1; /* apparently the in-kernel driver used
 					 to do this too */
 
-	int sv[2] = { sk->data_sock, sk->paired_data_sock };
-	struct ipxw_mux_handle h = ipxw_mux_bind_socketpair(&bind_msg, sv);
+	struct ipxw_mux_handle h = ipxw_mux_bind_data_sock(&bind_msg,
+			sk->data_sock);
 	do {
 		if (ipxw_mux_handle_is_error(h)) {
 			/* ipxw_mux_bind_socketpair closed our sockets, get rid
@@ -195,7 +197,6 @@ int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 		}
 
 		sk->h = h;
-		sk->paired_data_sock = -1;
 		sk->bound = true;
 		return 0;
 	} while (0);
@@ -439,9 +440,6 @@ int ipxw_mux_sk_close(int fd)
 		/* unbind closes the handle itself */
 		ipxw_mux_handle_close(sk->h);
 	}
-	if (sk->paired_data_sock >= 0) {
-		close(sk->paired_data_sock);
-	}
 	HASH_DEL(ht_fd_to_mux_sk, sk);
 	free(sk);
 
@@ -450,19 +448,40 @@ int ipxw_mux_sk_close(int fd)
 
 /* client functions */
 
-int ipxw_mux_mk_socketpair(int *sv)
+int ipxw_mux_mk_data_sock(void)
 {
-	return socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv);
+	int data_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (data_sock < 0) {
+		return -1;
+	}
+
+	// TODO: fix this!
+	struct sockaddr_in6 dummy_bind = {
+		.sin6_family = AF_INET6,
+		.sin6_addr = IN6ADDR_ANY_INIT,
+		.sin6_port = 0,
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+
+	if (bind(data_sock, (struct sockaddr *) &dummy_bind,
+				sizeof(dummy_bind)) < 0) {
+		close(data_sock);
+		return -1;
+	}
+
+	return data_sock;
 }
 
 /* much of this code was taken from
  * https://man7.org/tlpi/code/online/dist/sockets/scm_rights_send.c.html */
-struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
-		*bind_msg, int *sv)
+struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
+		*bind_msg, int data_sock)
 {
 	struct ipxw_mux_handle ret = {
 		.data_sock = -1,
-		.conf_sock = -1
+		.conf_sock = -1,
+		.prefix = 0
 	};
 
 	int ctrl_sock = -1;
@@ -508,7 +527,7 @@ struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
 
 		/* prepare the ancillary data buffer */
 
-		int fds[2] = { sv[1], sv_conf[1] };
+		int fds[2] = { data_sock, sv_conf[1] };
 		union {
 			char buf[CMSG_SPACE(sizeof(fds))]; /* Space large
 							      enough to hold
@@ -543,7 +562,7 @@ struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
 			break;
 		}
 
-		ret.data_sock = sv[0];
+		ret.data_sock = data_sock;
 		ret.conf_sock = sv_conf[0];
 
 		/* receive a reply, this blocks */
@@ -564,9 +583,9 @@ struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
 
 		switch (res.type) {
 			case IPXW_MUX_BIND_ACK:
-				close(sv[1]);
 				close(sv_conf[1]);
 				close(ctrl_sock);
+				ret.prefix = res.ack.prefix;
 				return ret;
 			case IPXW_MUX_BIND_ERR:
 				errno = res.err.err;
@@ -577,8 +596,7 @@ struct ipxw_mux_handle ipxw_mux_bind_socketpair(const struct ipxw_mux_msg
 		}
 	} while (0);
 
-	close(sv[0]);
-	close(sv[1]);
+	close(data_sock);
 
 	if (sv_conf[0] >= 0) {
 		close(sv_conf[0]);
@@ -603,12 +621,12 @@ struct ipxw_mux_handle ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg)
 		.conf_sock = -1
 	};
 
-	int sv[2];
-	if (ipxw_mux_mk_socketpair(sv) < 0) {
+	int data_sock = ipxw_mux_mk_data_sock();
+	if (data_sock < 0) {
 		return err;
 	}
 
-	return ipxw_mux_bind_socketpair(bind_msg, sv);
+	return ipxw_mux_bind_data_sock(bind_msg, data_sock);
 }
 
 void ipxw_mux_unbind(struct ipxw_mux_handle h)
@@ -715,9 +733,27 @@ ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 
 	size_t msg_len = sizeof(struct ipxw_mux_msg) + msg->xmit.data_len;
 
+	struct sockaddr_in6 dummy_dst = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(IPX_IN_IPV6_PORT),
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	struct ipv6_eui64_addr *dummy_daddr = (struct ipv6_eui64_addr *)
+		&dummy_dst.sin6_addr;
+	dummy_daddr->prefix = h.prefix;
+	dummy_daddr->ipx_net = msg->xmit.daddr.net;
+	memcpy(dummy_daddr->ipx_node_fst, msg->xmit.daddr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	dummy_daddr->fffe = htons(0xfffe);
+	memcpy(dummy_daddr->ipx_node_snd, &(msg->xmit.daddr.node[3]),
+			IPX_ADDR_NODE_BYTES / 2);
+
 	/* send message, may block */
+	/* rewriting to IPX happens in the BPF program */
 	int flags = (block ? 0 : MSG_DONTWAIT);
-	ssize_t sent_len = send(h.data_sock, msg, msg_len, flags);
+	ssize_t sent_len = sendto(h.data_sock, msg, msg_len, flags, (struct
+				sockaddr *) &dummy_dst, sizeof(dummy_dst));
 	if (sent_len < 0) {
 		return -1;
 	}
@@ -744,6 +780,12 @@ ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)
 		/* need the ipxw_mux_msg */
 		if (rcvd_len != sizeof(msg)) {
 			errno = EREMOTEIO;
+			break;
+		}
+
+		// TODO: move to kernel
+		if (ipxw_mux_ipxh_to_recv_msg((struct ipxhdr *) &msg) == NULL) {
+			errno = EINVAL;
 			break;
 		}
 
@@ -798,6 +840,12 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 		return -1;
 	}
 
+	// TODO: move to kernel
+	if (ipxw_mux_ipxh_to_recv_msg((struct ipxhdr *) msg) == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	/* which has to be of the correct type */
 	if (msg->type != IPXW_MUX_RECV) {
 		errno = EINVAL;
@@ -842,7 +890,7 @@ int ipxw_mux_mk_ctrl_sock()
 	return ctrl_sock;
 }
 
-void ipxw_mux_send_bind_resp(struct ipxw_mux_handle h, const struct
+void ipxw_mux_send_bind_resp(int conf_sock, const struct
 		ipxw_mux_msg *resp_msg)
 {
 	/* no error handling or reporting, since there is nothing we or the
@@ -855,7 +903,7 @@ void ipxw_mux_send_bind_resp(struct ipxw_mux_handle h, const struct
 	/* send the reply */
 	ssize_t err;
 	do {
-		err = send(h.conf_sock, resp_msg, sizeof(struct ipxw_mux_msg),
+		err = send(conf_sock, resp_msg, sizeof(struct ipxw_mux_msg),
 				MSG_DONTWAIT);
 	} while (err < 0 && errno == EINTR);
 }
@@ -953,11 +1001,11 @@ struct ipxw_mux_handle ipxw_mux_recv_bind_msg(int ctrl_sock, struct
 	return ret;
 }
 
-ssize_t ipxw_mux_peek_conf_len(struct ipxw_mux_handle h)
+ssize_t ipxw_mux_peek_conf_len(int conf_sock)
 {
 	struct ipxw_mux_msg msg;
 
-	ssize_t rcvd_len = recv(h.conf_sock, &msg, sizeof(msg), MSG_PEEK);
+	ssize_t rcvd_len = recv(conf_sock, &msg, sizeof(msg), MSG_PEEK);
 	if (rcvd_len < 0) {
 		return -1;
 	}
@@ -984,52 +1032,14 @@ ssize_t ipxw_mux_peek_conf_len(struct ipxw_mux_handle h)
 	} while (0);
 
 	/* clear out invalid message */
-	recv(h.conf_sock, &msg, 0, 0);
+	recv(conf_sock, &msg, 0, 0);
 
 	return -1;
 }
 
-ssize_t ipxw_mux_peek_xmit_len(struct ipxw_mux_handle h)
-{
-	struct ipxw_mux_msg msg;
-
-	ssize_t rcvd_len = recv(h.data_sock, &msg, sizeof(msg), MSG_PEEK);
-	if (rcvd_len < 0) {
-		return -1;
-	}
-
-	do {
-		/* need the ipxw_mux_msg */
-		if (rcvd_len != sizeof(msg)) {
-			errno = EREMOTEIO;
-			break;
-		}
-
-		/* which has to be of the correct type */
-		if (msg.type != IPXW_MUX_XMIT) {
-			errno = EINVAL;
-			break;
-		}
-
-		/* and the data must fit */
-		if (msg.xmit.data_len > IPX_MAX_DATA_LEN) {
-			errno = EREMOTEIO;
-			break;
-		}
-
-		/* return the size of the message to xmit */
-		return msg.xmit.data_len + sizeof(msg);
-	} while (0);
-
-	/* clear out invalid message */
-	recv(h.data_sock, &msg, 0, 0);
-
-	return -1;
-}
-
-ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		bool (*handle_conf_msg_cb)(struct ipxw_mux_handle h, struct
-			ipxw_mux_msg *msg, void *ctx), void *conf_ctx)
+ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
+		(*handle_conf_msg_cb)(int conf_sock, struct ipxw_mux_msg *msg,
+			void *ctx), void *conf_ctx)
 {
 	/* check if the message buffer is ok */
 	if (msg->type != IPXW_MUX_CONF) {
@@ -1046,7 +1056,7 @@ ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 
 	/* receive msg, this can block if the caller didn't make sure that data
 	 * is available */
-	ssize_t rcvd_msg_len = recv(h.conf_sock, msg, max_msg_len, 0);
+	ssize_t rcvd_msg_len = recv(conf_sock, msg, max_msg_len, 0);
 	if (rcvd_msg_len < 0) {
 		return -1;
 	}
@@ -1074,58 +1084,7 @@ ssize_t ipxw_mux_do_conf(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	}
 
 	/* handle the message */
-	if (!handle_conf_msg_cb(h, msg, conf_ctx)) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	return rcvd_msg_len;
-}
-
-ssize_t ipxw_mux_do_xmit(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		bool (*tx_msg_cb)(struct ipxw_mux_handle h, struct ipxw_mux_msg
-			*msg, void *ctx), void *tx_ctx)
-{
-	/* check if the message buffer is ok */
-	if (msg->type != IPXW_MUX_XMIT) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	if (msg->xmit.data_len > IPX_MAX_DATA_LEN) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	size_t max_msg_len = msg->xmit.data_len + sizeof(struct ipxw_mux_msg);
-
-	/* receive msg, this can block if the caller didn't make sure that data
-	 * is available */
-	ssize_t rcvd_msg_len = recv(h.data_sock, msg, max_msg_len, 0);
-	if (rcvd_msg_len < 0) {
-		return -1;
-	}
-
-	/* must at least receive a full mux msg */
-	if (rcvd_msg_len < sizeof(struct ipxw_mux_msg)) {
-		errno = EREMOTEIO;
-		return -1;
-	}
-
-	if (msg->type != IPXW_MUX_XMIT) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	/* check if the data length is correct */
-	if (msg->xmit.data_len != rcvd_msg_len - sizeof(struct
-				ipxw_mux_msg)) {
-		errno = EREMOTEIO;
-		return -1;
-	}
-
-	/* handle the message */
-	if (!tx_msg_cb(h, msg, tx_ctx)) {
+	if (!handle_conf_msg_cb(conf_sock, msg, conf_ctx)) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -1194,8 +1153,7 @@ struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
 	return recv_msg;
 }
 
-ssize_t ipxw_mux_recv_conf(struct ipxw_mux_handle h, const struct ipxw_mux_msg
-		*msg)
+ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 {
 	size_t msg_len = sizeof(struct ipxw_mux_msg);
 
@@ -1214,38 +1172,7 @@ ssize_t ipxw_mux_recv_conf(struct ipxw_mux_handle h, const struct ipxw_mux_msg
 		return -1;
 	}
 
-	ssize_t sent_len = send(h.conf_sock, msg, msg_len, 0);
-	if (sent_len < 0) {
-		return -1;
-	}
-
-	if (sent_len != msg_len) {
-		errno = ECOMM;
-		return -1;
-	}
-
-	return msg_len;
-}
-
-ssize_t ipxw_mux_recv(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg)
-{
-	if (msg->type != IPXW_MUX_RECV) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	if (msg->recv.data_len > IPX_MAX_DATA_LEN) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	size_t msg_len = sizeof(struct ipxw_mux_msg) + msg->recv.data_len;
-	if (msg_len > IPXW_MUX_MSG_LEN) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	ssize_t sent_len = send(h.data_sock, msg, msg_len, 0);
+	ssize_t sent_len = send(conf_sock, msg, msg_len, 0);
 	if (sent_len < 0) {
 		return -1;
 	}

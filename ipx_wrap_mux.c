@@ -22,6 +22,10 @@
 #define INTERFACE_RESCAN_SECS 30
 #define MAX_EPOLL_EVENTS 64
 
+// TODO: install an SK_LOOKUP program on the netns to prevent unwanted
+// (non-IPX) traffic from reaching our client sockets
+// TODO: find a way to stop client sockets from sending to arbitrary IPv6 addrs
+
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct if_entry;
@@ -29,19 +33,15 @@ struct if_entry;
 struct bind_entry {
 	/* if the hash table key is the IPX socket number */
 	__be16 ipx_sock;
-	/* the data socket */
-	int sock;
+	/* the config socket */
+	int conf_sock;
 	/* hash entries */
 	UT_hash_handle h_ipx_sock;
-	UT_hash_handle hh; /* by socket */
-	/* recvd msgs for this binding's socket */
-	struct ipxw_msg_queue in_queue;
+	UT_hash_handle hh; /* by conf socket */
 	/* outgoing config messages get queued here */
 	struct ipxw_msg_queue conf_queue;
 	/* corresponding interface */
 	struct if_entry *iface;
-	/* handle for muxing */
-	struct ipxw_mux_handle h;
 	/* remaining data */
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
@@ -94,7 +94,7 @@ struct do_ctx {
 	int epoll_fd;
 };
 
-static struct bind_entry *ht_sock_to_bind = NULL;
+static struct bind_entry *ht_conf_sock_to_bind = NULL;
 static struct sub_process *ht_ipx_addr_to_sub = NULL;
 static struct sub_process *ht_sock_to_sub = NULL;
 
@@ -110,11 +110,11 @@ static int sort_bind_entry_by_ipx_sock(struct bind_entry *a, struct bind_entry
 	return ntohs(a->ipx_sock) - ntohs(b->ipx_sock);
 }
 
-static struct bind_entry *get_bind_entry_by_sock(int sock)
+static struct bind_entry *get_bind_entry_by_conf_sock(int conf_sock)
 {
 	struct bind_entry *bind;
 
-	HASH_FIND_INT(ht_sock_to_bind, &sock, bind);
+	HASH_FIND_INT(ht_conf_sock_to_bind, &conf_sock, bind);
 	return bind;
 }
 
@@ -259,91 +259,126 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 		return false;
 	}
 
-	e->sock = ipxw_mux_handle_data(h);
+	e->conf_sock = ipxw_mux_handle_conf(h);
 	e->ipx_sock = bind_msg->addr.sock;
 	e->iface = iface;
-	e->h = h;
 	e->pkt_type = bind_msg->pkt_type;
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
-	STAILQ_INIT(&e->in_queue);
 	STAILQ_INIT(&e->conf_queue);
 
-	/* register the binding in the BPF maps */
-	struct bpf_bind_entry be = {
-		.addr = bind_msg->addr,
-		.pkt_type = bind_msg->pkt_type,
-		.pkt_type_any = bind_msg->pkt_type_any,
-		.recv_bcast = bind_msg->recv_bcast
-	};
-	int err =
-		bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
-				&(bind_msg->addr), sizeof(struct ipx_addr),
-				&be, sizeof(struct bpf_bind_entry), 0);
-	if (err != 0) {
-		errno = -err;
-		perror("registering unicast binding in BPF map");
-		free(e);
-		return false;
-	}
 	struct mc_bind_entry_key map_key_mc = {
 		.ifidx = iface->ifidx,
 		.dst_sock = bind_msg->addr.sock
 	};
-	err = bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
-			&map_key_mc, sizeof(struct mc_bind_entry_key), &be,
-			sizeof(struct bpf_bind_entry), 0);
-	if (err != 0) {
-		errno = -err;
-		perror("registering multicast binding in BPF map");
-		free(e);
-		return false;
-	}
 
-	/* register for epoll */
-	/* data socket */
-	struct epoll_event ev = {
-		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
-		.data = {
-			.fd = ipxw_mux_handle_data(h)
+	do {
+		/* register the binding in the BPF maps */
+		struct bpf_bind_entry be = {
+			.addr = bind_msg->addr,
+			.pkt_type = bind_msg->pkt_type,
+			.pkt_type_any = bind_msg->pkt_type_any,
+			.recv_bcast = bind_msg->recv_bcast
+		};
+		int err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
+					&(bind_msg->addr), sizeof(struct
+						ipx_addr), &be, sizeof(struct
+							bpf_bind_entry),
+					BPF_NOEXIST);
+		if (err != 0) {
+			errno = -err;
+			perror("registering unicast binding in BPF map");
+			break;
 		}
-	};
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_handle_data(h), &ev) <
-			0) {
-		perror("registering for event polling");
-		free(e);
-		return false;
-	}
-	/* config socket */
-	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-	ev.data.fd = -ipxw_mux_handle_data(h);
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_handle_conf(h), &ev) <
-			0) {
-		perror("registering for event polling");
-		free(e);
-		return false;
-	}
+		err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
+					&map_key_mc, sizeof(struct
+						mc_bind_entry_key), &be,
+					sizeof(struct bpf_bind_entry),
+					BPF_NOEXIST);
+		if (err != 0) {
+			errno = -err;
+			perror("registering multicast binding in BPF map");
+			break;
+		}
 
-	/* save binding */
-	HASH_ADD_INORDER(h_ipx_sock, iface->ht_ipx_sock_to_bind, ipx_sock,
-			sizeof(__be16), e, sort_bind_entry_by_ipx_sock);
-	HASH_ADD_INT(ht_sock_to_bind, sock, e);
+		/* register the data socket in the BPF maps */
+		__u64 data_sock_fd64 = ipxw_mux_handle_data(h);
+		err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_sock_ingress,
+					&(bind_msg->addr), sizeof(struct
+						ipx_addr), &data_sock_fd64,
+					sizeof(__u64), BPF_NOEXIST);
+		if (err != 0) {
+			errno = -err;
+			perror("registering data socket in BPF map");
+			break;
+		}
+		__u32 data_sock_fd32 = ipxw_mux_handle_data(h);
+		err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_egress,
+					&data_sock_fd32, sizeof(__u32),
+					&(bind_msg->addr), sizeof(struct
+						ipx_addr), BPF_NOEXIST);
+		if (err != 0) {
+			errno = -err;
+			perror("registering data socket in BPF map");
+			break;
+		}
 
-	/* show the new binding in full */
-	printf("bound %d:%d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
-			ipxw_mux_handle_data(h), ipxw_mux_handle_conf(h),
-			ntohl(bind_msg->addr.net), bind_msg->addr.node[0],
-			bind_msg->addr.node[1], bind_msg->addr.node[2],
-			bind_msg->addr.node[3], bind_msg->addr.node[4],
-			bind_msg->addr.node[5], ntohs(bind_msg->addr.sock));
-	if (bind_msg->pkt_type_any) {
-		printf("pkt type: any, ");
-	} else {
-		printf("pkt type: %02hhx, ", bind_msg->pkt_type);
-	}
-	printf("recv bcasts: %s\n", bind_msg->recv_bcast ? "yes" : "no");
+		/* register for epoll */
+		/* config socket */
+		struct epoll_event ev = {
+			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.data = {
+				.fd = ipxw_mux_handle_conf(h)
+			}
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_handle_conf(h),
+					&ev) < 0) {
+			perror("registering for event polling");
+			break;
+		}
 
-	return true;
+		/* save binding */
+		HASH_ADD_INORDER(h_ipx_sock, iface->ht_ipx_sock_to_bind,
+				ipx_sock, sizeof(__be16), e,
+				sort_bind_entry_by_ipx_sock);
+		HASH_ADD_INT(ht_conf_sock_to_bind, conf_sock, e);
+
+		/* show the new binding in full */
+		printf("bound %d:%d to %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx, ",
+				ipxw_mux_handle_data(h),
+				ipxw_mux_handle_conf(h),
+				ntohl(bind_msg->addr.net),
+				bind_msg->addr.node[0], bind_msg->addr.node[1],
+				bind_msg->addr.node[2], bind_msg->addr.node[3],
+				bind_msg->addr.node[4], bind_msg->addr.node[5],
+				ntohs(bind_msg->addr.sock));
+		if (bind_msg->pkt_type_any) {
+			printf("pkt type: any, ");
+		} else {
+			printf("pkt type: %02hhx, ", bind_msg->pkt_type);
+		}
+		printf("recv bcasts: %s\n", bind_msg->recv_bcast ? "yes" :
+				"no");
+
+		return true;
+	} while (0);
+
+	/* remove the bind entries from the BPF maps */
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
+			&(bind_msg->addr), sizeof(struct ipx_addr), 0);
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
+			&map_key_mc, sizeof(struct mc_bind_entry_key), 0);
+
+	/* remove the data socket from the BPF maps */
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_ingress,
+			&(bind_msg->addr), sizeof(struct ipx_addr), 0);
+
+	free(e);
+	return false;
 }
 
 static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
@@ -355,7 +390,7 @@ static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
 		/* unregister from ready-to-write events to avoid busy polling
 		 */
 		struct epoll_event ev = {
-			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.events = EPOLLERR | EPOLLHUP,
 			.data.fd = udp_sock
 		};
 		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev);
@@ -417,178 +452,9 @@ static ssize_t udp_send(struct if_entry *iface, int epoll_fd)
 	return len;
 }
 
-static bool tx_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg, void
-		*ctx)
-{
-	struct do_ctx *context = (struct do_ctx *) ctx;
-	struct bind_entry *be_xmit = context->be;
-	if (be_xmit == NULL) {
-		return false;
-	}
-
-	assert(msg->type == IPXW_MUX_XMIT);
-
-	msg->xmit.ssock = be_xmit->ipx_sock;
-
-	/* reregister for ready-to-write events, now that messages are
-	 * available */
-	int udp_sock = be_xmit->iface->udp_sock;
-	struct epoll_event ev = {
-		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
-		.data.fd = udp_sock
-	};
-	if (epoll_ctl(context->epoll_fd, EPOLL_CTL_MOD, udp_sock, &ev) < 0) {
-		return false;
-	}
-
-	/* queue the message on the interface */
-	STAILQ_INSERT_TAIL(&be_xmit->iface->out_queue, msg, q_entry);
-
-	return true;
-}
-
-static ssize_t peek_udp_recv_len(int udp_sock)
-{
-	struct ipxhdr ipxh;
-	ssize_t rcvd_len = recv(udp_sock, &ipxh, sizeof(ipxh), MSG_PEEK);
-	if (rcvd_len < 0) {
-		return -1;
-	}
-
-	do {
-		/* we need the IPX header to determine the message length */
-		if (rcvd_len != sizeof(ipxh)) {
-			errno = EREMOTEIO;
-			break;
-		}
-
-		size_t pkt_len = ntohs(ipxh.pktlen);
-
-		/* the length must fit at least the header */
-		if (pkt_len < sizeof(ipxh)) {
-			errno = EREMOTEIO;
-			break;
-		}
-
-		/* the payload must fit */
-		if (pkt_len > IPXW_MUX_MSG_LEN) {
-			errno = EREMOTEIO;
-			break;
-		}
-
-		return pkt_len;
-	} while (0);
-
-	/* clear out the invalid message */
-	recv(udp_sock, &ipxh, 0, 0);
-
-	return -1;
-}
-
-static ssize_t udp_recv(struct if_entry *iface, int udp_sock, int epoll_fd)
-{
-	ssize_t ret = -1;
-
-	ssize_t expected = peek_udp_recv_len(udp_sock);
-	if (expected < 0) {
-		return -1;
-	}
-
-	struct ipxhdr *ipx_msg = malloc(expected);
-	if (ipx_msg == NULL) {
-		return -1;
-	}
-
-	do {
-		ssize_t len = recv(udp_sock, ipx_msg, expected, 0);
-		if (len < 0) {
-			break;
-		}
-
-		/* need at least the IPX header */
-		if (len < sizeof(struct ipxhdr)) {
-			errno = EREMOTEIO;
-			break;
-		}
-
-		/* get the binding for the destination socket */
-		struct bind_entry *be_recv = get_bind_entry_by_ipx_sock(iface,
-				ipx_msg->daddr.sock);
-		if (be_recv == NULL) {
-			/* this is ok, there is just nobody listening */
-			ret = 0;
-			break;
-		}
-
-		/* convert to recv msg */
-		struct ipxw_mux_msg *recv_msg =
-			ipxw_mux_ipxh_to_recv_msg(ipx_msg);
-		if (recv_msg == NULL) {
-			errno = EINVAL;
-			break;
-		}
-
-		/* check the message length, the header could lie to us */
-		if (recv_msg->recv.data_len + sizeof(*recv_msg) != expected) {
-			errno = EINVAL;
-			break;
-		}
-
-		/* not interested in this packet as it is a broadcast */
-		if (!be_recv->recv_bcast && recv_msg->recv.is_bcast) {
-			ret = 0;
-			break;
-		}
-
-		/* not interested in this packet type */
-		if (!be_recv->pkt_type_any && be_recv->pkt_type !=
-				recv_msg->recv.pkt_type) {
-			ret = 0;
-			break;
-		}
-
-		/* reregister for ready-to-write events, now that messages are
-		 * available */
-		struct epoll_event ev = {
-			.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
-			.data.fd = be_recv->sock
-		};
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, be_recv->sock, &ev) < 0)
-		{
-			break;
-		}
-
-		/* queue the msg for the client */
-		STAILQ_INSERT_TAIL(&be_recv->in_queue, recv_msg, q_entry);
-
-		return len;
-	} while (0);
-
-	/* something went wrong, free the msg buffer */
-	free(ipx_msg);
-	return ret;
-}
-
-static ssize_t udp_recv_mc(struct if_entry *iface, int epoll_fd)
-{
-	return udp_recv(iface, iface->mcast_udp_sock, epoll_fd);
-}
-
-static ssize_t udp_recv_uc(struct if_entry *iface, int epoll_fd)
-{
-	return udp_recv(iface, iface->udp_sock, epoll_fd);
-}
-
 static void unbind_entry(struct bind_entry *e)
 {
 	assert(e != NULL);
-
-	/* remove all undelivered messages */
-	while (!STAILQ_EMPTY(&e->in_queue)) {
-		struct ipxw_mux_msg *msg = STAILQ_FIRST(&e->in_queue);
-		STAILQ_REMOVE_HEAD(&e->in_queue, q_entry);
-		free(msg);
-	}
 
 	/* remove all undelivered config messages */
 	while (!STAILQ_EMPTY(&e->conf_queue)) {
@@ -613,18 +479,21 @@ static void unbind_entry(struct bind_entry *e)
 	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
 			&map_key_mc, sizeof(struct mc_bind_entry_key), 0);
 
+	/* remove the data socket from the BPF maps */
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_ingress,
+			&map_key_uc, sizeof(struct ipx_addr), 0);
+
 	/* remove the bind entry from all data structures */
 	HASH_DELETE(h_ipx_sock, e->iface->ht_ipx_sock_to_bind, e);
-	HASH_DEL(ht_sock_to_bind, e);
+	HASH_DEL(ht_conf_sock_to_bind, e);
 
-	struct ipxw_mux_handle h = e->h;
+	int conf_sock = e->conf_sock;
 
 	/* close the socket and free */
-	ipxw_mux_handle_close(e->h);
+	close(conf_sock);
 	free(e);
 
-	printf("%d:%d unbound\n", ipxw_mux_handle_data(h),
-			ipxw_mux_handle_conf(h));
+	printf("%d unbound\n", conf_sock);
 }
 
 static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int epoll_fd)
@@ -633,9 +502,9 @@ static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int 
 	 * available */
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP,
-		.data.fd = -ipxw_mux_handle_data(be->h)
+		.data.fd = be->conf_sock
 	};
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_conf(be->h),
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, be->conf_sock,
 				&ev) < 0) {
 		return false;
 	}
@@ -646,8 +515,7 @@ static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int 
 	return true;
 }
 
-static bool handle_conf_msg(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		void *ctx)
+static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, void *ctx)
 {
 	struct do_ctx *context = (struct do_ctx *) ctx;
 	struct bind_entry *be_conf = context->be;
@@ -700,7 +568,7 @@ static ssize_t conf_msg(struct bind_entry *be_conf, int epoll_fd)
 {
 	assert(be_conf != NULL);
 
-	ssize_t expected = ipxw_mux_peek_conf_len(be_conf->h);
+	ssize_t expected = ipxw_mux_peek_conf_len(be_conf->conf_sock);
 	if (expected < 0) {
 		return -1;
 	}
@@ -717,8 +585,8 @@ static ssize_t conf_msg(struct bind_entry *be_conf, int epoll_fd)
 		.be = be_conf,
 		.epoll_fd = epoll_fd
 	};
-	ssize_t err = ipxw_mux_do_conf(be_conf->h, msg, &handle_conf_msg,
-			&ctx);
+	ssize_t err = ipxw_mux_do_conf(be_conf->conf_sock, msg,
+			&handle_conf_msg, &ctx);
 
 	/* always get rid of the message, it is handled immediately in
 	 * ipxw_mux_do_conf */
@@ -737,16 +605,15 @@ static ssize_t conf_rsp(struct bind_entry *be, int epoll_fd)
 		 */
 		struct epoll_event ev = {
 			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
-			.data.fd = -ipxw_mux_handle_data(be->h)
+			.data.fd = be->conf_sock
 		};
-		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_conf(be->h),
-				&ev);
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, be->conf_sock, &ev);
 
 		return 0;
 	}
 
 	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->conf_queue);
-	ssize_t err = ipxw_mux_recv_conf(be->h, msg);
+	ssize_t err = ipxw_mux_recv_conf(be->conf_sock, msg);
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
@@ -759,78 +626,6 @@ static ssize_t conf_rsp(struct bind_entry *be, int epoll_fd)
 	}
 
 	STAILQ_REMOVE_HEAD(&be->conf_queue, q_entry);
-	free(msg);
-
-	return err;
-}
-
-static ssize_t xmit_msg(struct bind_entry *be_xmit, int epoll_fd)
-{
-	assert(be_xmit != NULL);
-
-	ssize_t expected = ipxw_mux_peek_xmit_len(be_xmit->h);
-	if (expected < 0) {
-		return -1;
-	}
-
-	struct ipxw_mux_msg *msg = calloc(1, expected);
-	if (msg == NULL) {
-		return -1;
-	}
-
-	msg->type = IPXW_MUX_XMIT;
-	msg->xmit.data_len = expected - sizeof(*msg);
-
-	struct do_ctx ctx = {
-		.be = be_xmit,
-		.epoll_fd = epoll_fd
-	};
-	ssize_t err = ipxw_mux_do_xmit(be_xmit->h, msg, &tx_msg, &ctx);
-	if (err < 0) {
-		/* some error */
-		free(msg);
-	} else if (err == 0) {
-		/* should not happen */
-		free(msg);
-	} else {
-		/* message queued for sending */
-	}
-
-	return err;
-}
-
-static ssize_t recv_msg(struct bind_entry *be, int epoll_fd)
-{
-	assert(be != NULL);
-
-	/* no msgs to receive */
-	if (STAILQ_EMPTY(&be->in_queue)) {
-		/* unregister from ready-to-write events to avoid busy polling
-		 */
-		struct epoll_event ev = {
-			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
-			.data.fd = ipxw_mux_handle_data(be->h)
-		};
-		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_handle_data(be->h),
-				&ev);
-
-		return 0;
-	}
-
-	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->in_queue);
-	ssize_t err = ipxw_mux_recv(be->h, msg);
-	if (err < 0) {
-		/* recoverable errors, don't dequeue the message but try again
-		 * later */
-		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-		{
-			return 0;
-		}
-
-		/* other error, make sure to get rid of the message */
-	}
-
-	STAILQ_REMOVE_HEAD(&be->in_queue, q_entry);
 	free(msg);
 
 	return err;
@@ -1085,7 +880,7 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 	/* binding failed, send error response */
 	if (!record_bind(iface, h, epoll_fd, &bind_msg.bind)) {
 		resp_msg.err.err = errno;
-		ipxw_mux_send_bind_resp(h, &resp_msg);
+		ipxw_mux_send_bind_resp(ipxw_mux_handle_conf(h), &resp_msg);
 		ipxw_mux_handle_close(h);
 
 		return -1;
@@ -1094,7 +889,10 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 	/* binding succeeded, send ack response */
 	resp_msg.err.err = 0;
 	resp_msg.type = IPXW_MUX_BIND_ACK;
-	ipxw_mux_send_bind_resp(h, &resp_msg);
+	resp_msg.ack.prefix = iface->prefix;
+	ipxw_mux_send_bind_resp(ipxw_mux_handle_conf(h), &resp_msg);
+
+	close(ipxw_mux_handle_data(h));
 
 	return 0;
 }
@@ -1246,7 +1044,7 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 
 	/* reject binding and send back error */
 	err_msg.err.err = errno;
-	ipxw_mux_send_bind_resp(h, &err_msg);
+	ipxw_mux_send_bind_resp(ipxw_mux_handle_conf(h), &err_msg);
 	ipxw_mux_handle_close(h);
 
 	return -1;
@@ -1273,7 +1071,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
 	}
 
-	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	ev.events = EPOLLERR | EPOLLHUP;
 	ev.data.fd = iface->mcast_udp_sock;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->mcast_udp_sock, &ev) < 0)
 	{
@@ -1281,7 +1079,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
 	}
 
-	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
+	ev.events = EPOLLOUT | EPOLLERR | EPOLLHUP;
 	ev.data.fd = iface->udp_sock;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, iface->udp_sock, &ev) < 0) {
 		perror("registering UDP socket for event polling");
@@ -1341,16 +1139,6 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 							ctrl_sock, 9);
 				}
 
-				/* can recv */
-				if (evs[i].events & EPOLLIN) {
-					err = udp_recv_mc(iface, epoll_fd);
-					if (err < 0 && errno != EINTR) {
-						perror("multicast UDP recv");
-					} else if (err == 0) {
-						/* nobody was interested */
-					}
-				}
-
 				continue;
 
 			}
@@ -1362,16 +1150,6 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 					fprintf(stderr, "UDP socket error\n");
 					cleanup_and_exit(iface, epoll_fd,
 							ctrl_sock, 10);
-				}
-
-				/* can recv */
-				if (evs[i].events & EPOLLIN) {
-					err = udp_recv_uc(iface, epoll_fd);
-					if (err < 0 && errno != EINTR) {
-						perror("UDP recv");
-					} else if (err == 0) {
-						/* nobody was interested */
-					}
 				}
 
 				/* can xmit */
@@ -1389,83 +1167,40 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 			}
 
 			/* one of the config sockets */
-			if (evs[i].data.fd < 0) {
-				struct bind_entry *e =
-					get_bind_entry_by_sock(-evs[i].data.fd);
-				/* bindind already deleted */
-				if (e == NULL) {
-					continue;
-				}
-
-				/* incoming conf msg */
-				if (evs[i].events & EPOLLIN) {
-					err = conf_msg(e, epoll_fd);
-					if (err < 0 && errno != EINTR) {
-						perror("handling conf msg");
-					} else if (err == 0) {
-						/* should not happen */
-						continue;
-					}
-
-
-					/* this is important!
-					 * conf_msg could have deleted the
-					 * binding, therefore we need to check
-					 * if it still exists at this point */
-					e = get_bind_entry_by_sock(
-							-evs[i].data.fd);
-					if (e == NULL) {
-						continue;
-					}
-				}
-
-				/* outgoing conf response */
-				if (evs[i].events & EPOLLOUT) {
-					err = conf_rsp(e, epoll_fd);
-					if (err < 0) {
-						/* get rid of the client */
-						perror("sending conf msg");
-						unbind_entry(e);
-						continue;
-					} else if (err == 0) {
-						/* nothing happened */
-					}
-				}
-
-				/* something went wrong, unbind */
-				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					unbind_entry(e);
-					continue;
-				}
-
-				continue;
-			}
-
-			/* one of the data sockets */
 			struct bind_entry *e =
-				get_bind_entry_by_sock(evs[i].data.fd);
+				get_bind_entry_by_conf_sock(evs[i].data.fd);
 			/* bindind already deleted */
 			if (e == NULL) {
 				continue;
 			}
 
-			/* can xmit */
+			/* incoming conf msg */
 			if (evs[i].events & EPOLLIN) {
-				err = xmit_msg(e, epoll_fd);
+				err = conf_msg(e, epoll_fd);
 				if (err < 0 && errno != EINTR) {
-					perror("xmitting data");
+					perror("handling conf msg");
 				} else if (err == 0) {
 					/* should not happen */
 					continue;
 				}
+
+				/* this is important!
+				 * conf_msg could have deleted the
+				 * binding, therefore we need to check
+				 * if it still exists at this point */
+				e =
+					get_bind_entry_by_conf_sock(evs[i].data.fd);
+				if (e == NULL) {
+					continue;
+				}
 			}
 
-			/* can recv */
+			/* outgoing conf response */
 			if (evs[i].events & EPOLLOUT) {
-				err = recv_msg(e, epoll_fd);
+				err = conf_rsp(e, epoll_fd);
 				if (err < 0) {
 					/* get rid of the client */
-					perror("recving data");
+					perror("sending conf msg");
 					unbind_entry(e);
 					continue;
 				} else if (err == 0) {
@@ -1540,7 +1275,15 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 
 		/* attach the ingress demuxer to the interface */
 		sub->link =
-			bpf_program__attach_tcx(bpf_kern->progs.ipw_wrap_demux,
+			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_demux,
+					sub->ifidx, NULL);
+		if (sub->link == NULL) {
+			break;
+		}
+
+		/* attach the egress muxer to the interface */
+		sub->link =
+			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_mux,
 					sub->ifidx, NULL);
 		if (sub->link == NULL) {
 			break;
@@ -1761,25 +1504,6 @@ static bool setup_bpf(void)
 	/* load the muxer/demuxer bpf programs and maps */
 	bpf_kern = ipx_wrap_mux_kern__open_and_load();
 	if (bpf_kern == NULL) {
-		return false;
-	}
-
-	/* attach the egress muxer to the map of client sockets */
-	int bpf_prog_fd = bpf_program__fd(bpf_kern->progs.ipx_wrap_mux);
-	if (bpf_prog_fd < 0) {
-		errno = -bpf_prog_fd;
-		return false;
-	}
-	int bpf_map_fd =
-		bpf_map__fd(bpf_kern->maps.ipx_wrap_mux_sock_ingress);
-	if (bpf_map_fd < 0) {
-		errno = -bpf_map_fd;
-		return false;
-	}
-	int err = bpf_prog_attach(bpf_prog_fd, bpf_map_fd, BPF_SK_MSG_VERDICT,
-			0);
-	if (err != 0) {
-		errno = -err;
 		return false;
 	}
 

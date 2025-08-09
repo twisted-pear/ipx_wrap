@@ -28,7 +28,7 @@ vmlinux.btf:
 %.skel.h: %.o vmlinux.h common.h
 	$(BPFT) gen skeleton $< > $@
 
-$(BPF_OBJ): %.o: %.c vmlinux.h common.h
+$(BPF_OBJ): %.o: %.c vmlinux.h common.h ipx_wrap_common_kern.h
 	$(CLANG) -S \
 	    -target bpf \
 	    -D __BPF_TRACING__ \
