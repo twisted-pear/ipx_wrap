@@ -27,7 +27,6 @@ void ipxw_mux_handle_close(struct ipxw_mux_handle h)
 
 bool ipxw_mux_handle_is_error(struct ipxw_mux_handle h)
 {
-	// TODO: only for conf sock?
 	return (h.data_sock < 0) || (h.conf_sock < 0);
 }
 
@@ -455,7 +454,6 @@ int ipxw_mux_mk_data_sock(void)
 		return -1;
 	}
 
-	// TODO: fix this!
 	struct sockaddr_in6 dummy_bind = {
 		.sin6_family = AF_INET6,
 		.sin6_addr = IN6ADDR_ANY_INIT,
