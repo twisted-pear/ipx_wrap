@@ -21,7 +21,7 @@ struct ipxw_mux_msg_xmit {
 	__u8 pkt_type;
 	__u8 reserved;
 	__u16 data_len;
-	__be16 ssock; // TODO: remove this
+	__be16 reserved2;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_min {
