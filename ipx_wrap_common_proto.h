@@ -24,11 +24,23 @@ struct ipxw_mux_msg_xmit {
 	__be16 reserved2;
 } __attribute__((packed));
 
+struct ipxw_mux_msg_recv {
+	struct ipx_addr saddr;
+	__u8 pkt_type;
+	__u8 is_bcast:1,
+	     reserved:7;
+	__u16 data_len;
+	__u16 reserved2;
+} __attribute__((packed));
+
 struct ipxw_mux_msg_min {
 	union {
 		struct {
 			enum ipxw_mux_msg_type type;
-			struct ipxw_mux_msg_xmit xmit;
+			union {
+				struct ipxw_mux_msg_xmit xmit;
+				struct ipxw_mux_msg_recv recv;
+			};
 		} __attribute__((packed));
 		struct ipxhdr ipxh;
 	};

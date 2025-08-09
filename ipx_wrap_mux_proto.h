@@ -51,15 +51,6 @@ struct ipxw_mux_msg_getsockname {
 	__u16 reserved3;
 } __attribute__((packed));
 
-struct ipxw_mux_msg_recv {
-	struct ipx_addr saddr;
-	__u8 pkt_type;
-	__u8 is_bcast:1,
-	     reserved:7;
-	__u16 data_len;
-	__u16 reserved2;
-} __attribute__((packed));
-
 struct ipxw_mux_msg {
 	union {
 		struct {
@@ -179,9 +170,6 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock);
 ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 		(*handle_conf_msg_cb)(int conf_sock, struct ipxw_mux_msg *msg,
 			void *ctx), void *conf_ctx);
-
-/* turn an ipx message into a recv message, conversion happens in place */
-struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg);
 
 ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 

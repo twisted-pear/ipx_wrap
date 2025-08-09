@@ -783,12 +783,6 @@ ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)
 			break;
 		}
 
-		// TODO: move to kernel
-		if (ipxw_mux_ipxh_to_recv_msg((struct ipxhdr *) &msg) == NULL) {
-			errno = EINVAL;
-			break;
-		}
-
 		/* which has to be of the correct type */
 		if (msg.type != IPXW_MUX_RECV) {
 			errno = EINVAL;
@@ -837,12 +831,6 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	/* need at least a full msg */
 	if (rcvd_len < sizeof(struct ipxw_mux_msg)) {
 		errno = EREMOTEIO;
-		return -1;
-	}
-
-	// TODO: move to kernel
-	if (ipxw_mux_ipxh_to_recv_msg((struct ipxhdr *) msg) == NULL) {
-		errno = EINVAL;
 		return -1;
 	}
 
@@ -1090,39 +1078,6 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 	}
 
 	return rcvd_msg_len;
-}
-
-struct ipxw_mux_msg *ipxw_mux_ipxh_to_recv_msg(struct ipxhdr *ipx_msg)
-{
-	struct ipx_addr saddr = ipx_msg->saddr;
-	__u8 pkt_type = ipx_msg->type;
-
-	/* extract the correct data length */
-	__u16 data_len = ntohs(ipx_msg->pktlen);
-	if (data_len < sizeof(struct ipxw_mux_msg)) {
-		return NULL;
-	}
-	if (data_len > IPXW_MUX_MSG_LEN) {
-		return NULL;
-	}
-	data_len -= sizeof(struct ipxhdr);
-
-	/* determine if the packet is a broadcast */
-	bool is_bcast = memcmp(ipx_msg->daddr.node, IPX_BCAST_NODE,
-			IPX_ADDR_NODE_BYTES) == 0;
-
-	/* clear the header so we can rewrite into a recv msg */
-	memset(ipx_msg, 0, sizeof(struct ipxw_mux_msg));
-
-	/* rewrite to recv msg */
-	struct ipxw_mux_msg *recv_msg = (struct ipxw_mux_msg *) ipx_msg;
-	recv_msg->type = IPXW_MUX_RECV;
-	recv_msg->recv.saddr = saddr;
-	recv_msg->recv.pkt_type = pkt_type;
-	recv_msg->recv.is_bcast = is_bcast;
-	recv_msg->recv.data_len = data_len;
-
-	return recv_msg;
 }
 
 ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)

@@ -70,10 +70,40 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
 
-	struct ipxhdr *ipxh = data + cb.ipxhdr_ofs;
-	if (ipxh < data || (ipxh + 1) > data_end) {
+	struct hdr_cursor cur;
+	cur.pos = data;
+
+	struct ethhdr *eth;
+	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
 		return TC_ACT_UNSPEC;
 	}
+	if (bpf_ntohs(eth->h_proto) != ETH_P_IPV6) {
+		return TC_ACT_UNSPEC;
+	}
+
+	struct ipv6hdr *ip6h;
+	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
+		return TC_ACT_UNSPEC;
+	}
+	if (ip6h->nexthdr != IPPROTO_UDP) {
+		return TC_ACT_UNSPEC;
+	}
+
+	struct udphdr *udph;
+	if (parse_udphdr(&cur, data_end, &udph) < 0) {
+		return TC_ACT_UNSPEC;
+	}
+	if (bpf_ntohs(udph->len) < sizeof(struct udphdr) + sizeof(struct
+				ipxhdr)) {
+		return TC_ACT_UNSPEC;
+	}
+
+	if (cur.pos + sizeof(struct ipxw_mux_msg_min) > data_end) {
+		return TC_ACT_UNSPEC;
+	}
+
+	struct ipxw_mux_msg_min *mux_msg = cur.pos;
+	struct ipxhdr *ipxh = &(mux_msg->ipxh);
 
 	struct bpf_bind_entry *e = NULL;
 
@@ -120,8 +150,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	bpf_printk("demux unicast, len: %u", skb->len);
-
 	struct bpf_sock *sock = bpf_map_lookup_elem(&ipx_wrap_mux_sock_ingress,
 			&(e->addr));
 	if (sock == NULL) {
@@ -138,6 +166,69 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	bpf_sk_release(sock);
 
 	bpf_printk("socket assigned!");
+
+	struct ipx_addr saddr = ipxh->saddr;
+	__u8 pkt_type = ipxh->type;
+
+	/* extract the correct data length */
+	// TODO: also check data len SKB size
+	__u16 data_len = bpf_ntohs(ipxh->pktlen);
+	if (data_len < sizeof(struct ipxw_mux_msg_min)) {
+		return TC_ACT_SHOT;
+	}
+	if (data_len > IPXW_MUX_MSG_LEN) {
+		return TC_ACT_SHOT;
+	}
+	if (data_len + sizeof(struct udphdr) != bpf_ntohs(udph->len)) {
+		return TC_ACT_SHOT;
+	}
+	data_len -= sizeof(struct ipxhdr);
+
+	/* remove IPX header from checksum */
+	__u32 ipxhdr_len_mult_4 = (sizeof(struct ipxhdr) / 4) * 4;
+	__s64 csum_diff = bpf_csum_diff((__be32*) ipxh, ipxhdr_len_mult_4,
+			NULL, 0, 0);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+	__be32 rest = ((__be32) *((__be16 *) (((void*) ipxh) +
+					ipxhdr_len_mult_4))) << 16;
+	csum_diff = bpf_csum_diff(&rest, sizeof(__be32), NULL, 0, csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+
+	/* clear the header so we can rewrite into a recv msg */
+	__builtin_memset(mux_msg, 0, sizeof(struct ipxw_mux_msg_min));
+
+	/* rewrite to recv msg */
+	mux_msg->type = IPXW_MUX_RECV;
+	mux_msg->recv.saddr = saddr;
+	mux_msg->recv.pkt_type = pkt_type;
+	mux_msg->recv.is_bcast = cb.is_bcast;
+	mux_msg->recv.data_len = data_len;
+
+	/* add recv msg header to checksum */
+	csum_diff = bpf_csum_diff(NULL, 0, (__be32*) mux_msg,
+			ipxhdr_len_mult_4, csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+	rest = ((__be32) *((__be16 *) (((void*) ipxh) + ipxhdr_len_mult_4))) <<
+		16;
+	csum_diff = bpf_csum_diff(NULL, 0, &rest, sizeof(__be32), csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+
+	/* insert the modified checksum */
+	__u32 csum_ofs = ((void *) &(udph->check)) - data;
+	if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
+			!= 0) {
+		return TC_ACT_SHOT;
+	}
+
+	bpf_printk("packet demuxed!");
 
 	return TC_ACT_OK;
 }
@@ -214,6 +305,7 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	if (mux_msg->type != IPXW_MUX_XMIT) {
 		return TC_ACT_SHOT;
 	}
+	// TODO: also check data len SKB size
 	size_t data_len = mux_msg->xmit.data_len;
 	if (data_len > IPX_MAX_DATA_LEN) {
 		return TC_ACT_SHOT;
