@@ -61,13 +61,9 @@ struct bpf_cb_info {
 		__u32 cb[5];
 		struct {
 			__u16 mark;
-			__u16 data_len;
-			size_t ipxhdr_ofs;
-			__be16 dst_sock;
-			__u8 pkt_type;
-			__u8 is_bcast:1,
+			__u16 is_bcast:1,
 			     is_for_local:1,
-			     reserved:6;
+			     reserved:14;
 		} __attribute__((packed));
 	};
 } __attribute__((packed));
@@ -85,6 +81,7 @@ struct mc_bind_entry_key {
 
 struct bpf_bind_entry {
 	struct ipx_addr addr;
+	__be32 prefix;
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
 	     pkt_type_any:1,

@@ -371,10 +371,6 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 
 	/* set metadata in case this packet is for us, a second BPF program
 	 * will handle redirecting to the appropriate socket */
-	__builtin_memset(cb_info, 0, sizeof(struct bpf_cb_info));
-	cb_info->data_len = bpf_ntohs(ipxh->pktlen) - sizeof(struct ipxhdr);
-	cb_info->dst_sock = ipxh->daddr.sock;
-	cb_info->pkt_type = ipxh->type;
 	cb_info->is_bcast = false;
 	cb_info->is_for_local = false;
 
@@ -588,16 +584,14 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	if (ipv6_in_ipx) {
 		CB_INFO(ctx)->mark = IPX_TO_IPV6_REINJECT_MARK;
 	} else {
-		cb_info.ipxhdr_ofs = (cur.pos + newhdr_size) - data;
 		cb_info.mark = IPX_TO_IPV6UDP_REINJECT_MARK;
-		__u32 *cb_info_u32 = (__u32 *) &cb_info;
 
 		/* ugly but necessary to sneak it past the verifier */
-		ctx->cb[0] = cb_info_u32[0];
-		ctx->cb[1] = cb_info_u32[1];
-		ctx->cb[2] = cb_info_u32[2];
-		ctx->cb[3] = cb_info_u32[3];
-		ctx->cb[4] = cb_info_u32[4];
+		ctx->cb[0] = cb_info.cb[0];
+		ctx->cb[1] = cb_info.cb[1];
+		ctx->cb[2] = cb_info.cb[2];
+		ctx->cb[3] = cb_info.cb[3];
+		ctx->cb[4] = cb_info.cb[4];
 	}
 	return bpf_redirect(ctx->ingress_ifindex, BPF_F_INGRESS);
 }

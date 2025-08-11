@@ -271,6 +271,7 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 		/* register the binding in the BPF maps */
 		struct bpf_bind_entry be = {
 			.addr = bind_msg->addr,
+			.prefix = iface->prefix,
 			.pkt_type = bind_msg->pkt_type,
 			.pkt_type_any = bind_msg->pkt_type_any,
 			.recv_bcast = bind_msg->recv_bcast

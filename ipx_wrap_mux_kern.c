@@ -7,6 +7,8 @@
 #include "ipx_wrap_common_kern.h"
 #include "ipx_wrap_common_proto.h"
 
+#define AF_INET6 10
+
 #define IPX_SOCKETS_MAX	32768
 
 #define TC_ACT_UNSPEC (-1)
@@ -54,18 +56,13 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
+	/* ugly but necessary to sneak it past the verifier */
 	struct bpf_cb_info cb;
 	cb.cb[0] = skb->cb[0];
 	cb.cb[1] = skb->cb[1];
 	cb.cb[2] = skb->cb[2];
 	cb.cb[3] = skb->cb[3];
 	cb.cb[4] = skb->cb[4];
-
-	if (cb.ipxhdr_ofs < sizeof(struct ethhdr) || cb.ipxhdr_ofs >
-			sizeof(struct ethhdr) + sizeof(struct ipv6hdr) +
-			sizeof(struct udphdr)) {
-		return TC_ACT_UNSPEC;
-	}
 
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
@@ -102,6 +99,28 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
+	/* determine if the packet is for the local machine */
+	struct bpf_fib_lookup fib_params;
+	fib_params.family = AF_INET6;
+	__builtin_memcpy(fib_params.ipv6_dst, &(ip6h->daddr),
+			sizeof(fib_params.ipv6_dst));
+	__builtin_memcpy(fib_params.ipv6_src, &(ip6h->saddr),
+			sizeof(fib_params.ipv6_src));
+	fib_params.l4_protocol = IPPROTO_UDP;
+	fib_params.sport = bpf_htons(IPX_IN_IPV6_PORT);
+	fib_params.dport = bpf_htons(IPX_IN_IPV6_PORT);
+	fib_params.ifindex = skb->ingress_ifindex;
+	long fib_res = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
+			BPF_FIB_LOOKUP_SKIP_NEIGH);
+	if (fib_res == 0) {
+		cb.is_for_local = false;
+	} else if (fib_res == BPF_FIB_LKUP_RET_NOT_FWDED) {
+		cb.is_for_local = true;
+	} else {
+		bpf_printk("FIB_lookup failed %d", fib_res);
+		return TC_ACT_UNSPEC;
+	}
+
 	struct ipxw_mux_msg_min *mux_msg = cur.pos;
 	struct ipxhdr *ipxh = &(mux_msg->ipxh);
 
@@ -110,7 +129,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	if (cb.is_bcast && cb.is_for_local) {
 		struct mc_bind_entry_key key = {
 			.ifidx = skb->ingress_ifindex,
-			.dst_sock = cb.dst_sock
+			.dst_sock = ipxh->daddr.sock
 		};
 
 		/* try to get entry for broadcast */
@@ -120,9 +139,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		e = bpf_map_lookup_elem(&ipx_wrap_mux_bind_entries_uc,
 				&(ipxh->daddr));
 	}
-
-	/* TODO: put more effort into finding out if a packet is for the local
-	 * machine (i.e. do a FIB lookup) */
 
 	/* no bindging entry */
 	if (e == NULL) {
@@ -145,7 +161,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	/* check packet type */
-	if (cb.pkt_type != e->pkt_type && !e->pkt_type_any) {
+	if (ipxh->type != e->pkt_type && !e->pkt_type_any) {
 		bpf_printk("packet type mismatch");
 		return TC_ACT_SHOT;
 	}
@@ -171,8 +187,11 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	__u8 pkt_type = ipxh->type;
 
 	/* extract the correct data length */
-	// TODO: also check data len SKB size
 	__u16 data_len = bpf_ntohs(ipxh->pktlen);
+	if (data_len + sizeof(struct udphdr) + sizeof(struct ipv6hdr) +
+			sizeof(struct ethhdr) != skb->len) {
+		return TC_ACT_SHOT;
+	}
 	if (data_len < sizeof(struct ipxw_mux_msg_min)) {
 		return TC_ACT_SHOT;
 	}
@@ -305,8 +324,12 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	if (mux_msg->type != IPXW_MUX_XMIT) {
 		return TC_ACT_SHOT;
 	}
-	// TODO: also check data len SKB size
 	size_t data_len = mux_msg->xmit.data_len;
+	if (data_len + sizeof(struct ipxhdr) + sizeof(struct udphdr) +
+			sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
+			skb->len) {
+		return TC_ACT_SHOT;
+	}
 	if (data_len > IPX_MAX_DATA_LEN) {
 		return TC_ACT_SHOT;
 	}
@@ -315,7 +338,26 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	// TODO: force IPv6 source and destination addrs
+	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
+		&(ip6h->saddr);
+	ip6_saddr->prefix = e->prefix;
+	ip6_saddr->ipx_net = e->addr.net;
+	__builtin_memcpy(ip6_saddr->ipx_node_fst, e->addr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	ip6_saddr->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(ip6_saddr->ipx_node_snd, &(e->addr.node[3]),
+			IPX_ADDR_NODE_BYTES / 2);
+
+	struct ipv6_eui64_addr *ip6_daddr = (struct ipv6_eui64_addr *)
+		&(ip6h->daddr);
+	ip6_daddr->prefix = e->prefix;
+	ip6_daddr->ipx_net = mux_msg->xmit.daddr.net;
+	__builtin_memcpy(ip6_daddr->ipx_node_fst, mux_msg->xmit.daddr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	ip6_daddr->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(ip6_daddr->ipx_node_snd,
+			&(mux_msg->xmit.daddr.node[3]), IPX_ADDR_NODE_BYTES /
+			2);
 
 	bpf_printk("packet verified");
 
