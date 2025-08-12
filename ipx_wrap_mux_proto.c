@@ -454,20 +454,6 @@ int ipxw_mux_mk_data_sock(void)
 		return -1;
 	}
 
-	struct sockaddr_in6 dummy_bind = {
-		.sin6_family = AF_INET6,
-		.sin6_addr = IN6ADDR_ANY_INIT,
-		.sin6_port = 0,
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
-
-	if (bind(data_sock, (struct sockaddr *) &dummy_bind,
-				sizeof(dummy_bind)) < 0) {
-		close(data_sock);
-		return -1;
-	}
-
 	return data_sock;
 }
 
@@ -576,6 +562,36 @@ struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
 		/* should not happen, but if it does we report the error */
 		if (res_len != sizeof(res)) {
 			errno = EREMOTEIO;
+			break;
+		}
+
+		/* bind the socket so that it can receive */
+		struct sockaddr_in6 dummy_bind = {
+			.sin6_family = AF_INET6,
+			.sin6_port = 0,
+			.sin6_flowinfo = 0,
+			.sin6_scope_id = 0
+		};
+		struct ipv6_eui64_addr *dummy_addr = (struct ipv6_eui64_addr *)
+			&(dummy_bind.sin6_addr);
+		dummy_addr->prefix = res.ack.prefix;
+		dummy_addr->ipx_net = bind_msg->bind.addr.net;
+		memcpy(dummy_addr->ipx_node_fst, bind_msg->bind.addr.node,
+				IPX_ADDR_NODE_BYTES / 2);
+		dummy_addr->fffe = htons(0xfffe);
+		memcpy(dummy_addr->ipx_node_snd,
+				&(bind_msg->bind.addr.node[3]),
+				IPX_ADDR_NODE_BYTES / 2);
+
+		if (bind(data_sock, (struct sockaddr *) &dummy_bind,
+					sizeof(dummy_bind)) < 0) {
+			/* if the bind on the data socket failed, inform the
+			 * muxer */
+			struct ipxw_mux_msg unbind_msg;
+			/* no error handling, nothing that can be done */
+			unbind_msg.type = IPXW_MUX_UNBIND;
+			send(ret.conf_sock, &unbind_msg, sizeof(unbind_msg),
+					MSG_DONTWAIT);
 			break;
 		}
 

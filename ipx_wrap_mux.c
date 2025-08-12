@@ -142,6 +142,8 @@ static struct sub_process *get_sub_process_by_ipx_addr(struct ipx_if_addr
 
 static __be16 find_min_free_dyn_sock(struct if_entry *iface)
 {
+	// TODO: this might benefit from ranomization such that socket numbers
+	// cannot be predicted
 	__be16 min_free_dyn_sock = IPX_MIN_DYNAMIC_SOCKET;
 	struct bind_entry *e;
 	struct bind_entry *tmp;
@@ -556,6 +558,49 @@ static ssize_t conf_rsp(struct bind_entry *be, int epoll_fd)
 	return err;
 }
 
+static void cleanup_sub_process_bpf_bindings(struct sub_process *sub)
+{
+	struct ipx_addr sock_key;
+	struct ipx_addr sock_key_next;
+
+	int res =
+		bpf_map__get_next_key(bpf_kern->maps.ipx_wrap_mux_sock_ingress,
+				NULL, &sock_key, sizeof(struct ipx_addr));
+	for (; res == 0; sock_key = sock_key_next) {
+		/* fetch the next key first, since we modify the map below */
+		res = bpf_map__get_next_key(
+				bpf_kern->maps.ipx_wrap_mux_sock_ingress,
+				&sock_key, &sock_key_next, sizeof(struct
+					ipx_addr));
+
+		/* this entry does not belong to the sub-process, skip */
+		if (memcmp(&(sub->addr), &sock_key, sizeof(struct ipx_if_addr))
+				!= 0) {
+			continue;
+		}
+
+		fprintf(stderr, "cleaning up mapping for %08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
+				ntohl(sock_key.net), sock_key.node[0],
+				sock_key.node[1], sock_key.node[2],
+				sock_key.node[3], sock_key.node[4],
+				sock_key.node[5], ntohs(sock_key.sock));
+
+		/* remove the bind entries from the BPF maps */
+		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
+				&sock_key, sizeof(struct ipx_addr), 0);
+		struct mc_bind_entry_key mc_key = {
+			.ifidx = sub->ifidx,
+			.dst_sock = sock_key.sock
+		};
+		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_mc,
+				&mc_key, sizeof(struct mc_bind_entry_key), 0);
+
+		/* remove the data socket from the BPF maps */
+		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_sock_ingress,
+				&sock_key, sizeof(struct ipx_addr), 0);
+	}
+}
+
 static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 {
 	assert(sub != NULL);
@@ -570,6 +615,7 @@ static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 				sub->addr.node[3], sub->addr.node[4],
 				sub->addr.node[5]);
 
+		cleanup_sub_process_bpf_bindings(sub);
 		bpf_link__detach(sub->ingress_link);
 		bpf_link__detach(sub->egress_link);
 		bpf_link__destroy(sub->ingress_link);
@@ -871,6 +917,22 @@ static ssize_t handle_bind_msg_main(int ctrl_sock)
 	return -1;
 }
 
+static void signal_handler(int signal)
+{
+	switch (signal) {
+		case SIGHUP:
+			rescan_now = true;
+			break;
+		case SIGINT:
+		case SIGQUIT:
+		case SIGTERM:
+			keep_going = false;
+			break;
+		default:
+			assert(0);
+	}
+}
+
 static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 {
 	int epoll_fd = -1;
@@ -894,6 +956,14 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 
 	/* ignore SIGHUP, keep handler for SIGINT, SIGQUIT and SIGTERM */
 	struct sigaction sig_act;
+	memset(&sig_act, 0, sizeof(sig_act));
+	sig_act.sa_handler = signal_handler;
+	if (sigaction(SIGINT, &sig_act, NULL) < 0
+			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
+			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
+		perror("resetting signal handler");
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 6);
+	}
 	memset(&sig_act, 0, sizeof(sig_act));
 	sig_act.sa_handler = SIG_IGN;
 	if (sigaction(SIGHUP, &sig_act, NULL) < 0) {
@@ -1240,22 +1310,6 @@ static int setup_timer(int epoll_fd)
 	}
 
 	return tmr;
-}
-
-static void signal_handler(int signal)
-{
-	switch (signal) {
-		case SIGHUP:
-			rescan_now = true;
-			break;
-		case SIGINT:
-		case SIGQUIT:
-		case SIGTERM:
-			keep_going = false;
-			break;
-		default:
-			assert(0);
-	}
 }
 
 static bool setup_bpf(void)
