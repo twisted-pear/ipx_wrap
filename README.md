@@ -206,3 +206,14 @@ Usage: ipx_wrap_rx_client <IPv6 bind addr> <hex IPX bind socket> <expected IPX p
 ```
 
 The IPv6 address is of the form specified in [Interface Configuration](#if-cfg).
+
+## Acknowledgements
+
+### uthash
+
+The hash table implementation used throughout this project is `uthash` which
+was developed by Troy D. Hanson. and kindly provided under a [revised BSD
+license](https://troydhanson.github.io/uthash/license.html).
+
+The documentation for `uthash` is available
+[here](https://troydhanson.github.io/uthash/).
