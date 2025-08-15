@@ -442,7 +442,8 @@ static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int 
 	return true;
 }
 
-static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, void *ctx)
+static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
+		void *ctx)
 {
 	struct do_ctx *context = (struct do_ctx *) ctx;
 	struct bind_entry *be_conf = context->be;

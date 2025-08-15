@@ -74,18 +74,4 @@ _Static_assert(sizeof(struct bpf_cb_info) == (sizeof(__u32) * 5),
 #define IPX_TO_IPV6_REINJECT_MARK 0x4774
 #define IPX_TO_IPV6UDP_REINJECT_MARK 0x7447
 
-struct mc_bind_entry_key {
-	__u32 ifidx;
-	__be16 dst_sock;
-} __attribute__((packed));
-
-struct bpf_bind_entry {
-	struct ipx_addr addr;
-	__be32 prefix;
-	__u8 pkt_type;
-	__u8 recv_bcast:1,
-	     pkt_type_any:1,
-	     reserved:6;
-};
-
 #endif /* __COMMON_H__ */

@@ -10,6 +10,7 @@
 #define AF_INET6 10
 
 #define IPX_SOCKETS_MAX	32768
+#define SPX_SOCKETS_MAX	32768
 
 #define TC_ACT_UNSPEC (-1)
 #define TC_ACT_OK 0
@@ -46,6 +47,22 @@ struct {
 	__uint(max_entries, IPX_SOCKETS_MAX);
 	__uint(map_flags, BPF_F_RDONLY_PROG);
 } ipx_wrap_mux_bind_entries_mc SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_SOCKHASH);
+	__type(key, __be16);
+	__type(value, __u64);
+	__uint(max_entries, SPX_SOCKETS_MAX);
+	//__uint(map_flags, BPF_F_RDONLY_PROG);
+} ipx_wrap_mux_spx_sock_ingress SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
+	__type(key, __u32);
+	__type(value, struct bpf_spx_state);
+	__uint(max_entries, 0);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} ipx_wrap_mux_spx_state SEC(".maps");
 
 #define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
 
@@ -252,6 +269,69 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	return TC_ACT_OK;
 }
 
+static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
+		*spx_state, struct ipxw_mux_spx_msg_min *spx_msg)
+{
+	struct ipxhdr *ipxh = &(spx_msg->ipxh);
+	struct spxhdr *spxh = &(spx_msg->spxh);
+
+	bool end_of_msg = spx_msg->end_of_msg;
+	bool attention = spx_msg->attention;
+	__u8 datastream_type = spx_msg->datastream_type;
+
+	spxh->connection_control = 0;
+	if (end_of_msg) {
+		spxh->connection_control |= SPX_CC_END_OF_MSG;
+	}
+	if (attention) {
+		spxh->connection_control |= SPX_CC_ATTENTION;
+	}
+
+	spxh->datastream_type = datastream_type;
+
+	spxh->src_conn_id = spx_state->local_id;
+	spxh->dst_conn_id = spx_state->remote_id;
+
+	spxh->seq_no = spx_state->local_current_sequence;
+	spxh->ack_no = spx_state->remote_expected_sequence;
+
+	spxh->alloc_no = spx_state->local_alloc_no;
+
+	switch (spx_state->state) {
+		case IPXW_MUX_SPX_INVALID:
+			return false;
+		case IPXW_MUX_SPX_NEW:
+			spxh->connection_control = SPX_CC_SYSTEM_PKT |
+				SPX_CC_ACK_REQUIRED;
+
+			/* no special type allowed in connection request */
+			if (datastream_type != 0x00) {
+				return false;
+			}
+
+			/* some sanity checks */
+			if (spxh->dst_conn_id != SPX_CONN_ID_UNKNOWN) {
+				return false;
+			}
+			if (bpf_ntohs(spxh->seq_no) != 0 ||
+					bpf_ntohs(spxh->ack_no) != 0) {
+				return false;
+			}
+
+			/* no data allowed in connection request */
+			if (bpf_ntohs(ipxh->pktlen) != sizeof(struct ipxhdr) +
+					sizeof(struct spxhdr)) {
+				return false;
+			}
+
+			return true;
+		default:
+			return false;
+	};
+
+	return false;
+}
+
 SEC("tc/egress")
 int ipx_wrap_mux(struct __sk_buff *skb)
 {
@@ -263,17 +343,37 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	struct ipx_addr *bind_addr =
-		bpf_sk_storage_get(&ipx_wrap_mux_bind_egress, client_sock,
-				NULL, 0);
-	/* not one of our client sockets, do nothing */
+	struct ipx_addr *bind_addr = NULL;
+	struct bpf_spx_state *spx_state = NULL;
+
+	bind_addr = bpf_sk_storage_get(&ipx_wrap_mux_bind_egress, client_sock,
+			NULL, 0);
 	if (bind_addr == NULL) {
-		return TC_ACT_UNSPEC;
+		spx_state = bpf_sk_storage_get(&ipx_wrap_mux_spx_state,
+				client_sock, NULL, 0);
+
+		/* not one of our client sockets, do nothing */
+		if (spx_state == NULL) {
+			return TC_ACT_UNSPEC;
+		}
 	}
 
-	/* get the bind entry */
-	struct bpf_bind_entry *e =
-		bpf_map_lookup_elem(&ipx_wrap_mux_bind_entries_uc, bind_addr);
+	struct bpf_bind_entry spx_bind_entry;
+	struct bpf_bind_entry *e = NULL;
+
+	/* regular IPX socket */
+	if (bind_addr != NULL) {
+		/* get the bind entry */
+		e = bpf_map_lookup_elem(&ipx_wrap_mux_bind_entries_uc,
+				bind_addr);
+	/* SPX socket */
+	} else {
+		spx_bind_entry.addr = spx_state->local_addr;
+		spx_bind_entry.prefix = spx_state->prefix;
+		e = &spx_bind_entry;
+	}
+
+	/* no bind entry, drop */
 	if (e == NULL) {
 		return TC_ACT_SHOT;
 	}
@@ -319,8 +419,19 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 	bpf_printk("packet parsed");
 
-	/* verify the xmit message against the bind entry */
 	struct ipxw_mux_msg_min *mux_msg = cur.pos;
+
+	/* if we have an SPX socket, create the xmit message from the SPX state
+	 */
+	if (spx_state != NULL) {
+		mux_msg->type = IPXW_MUX_XMIT;
+		mux_msg->xmit.daddr = spx_state->remote_addr;
+		mux_msg->xmit.pkt_type = SPX_PKT_TYPE;
+		mux_msg->xmit.data_len = bpf_ntohs(udph->len) - (sizeof(struct
+					udphdr) + sizeof(struct ipxhdr));
+	}
+
+	/* verify the xmit message against the bind entry */
 	if (mux_msg->type != IPXW_MUX_XMIT) {
 		return TC_ACT_SHOT;
 	}
@@ -338,6 +449,9 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	bpf_printk("packet verified");
+
+	/* fill in the IPv6 addresses */
 	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
 		&(ip6h->saddr);
 	ip6_saddr->prefix = e->prefix;
@@ -359,8 +473,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 			&(mux_msg->xmit.daddr.node[3]), IPX_ADDR_NODE_BYTES /
 			2);
 
-	bpf_printk("packet verified");
-
 	struct ipx_addr daddr = mux_msg->xmit.daddr;
 	__u8 pkt_type = mux_msg->xmit.pkt_type;
 	__u16 msg_len = mux_msg->xmit.data_len + sizeof(struct ipxhdr);
@@ -375,6 +487,20 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	ipx_msg->saddr = e->addr;
 
 	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
+
+	/* also fill in the spx header */
+	if (spx_state != NULL) {
+		if (cur.pos + sizeof(struct ipxw_mux_spx_msg_min) > data_end) {
+			return TC_ACT_SHOT;
+		}
+
+		struct ipxw_mux_spx_msg_min *spx_msg = cur.pos;
+
+		/* prepare the SPX header */
+		if (!ipx_wrap_spx_egress(spx_state, spx_msg)) {
+			return TC_ACT_SHOT;
+		}
+	}
 
 	bpf_printk("packet built");
 

@@ -53,4 +53,84 @@ _Static_assert(sizeof(struct ipxw_mux_msg_min) == sizeof(struct ipxhdr),
 
 #define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg_min))
 
+struct mc_bind_entry_key {
+	__u32 ifidx;
+	__be16 dst_sock;
+} __attribute__((packed));
+
+struct bpf_bind_entry {
+	struct ipx_addr addr;
+	__be32 prefix;
+	__u8 pkt_type;
+	__u8 recv_bcast:1,
+	     pkt_type_any:1,
+	     reserved:6;
+};
+
+#define SPX_PKT_TYPE 0x05
+
+#define SPX_CC_NEGOTIATE_SIZE 0x04
+#define SPX_CC_SPXII 0x08
+#define SPX_CC_END_OF_MSG 0x10
+#define SPX_CC_ATTENTION 0x20
+#define SPX_CC_ACK_REQUIRED 0x40
+#define SPX_CC_SYSTEM_PKT 0x80
+
+#define SPX_DS_END_OF_CONN 0xFE
+#define SPX_DS_END_OF_CONN_ACK 0xFF
+
+#define SPX_CONN_ID_UNKNOWN bpf_htons(0xFFFF)
+
+struct spxhdr {
+	__u8 connection_control;
+	__u8 datastream_type;
+	__be16 src_conn_id;
+	__be16 dst_conn_id;
+	__be16 seq_no;
+	__be16 ack_no;
+	__be16 alloc_no;
+} __attribute__((packed));
+
+struct ipxw_mux_spx_msg_min {
+	struct ipxhdr ipxh;
+	union {
+		struct spxhdr spxh;
+		struct {
+			__u8 end_of_msg:1,
+			     attention:1,
+			     reserved:6;
+			__u8 datastream_type;
+		} __attribute__((packed));
+	};
+	__u8 data[0];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct ipxw_mux_spx_msg_min) == sizeof(struct ipxhdr) +
+		sizeof(struct spxhdr), "ipxw_mux_spx_msg_min too large");
+
+#define SPX_MAX_PKT_LEN 576 /* limit without size negotiation */
+#define SPX_MAX_DATA_LEN_WO_SIZNG (SPX_MAX_PKT_LEN - (sizeof(struct ipxhdr) \
+			+ sizeof(struct spxhdr)))
+
+#define SPX_MAX_DATA_LEN (IPX_MAX_DATA_LEN - sizeof(struct spxhdr))
+
+enum ipxw_mux_spx_connection_state {
+	IPXW_MUX_SPX_INVALID = 0,
+	IPXW_MUX_SPX_NEW
+	// TODO
+};
+
+struct bpf_spx_state {
+	struct ipx_addr remote_addr;
+	struct ipx_addr local_addr;
+	__be16 remote_id;
+	__be16 local_id;
+	__u16 remote_alloc_no;
+	__u16 local_alloc_no;
+	__u16 remote_expected_sequence;
+	__u16 local_current_sequence;
+	enum ipxw_mux_spx_connection_state state;
+	__be32 prefix;
+};
+
 #endif /* __IPX_WRAP_COMMON_PROTO_H__ */

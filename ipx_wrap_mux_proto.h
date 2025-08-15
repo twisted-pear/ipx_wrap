@@ -52,10 +52,12 @@ struct ipxw_mux_msg_getsockname {
 } __attribute__((packed));
 
 struct ipxw_mux_msg_spx_connect {
-	struct ipx_addr daddr;
+	struct ipx_addr addr;
+	union {
+		int spx_sock;
+		__u32 err;
+	};
 	__u16 reserved;
-	__u16 reserved2;
-	__u16 reserved3;
 } __attribute__((packed));
 
 struct ipxw_mux_msg {
@@ -177,7 +179,7 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock);
 
 ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 		(*handle_conf_msg_cb)(int conf_sock, struct ipxw_mux_msg *msg,
-			void *ctx), void *conf_ctx);
+			int fd, void *ctx), void *conf_ctx);
 
 ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 
@@ -185,37 +187,56 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 
 #define TICKS_MS (1000/18)
 
-#define SPX_ABORT_TMO 1500
-#define SPX_VERIFY_TMO 108
-#define SPX_ACK_TMO 54
+#define SPX_ABORT_TMO_TICKS 1500
+#define SPX_VERIFY_TMO_TICKS 108
+#define SPX_ACK_TMO_TICKS 54
 #define SPX_RETRY_COUNT 10
 
 struct ipxw_mux_spx_msg {
-	__u8 connection_control:4,
-	     end_of_message:1,
-	     attention:1,
-	     reserved:2;
-	__u8 datastream_type;
-	__u16 data_len;
+	struct ipxhdr ipxh;
+	union {
+		struct spxhdr spxh;
+		struct {
+			__u8 end_of_msg:1,
+			     attention:1,
+			     reserved:6;
+			__u8 datastream_type;
+			STAILQ_ENTRY(ipxw_mux_spx_msg) q_entry;
+		} __attribute__((packed));
+	};
 	__u8 data[0];
 } __attribute__((packed));
 
-bool ipxw_mux_spx_maintain(int spx_sock);
-void ipxw_mux_spx_close(int spx_sock);
+_Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
+		sizeof(struct spxhdr), "ipxw_mux_spx_msg too large");
+
+struct ipxw_mux_spx_handle {
+	int spx_sock;
+	enum ipxw_mux_spx_connection_state last_known_state;
+};
+
+bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
+int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);
+
+struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
+		struct ipx_addr *daddr);
+enum ipxw_mux_spx_connection_state ipxw_mux_spx_maintain(struct
+		ipxw_mux_spx_handle h);
+void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);
 
 /* write message to SPX socket, may block if the caller did not check if the *
  * data socket is writeable and block is true */
-ssize_t ipxw_mux_spx_xmit(int spx_sock, const struct ipxw_mux_spx_msg *msg,
-		bool block);
+ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, const struct
+		ipxw_mux_spx_msg *msg, bool block);
 
 /* get the length of the received message from the header, may block */
-ssize_t ipxw_mux_spx_peek_recvd_len(int spx_sock, bool block);
+ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block);
 
 /* get a message from the data socket, assumes msg points to a buffer of at
  * least sizeof(ipxw_mux_spx_msg) bytes and that the maximum SPX payload length
  * that can be received is stored in msg->data_len, may block if the caller did
  * not check if data is available and block is true */
-ssize_t ipxw_mux_spx_get_recvd(int spx_sock, struct ipxw_mux_spx_msg *msg, bool
-		block);
+ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
+		ipxw_mux_spx_msg *msg, bool block);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */
