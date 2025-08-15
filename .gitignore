@@ -8,6 +8,7 @@
 /ipx_wrap_mux
 /ipx_wrap_tx_client
 /ipx_wrap_rx_client
+/ipx_wrap_spx_client
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests

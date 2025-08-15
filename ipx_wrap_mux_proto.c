@@ -1204,6 +1204,7 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 	 * and add it to msg_len  */
 	switch (msg->type) {
 		case IPXW_MUX_GETSOCKNAME:
+		case IPXW_MUX_SPX_CONNECT:
 			break;
 		default:
 			errno = ENOTSUP;

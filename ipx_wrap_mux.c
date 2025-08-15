@@ -322,6 +322,9 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		HASH_ADD_INORDER(hh, e->ht_id_to_spx_conn, conn_id,
 				sizeof(__be16), conn, sort_spx_conn_by_id);
 
+		/* reset the error code for the response */
+		conn_rsp->err = 0;
+
 		/* show the new SPX connection */
 		printf("SPX connection %04hx: "
 				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx -> "
