@@ -50,7 +50,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_SOCKHASH);
-	__type(key, __be16);
+	__type(key, struct spx_conn_key);
 	__type(value, __u64);
 	__uint(max_entries, SPX_SOCKETS_MAX);
 	//__uint(map_flags, BPF_F_RDONLY_PROG);

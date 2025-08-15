@@ -25,10 +25,18 @@
 // TODO: install an SK_LOOKUP program on the netns to prevent unwanted
 // (non-IPX) traffic from reaching our client sockets
 // TODO: find a way to stop client sockets from sending to arbitrary IPv6 addrs
+// TODO: find a way to close the data sockets in the client process in case of
+// unbind
+// TODO: clean up sk_storage maps somehow too
 
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct if_entry;
+
+struct spx_connection {
+	__be16 conn_id;
+	UT_hash_handle hh; /* by connection ID */
+};
 
 struct bind_entry {
 	/* if the hash table key is the IPX socket number */
@@ -42,6 +50,8 @@ struct bind_entry {
 	struct ipxw_msg_queue conf_queue;
 	/* corresponding interface */
 	struct if_entry *iface;
+	/* hash table of SPX connections */
+	struct spx_connection *ht_id_to_spx_conn;
 	/* remaining data */
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
@@ -103,6 +113,12 @@ static int sort_bind_entry_by_ipx_sock(struct bind_entry *a, struct bind_entry
 		*b)
 {
 	return ntohs(a->ipx_sock) - ntohs(b->ipx_sock);
+}
+
+static int sort_spx_conn_by_id(struct spx_connection *a, struct spx_connection
+		*b)
+{
+	return ntohs(a->conn_id) - ntohs(b->conn_id);
 }
 
 static struct bind_entry *get_bind_entry_by_conf_sock(int conf_sock)
@@ -175,6 +191,35 @@ static __be16 find_min_free_dyn_sock(struct if_entry *iface)
 	return min_free_dyn_sock;
 }
 
+static __be16 find_min_free_spx_conn_id(struct bind_entry *e)
+{
+	// TODO: this might benefit from ranomization such that connection IDs
+	// cannot be predicted
+	__be16 min_free_spx_conn_id = 0;
+	struct spx_connection *c;
+	struct spx_connection *tmp;
+	HASH_ITER(hh, e->ht_id_to_spx_conn, c, tmp) {
+		/* all connection IDs in use */
+		if (ntohs(min_free_spx_conn_id) == ntohs(SPX_CONN_ID_UNKNOWN))
+		{
+			break;
+		}
+
+		/* found a free connection ID */
+		if (ntohs(c->conn_id) > ntohs(min_free_spx_conn_id)) {
+			break;
+		}
+
+		/* current connection ID taken, try next one */
+		if (ntohs(c->conn_id) == ntohs(min_free_spx_conn_id)) {
+			min_free_spx_conn_id =
+				htons(ntohs(min_free_spx_conn_id) + 1);
+		}
+	}
+
+	return min_free_spx_conn_id;
+}
+
 static bool has_net_bind_service(struct ipxw_mux_handle h)
 {
 	struct ucred data_creds;
@@ -198,6 +243,113 @@ static bool has_net_bind_service(struct ipxw_mux_handle h)
 	cap_free(data_caps);
 
 	return on == CAP_SET;
+}
+
+static bool record_spx_conn(struct bind_entry *e, struct
+		ipxw_mux_msg_spx_connect *conn_req, int conn_fd, struct
+		ipxw_mux_msg_spx_connect *conn_rsp)
+{
+	struct ipx_addr bind_addr = {
+		.net = e->iface->addr.net,
+		.sock = e->ipx_sock
+	};
+	memcpy(bind_addr.node, e->iface->addr.node, IPX_ADDR_NODE_BYTES);
+
+	/* fill in the response */
+	conn_rsp->addr = bind_addr;
+	conn_rsp->err = ENOTSUP;
+
+	__be16 conn_id = find_min_free_spx_conn_id(e);
+	if (conn_id == SPX_CONN_ID_UNKNOWN) {
+		conn_rsp->err = EACCES;
+		return false;
+	}
+
+	/* make and fill new connection entry */
+	struct spx_connection *conn = calloc(1, sizeof(struct spx_connection));
+	if (conn == NULL) {
+		perror("allocating connection");
+		conn_rsp->err = errno;
+		return false;
+	}
+	conn->conn_id = conn_id;
+
+	struct spx_conn_key spx_key = {
+		.bind_addr = bind_addr,
+		.conn_id = conn_id
+	};
+
+	do {
+		/* register the connection in the BPF maps */
+		struct bpf_spx_state spx_state = {
+			.remote_addr = conn_req->addr,
+			.local_addr = bind_addr,
+			.remote_id = SPX_CONN_ID_UNKNOWN,
+			.local_id = conn_id,
+			.remote_alloc_no = 0,
+			.local_alloc_no = 1,
+			.remote_expected_sequence = 0,
+			.local_current_sequence = 0,
+			.state = IPXW_MUX_SPX_NEW,
+			.prefix = e->iface->prefix
+		};
+		__u64 conn_fd64 = conn_fd;
+		int err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
+					&spx_key, sizeof(struct spx_conn_key),
+					&conn_fd64, sizeof(__u64),
+					BPF_NOEXIST);
+		if (err != 0) {
+			errno = -err;
+			perror("registering SPX connection in BPF map");
+			conn_rsp->err = errno;
+			break;
+		}
+		__u32 conn_fd32 = conn_fd;
+		err =
+			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_state,
+					&conn_fd32, sizeof(__u32), &spx_state,
+					sizeof(struct bpf_spx_state),
+					BPF_NOEXIST);
+		if (err != 0) {
+			errno = -err;
+			perror("registering SPX connection in BPF map");
+			conn_rsp->err = errno;
+			break;
+		}
+
+		/* save SPX connection */
+		HASH_ADD_INORDER(hh, e->ht_id_to_spx_conn, conn_id,
+				sizeof(__be16), conn, sort_spx_conn_by_id);
+
+		/* show the new SPX connection */
+		printf("SPX connection %04hx: "
+				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx -> "
+				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
+				ntohs(conn_id),
+				ntohl(bind_addr.net),
+				bind_addr.node[0], bind_addr.node[1],
+				bind_addr.node[2], bind_addr.node[3],
+				bind_addr.node[4], bind_addr.node[5],
+				ntohs(bind_addr.sock),
+				ntohl(conn_req->addr.net),
+				conn_req->addr.node[0], conn_req->addr.node[1],
+				conn_req->addr.node[2], conn_req->addr.node[3],
+				conn_req->addr.node[4], conn_req->addr.node[5],
+				ntohs(conn_req->addr.sock));
+
+		return true;
+	} while (0);
+
+	/* remove the SPX connection from the BPF maps */
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
+			&spx_key, sizeof(struct spx_conn_key), 0);
+	__u32 conn_fd32 = conn_fd;
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_state, &conn_fd32,
+			sizeof(__u32), 0);
+
+	free(conn);
+	return false;
 }
 
 static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
@@ -262,6 +414,7 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	e->pkt_type = bind_msg->pkt_type;
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
+	e->ht_id_to_spx_conn = NULL;
 	STAILQ_INIT(&e->conf_queue);
 
 	struct mc_bind_entry_key map_key_mc = {
@@ -379,6 +532,25 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	return false;
 }
 
+static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
+{
+	struct spx_conn_key conn_key = {
+		.bind_addr = {
+			.net = e->iface->addr.net,
+			.sock = e->ipx_sock
+		},
+		.conn_id = conn->conn_id
+	};
+	memcpy(conn_key.bind_addr.node, e->iface->addr.node,
+			IPX_ADDR_NODE_BYTES);
+
+	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
+			&conn_key, sizeof(struct spx_conn_key), 0);
+
+	HASH_DEL(e->ht_id_to_spx_conn, conn);
+	free(conn);
+}
+
 static void unbind_entry(struct bind_entry *e)
 {
 	assert(e != NULL);
@@ -388,6 +560,12 @@ static void unbind_entry(struct bind_entry *e)
 		struct ipxw_mux_msg *msg = STAILQ_FIRST(&e->conf_queue);
 		STAILQ_REMOVE_HEAD(&e->conf_queue, q_entry);
 		free(msg);
+	}
+
+	struct spx_connection *spx_conn;
+	struct spx_connection *spx_conn_tmp;
+	HASH_ITER(hh, e->ht_id_to_spx_conn, spx_conn, spx_conn_tmp) {
+		delete_spx_conn(e, spx_conn);
 	}
 
 	/* remove the bind entries from the BPF maps */
@@ -475,6 +653,26 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 			rsp_msg->getsockname.pkt_type_any =
 				be_conf->pkt_type_any;
 
+			break;
+		case IPXW_MUX_SPX_CONNECT:
+			/* we need the fd */
+			if (fd < 0) {
+				return false;
+			}
+
+			rsp_msg = calloc(1, sizeof(struct ipxw_mux_msg));
+			if (rsp_msg == NULL) {
+				close(fd);
+				return false;
+			}
+			rsp_msg->type = IPXW_MUX_SPX_CONNECT;
+
+			/* no error handling, if we get this far the response
+			 * message will contain the appropriate error */
+			record_spx_conn(be_conf, &(msg->spx_connect), fd,
+					&(rsp_msg->spx_connect));
+
+			close(fd);
 			break;
 		default:
 			return false;

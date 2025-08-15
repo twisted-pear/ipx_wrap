@@ -120,6 +120,11 @@ enum ipxw_mux_spx_connection_state {
 	// TODO
 };
 
+struct spx_conn_key {
+	struct ipx_addr bind_addr;
+	__be16 conn_id;
+} __attribute__((packed));
+
 struct bpf_spx_state {
 	struct ipx_addr remote_addr;
 	struct ipx_addr local_addr;
