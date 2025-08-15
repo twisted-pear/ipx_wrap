@@ -1066,6 +1066,7 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock)
 			case IPXW_MUX_UNBIND:
 			case IPXW_MUX_GETSOCKNAME:
 			case IPXW_MUX_SPX_CONNECT:
+			case IPXW_MUX_SPX_CLOSE:
 				return sizeof(msg);
 			default:
 				break;
@@ -1139,6 +1140,7 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 	switch (msg->type) {
 		case IPXW_MUX_UNBIND:
 		case IPXW_MUX_GETSOCKNAME:
+		case IPXW_MUX_SPX_CLOSE:
 			if (rcvd_msg_len != sizeof(struct ipxw_mux_msg)) {
 				errno = EINVAL;
 				return -1;
@@ -1233,7 +1235,7 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h)
 {
-	return (h.spx_sock < 0) || (h.last_known_state ==
+	return (h.spx_sock < 0) || (h.conf_sock < 0) || (h.last_known_state ==
 			IPXW_MUX_SPX_INVALID);
 }
 
@@ -1247,6 +1249,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 {
 	struct ipxw_mux_spx_handle ret;
 	ret.spx_sock = -1;
+	ret.conf_sock = -1;
 	ret.last_known_state = IPXW_MUX_SPX_INVALID;
 
 	int spx_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
@@ -1255,6 +1258,8 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 	}
 
 	ret.spx_sock = spx_sock;
+	ret.conf_sock = h.conf_sock;
+	ret.conn_id = SPX_CONN_ID_UNKNOWN;
 
 	struct ipxw_mux_msg connect_req;
 	connect_req.type = IPXW_MUX_SPX_CONNECT;
@@ -1283,6 +1288,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 			break;
 		}
 
+		ret.conn_id = connect_rsp.spx_connect.conn_id;
 		ret.last_known_state = IPXW_MUX_SPX_NEW;
 
 		/* bind the socket so that it can receive */
@@ -1332,24 +1338,48 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 			break;
 		}
 
+		/* fire off the first packet in the connection */
+		struct ipxw_mux_spx_msg spx_connect_req;
+		memset(&spx_connect_req, 0, sizeof(struct ipxw_mux_spx_msg));
+		ssize_t sent_len = send(spx_sock, &spx_connect_req,
+				sizeof(struct ipxw_mux_spx_msg), 0);
+		if (sent_len < 0) {
+			break;
+		}
+		if (sent_len != sizeof(struct ipxw_mux_spx_msg)) {
+			errno = ECOMM;
+			break;
+		}
+
+		ret.last_known_state = IPXW_MUX_SPX_CONN_REQ_SENT;
+
 		return ret;
 	} while (0);
 
 	ipxw_mux_spx_close(ret);
-
-	ret.spx_sock = -1;
-	ret.last_known_state = IPXW_MUX_SPX_INVALID;
 
 	return ret;
 }
 
 void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h)
 {
-	// TODO: inform the muxer about the closed socket
+	// TODO: send close packet, if connection is not _NEW?
+
+	if (!ipxw_mux_spx_handle_is_error(h)) {
+		/* no error handling, nothing that can be done */
+		struct ipxw_mux_msg close_msg;
+		close_msg.type = IPXW_MUX_SPX_CLOSE;
+		close_msg.spx_close.conn_id = h.conn_id;
+		send(h.conf_sock, &close_msg, sizeof(close_msg), MSG_DONTWAIT);
+	}
+
 	if (h.spx_sock >= 0) {
 		close(h.spx_sock);
 	}
 
 	h.spx_sock = -1;
+	h.conf_sock = -1; /* do not close config socket as it is used elsewhere
+			     too */
+	h.conn_id = SPX_CONN_ID_UNKNOWN;
 	h.last_known_state = IPXW_MUX_SPX_INVALID;
 }

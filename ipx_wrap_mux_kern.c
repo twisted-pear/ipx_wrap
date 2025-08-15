@@ -292,10 +292,10 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	spxh->src_conn_id = spx_state->local_id;
 	spxh->dst_conn_id = spx_state->remote_id;
 
-	spxh->seq_no = spx_state->local_current_sequence;
-	spxh->ack_no = spx_state->remote_expected_sequence;
+	spxh->seq_no = bpf_htons(spx_state->local_current_sequence);
+	spxh->ack_no = bpf_htons(spx_state->remote_expected_sequence);
 
-	spxh->alloc_no = spx_state->local_alloc_no;
+	spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 
 	switch (spx_state->state) {
 		case IPXW_MUX_SPX_INVALID:
@@ -323,6 +323,8 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 					sizeof(struct spxhdr)) {
 				return false;
 			}
+
+			spx_state->state = IPXW_MUX_SPX_CONN_REQ_SENT;
 
 			return true;
 		default:

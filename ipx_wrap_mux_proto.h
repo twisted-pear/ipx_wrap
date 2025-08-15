@@ -57,7 +57,20 @@ struct ipxw_mux_msg_spx_connect {
 		int spx_sock;
 		__u32 err;
 	};
-	__u16 reserved;
+	__be16 conn_id;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_spx_accept {
+	struct ipx_addr addr;
+	union {
+		int spx_sock;
+		__u32 err;
+	};
+	__be16 conn_id;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_spx_close {
+	__be16 conn_id;
 } __attribute__((packed));
 
 struct ipxw_mux_msg {
@@ -72,6 +85,8 @@ struct ipxw_mux_msg {
 				struct ipxw_mux_msg_conf conf;
 				struct ipxw_mux_msg_getsockname getsockname;
 				struct ipxw_mux_msg_spx_connect spx_connect;
+				struct ipxw_mux_msg_spx_accept spx_accept;
+				struct ipxw_mux_msg_spx_close spx_close;
 				struct ipxw_mux_msg_xmit xmit;
 				struct ipxw_mux_msg_recv recv;
 			};
@@ -212,6 +227,8 @@ _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
 
 struct ipxw_mux_spx_handle {
 	int spx_sock;
+	int conf_sock;
+	__be16 conn_id;
 	enum ipxw_mux_spx_connection_state last_known_state;
 };
 

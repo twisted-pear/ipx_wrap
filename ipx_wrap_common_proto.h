@@ -12,6 +12,8 @@ enum ipxw_mux_msg_type {
 	IPXW_MUX_CONF,
 	IPXW_MUX_GETSOCKNAME,
 	IPXW_MUX_SPX_CONNECT,
+	IPXW_MUX_SPX_ACCEPT,
+	IPXW_MUX_SPX_CLOSE,
 	IPXW_MUX_XMIT,
 	IPXW_MUX_RECV,
 	IPXW_MUX_MAX
@@ -116,7 +118,8 @@ _Static_assert(sizeof(struct ipxw_mux_spx_msg_min) == sizeof(struct ipxhdr) +
 
 enum ipxw_mux_spx_connection_state {
 	IPXW_MUX_SPX_INVALID = 0,
-	IPXW_MUX_SPX_NEW
+	IPXW_MUX_SPX_NEW,
+	IPXW_MUX_SPX_CONN_REQ_SENT,
 	// TODO
 };
 

@@ -324,6 +324,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 
 		/* reset the error code for the response */
 		conn_rsp->err = 0;
+		conn_rsp->conn_id = conn_id;
 
 		/* show the new SPX connection */
 		printf("SPX connection %04hx: "
@@ -552,6 +553,8 @@ static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
 
 	HASH_DEL(e->ht_id_to_spx_conn, conn);
 	free(conn);
+
+	printf("SPX connection %04hx closed\n", conn_key.conn_id);
 }
 
 static void unbind_entry(struct bind_entry *e)
@@ -677,12 +680,20 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 
 			close(fd);
 			break;
+		case IPXW_MUX_SPX_CLOSE:
+			struct spx_connection *conn = NULL;
+			HASH_FIND_INT(be_conf->ht_id_to_spx_conn,
+					&(msg->spx_close.conn_id), conn);
+			if (conn != NULL) {
+				delete_spx_conn(be_conf, conn);
+			}
+			return true;
 		default:
 			return false;
 	}
 
 	/* if we reach this code there must be a response message */
-	assert (rsp_msg != NULL);
+	assert(rsp_msg != NULL);
 
 	int epoll_fd = context->epoll_fd;
 	if (!queue_conf_msg(be_conf, rsp_msg, epoll_fd)) {
