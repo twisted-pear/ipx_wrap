@@ -247,7 +247,7 @@ static bool has_net_bind_service(struct ipxw_mux_handle h)
 
 static bool record_spx_conn(struct bind_entry *e, struct
 		ipxw_mux_msg_spx_connect *conn_req, int conn_fd, struct
-		ipxw_mux_msg_spx_connect *conn_rsp)
+		ipxw_mux_msg_spx_connect *conn_rsp, bool accepted)
 {
 	struct ipx_addr bind_addr = {
 		.net = e->iface->addr.net,
@@ -284,13 +284,15 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		struct bpf_spx_state spx_state = {
 			.remote_addr = conn_req->addr,
 			.local_addr = bind_addr,
-			.remote_id = SPX_CONN_ID_UNKNOWN,
+			.remote_id = (accepted ? conn_req->conn_id :
+					SPX_CONN_ID_UNKNOWN),
 			.local_id = conn_id,
 			.remote_alloc_no = 0,
 			.local_alloc_no = 1,
 			.remote_expected_sequence = 0,
 			.local_current_sequence = 0,
-			.state = IPXW_MUX_SPX_NEW,
+			.state = (accepted ? IPXW_MUX_SPX_CONN_ACCEPTED :
+					IPXW_MUX_SPX_NEW),
 			.prefix = e->iface->prefix
 		};
 		__u64 conn_fd64 = conn_fd;
@@ -637,6 +639,8 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 
 	/* check message type and prepare response */
 	struct ipxw_mux_msg *rsp_msg = NULL;
+	bool spx_accepted = false;
+	enum ipxw_mux_msg_type spx_rsp_type = IPXW_MUX_SPX_CONNECT;
 	switch (msg->type) {
 		case IPXW_MUX_UNBIND:
 			unbind_entry(be_conf);
@@ -660,6 +664,9 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 				be_conf->pkt_type_any;
 
 			break;
+		case IPXW_MUX_SPX_ACCEPT:
+			spx_accepted = true;
+			spx_rsp_type = IPXW_MUX_SPX_ACCEPT;
 		case IPXW_MUX_SPX_CONNECT:
 			/* we need the fd */
 			if (fd < 0) {
@@ -671,12 +678,12 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 				close(fd);
 				return false;
 			}
-			rsp_msg->type = IPXW_MUX_SPX_CONNECT;
+			rsp_msg->type = spx_rsp_type;
 
 			/* no error handling, if we get this far the response
 			 * message will contain the appropriate error */
 			record_spx_conn(be_conf, &(msg->spx_connect), fd,
-					&(rsp_msg->spx_connect));
+					&(rsp_msg->spx_connect), spx_accepted);
 
 			close(fd);
 			break;

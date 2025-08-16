@@ -235,8 +235,11 @@ struct ipxw_mux_spx_handle {
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
 int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);
 
+__be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg);
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr);
+struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
+		ipx_addr *remote_addr, __be16 remote_conn_id);
 enum ipxw_mux_spx_connection_state ipxw_mux_spx_maintain(struct
 		ipxw_mux_spx_handle h);
 void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);

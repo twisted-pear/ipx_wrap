@@ -305,7 +305,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 				SPX_CC_ACK_REQUIRED;
 
 			/* no special type allowed in connection request */
-			if (datastream_type != 0x00) {
+			if (datastream_type != SPX_DS_NONE) {
 				return false;
 			}
 
@@ -325,6 +325,29 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 			}
 
 			spx_state->state = IPXW_MUX_SPX_CONN_REQ_SENT;
+
+			return true;
+		case IPXW_MUX_SPX_CONN_ACCEPTED:
+			spxh->connection_control = SPX_CC_SYSTEM_PKT;
+
+			/* no special type allowed in connection request */
+			if (datastream_type != SPX_DS_NONE) {
+				return false;
+			}
+
+			/* some sanity checks */
+			if (bpf_ntohs(spxh->seq_no) != 0 ||
+					bpf_ntohs(spxh->ack_no) != 0) {
+				return false;
+			}
+
+			/* no data allowed in connection request */
+			if (bpf_ntohs(ipxh->pktlen) != sizeof(struct ipxhdr) +
+					sizeof(struct spxhdr)) {
+				return false;
+			}
+
+			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
 
 			return true;
 		default:

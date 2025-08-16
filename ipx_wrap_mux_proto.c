@@ -678,6 +678,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		case IPXW_MUX_GETSOCKNAME:
 			break;
 		case IPXW_MUX_SPX_CONNECT:
+		case IPXW_MUX_SPX_ACCEPT:
 			msgh.msg_control = ctrl_msg.buf;
 			msgh.msg_controllen = sizeof(ctrl_msg.buf);
 
@@ -758,6 +759,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	switch (conf_out->type) {
 		case IPXW_MUX_GETSOCKNAME:
 		case IPXW_MUX_SPX_CONNECT:
+		case IPXW_MUX_SPX_ACCEPT:
 			break;
 		default:
 			errno = EOPNOTSUPP;
@@ -1066,6 +1068,7 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock)
 			case IPXW_MUX_UNBIND:
 			case IPXW_MUX_GETSOCKNAME:
 			case IPXW_MUX_SPX_CONNECT:
+			case IPXW_MUX_SPX_ACCEPT:
 			case IPXW_MUX_SPX_CLOSE:
 				return sizeof(msg);
 			default:
@@ -1148,6 +1151,7 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 
 			break;
 		case IPXW_MUX_SPX_CONNECT:
+		case IPXW_MUX_SPX_ACCEPT:
 			/* get ctrl msg */
 			struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
 
@@ -1207,6 +1211,7 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 	switch (msg->type) {
 		case IPXW_MUX_GETSOCKNAME:
 		case IPXW_MUX_SPX_CONNECT:
+		case IPXW_MUX_SPX_ACCEPT:
 			break;
 		default:
 			errno = ENOTSUP;
@@ -1244,12 +1249,13 @@ int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h)
 	return h.spx_sock;
 }
 
-struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
-		struct ipx_addr *daddr)
+static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
+		h)
 {
 	struct ipxw_mux_spx_handle ret;
 	ret.spx_sock = -1;
 	ret.conf_sock = -1;
+	ret.conn_id = SPX_CONN_ID_UNKNOWN;
 	ret.last_known_state = IPXW_MUX_SPX_INVALID;
 
 	int spx_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
@@ -1259,12 +1265,101 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 
 	ret.spx_sock = spx_sock;
 	ret.conf_sock = h.conf_sock;
-	ret.conn_id = SPX_CONN_ID_UNKNOWN;
+
+	return ret;
+}
+
+static bool ipxw_mux_spx_bind_and_connect(struct ipxw_mux_spx_handle h, __be32
+		prefix, struct ipx_addr *saddr, struct ipx_addr *daddr)
+{
+	/* bind the socket so that it can receive */
+	struct sockaddr_in6 dummy_bind = {
+		.sin6_family = AF_INET6,
+		.sin6_port = 0,
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	struct ipv6_eui64_addr *dummy_addr = (struct ipv6_eui64_addr *)
+		&(dummy_bind.sin6_addr);
+	dummy_addr->prefix = prefix;
+	dummy_addr->ipx_net = saddr->net;
+	memcpy(dummy_addr->ipx_node_fst, saddr->node, IPX_ADDR_NODE_BYTES / 2);
+	dummy_addr->fffe = htons(0xfffe);
+	memcpy(dummy_addr->ipx_node_snd, &(saddr->node[3]), IPX_ADDR_NODE_BYTES
+			/ 2);
+
+	if (bind(h.spx_sock, (struct sockaddr *) &dummy_bind,
+				sizeof(dummy_bind)) < 0) {
+		return false;
+	}
+
+	/* connect the socket so that sending without a specific
+	 * destination address works */
+	struct sockaddr_in6 dummy_connect = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(IPX_IN_IPV6_PORT),
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	dummy_addr = (struct ipv6_eui64_addr *) &(dummy_connect.sin6_addr);
+	dummy_addr->prefix = prefix;
+	dummy_addr->ipx_net = daddr->net;
+	memcpy(dummy_addr->ipx_node_fst, daddr->node, IPX_ADDR_NODE_BYTES / 2);
+	dummy_addr->fffe = htons(0xfffe);
+	memcpy(dummy_addr->ipx_node_snd, &(daddr->node[3]), IPX_ADDR_NODE_BYTES
+			/ 2);
+
+	if (connect(h.spx_sock, (struct sockaddr *) &dummy_connect,
+				sizeof(dummy_connect)) < 0) {
+		return false;
+	}
+
+	return true;
+}
+
+__be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg)
+{
+	if (msg->type != IPXW_MUX_RECV) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (msg->recv.pkt_type != SPX_PKT_TYPE) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (msg->recv.is_bcast) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (msg->recv.data_len != sizeof(struct spxhdr)) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+
+	struct spxhdr *spxh = (struct spxhdr *) msg->data;
+	if ((spxh->connection_control & SPX_CC_MASK_SPX) != (SPX_CC_SYSTEM_PKT
+				| SPX_CC_ACK_REQUIRED)) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (spxh->datastream_type != SPX_DS_NONE) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (spxh->dst_conn_id != SPX_CONN_ID_UNKNOWN) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (ntohs(spxh->seq_no) != 0 || ntohs(spxh->ack_no) != 0) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+
+	return spxh->src_conn_id;
+}
+
+struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
+		struct ipx_addr *daddr)
+{
+	struct ipxw_mux_spx_handle ret = ipxw_mux_spx_mk_handle(h);
 
 	struct ipxw_mux_msg connect_req;
 	connect_req.type = IPXW_MUX_SPX_CONNECT;
 	connect_req.spx_connect.addr = *daddr;
-	connect_req.spx_connect.spx_sock = spx_sock;
+	connect_req.spx_connect.spx_sock = ret.spx_sock;
+	connect_req.spx_connect.conn_id = SPX_CONN_ID_UNKNOWN;
 
 	struct ipxw_mux_msg connect_rsp;
 	connect_rsp.type = IPXW_MUX_CONF;
@@ -1291,57 +1386,16 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		ret.conn_id = connect_rsp.spx_connect.conn_id;
 		ret.last_known_state = IPXW_MUX_SPX_NEW;
 
-		/* bind the socket so that it can receive */
-		struct sockaddr_in6 dummy_bind = {
-			.sin6_family = AF_INET6,
-			.sin6_port = 0,
-			.sin6_flowinfo = 0,
-			.sin6_scope_id = 0
-		};
-		struct ipv6_eui64_addr *dummy_addr = (struct ipv6_eui64_addr *)
-			&(dummy_bind.sin6_addr);
-		dummy_addr->prefix = h.prefix;
-		dummy_addr->ipx_net = connect_rsp.spx_connect.addr.net;
-		memcpy(dummy_addr->ipx_node_fst,
-				connect_rsp.spx_connect.addr.node,
-				IPX_ADDR_NODE_BYTES / 2);
-		dummy_addr->fffe = htons(0xfffe);
-		memcpy(dummy_addr->ipx_node_snd,
-				&(connect_rsp.spx_connect.addr.node[3]),
-				IPX_ADDR_NODE_BYTES / 2);
-
-		if (bind(spx_sock, (struct sockaddr *) &dummy_bind,
-					sizeof(dummy_bind)) < 0) {
-			break;
-		}
-
-		/* connect the socket so that sending without a specific
-		 * destination address works */
-		struct sockaddr_in6 dummy_connect = {
-			.sin6_family = AF_INET6,
-			.sin6_port = htons(IPX_IN_IPV6_PORT),
-			.sin6_flowinfo = 0,
-			.sin6_scope_id = 0
-		};
-		dummy_addr = (struct ipv6_eui64_addr *)
-			&(dummy_connect.sin6_addr);
-		dummy_addr->prefix = h.prefix;
-		dummy_addr->ipx_net = daddr->net;
-		memcpy(dummy_addr->ipx_node_fst, daddr->node,
-				IPX_ADDR_NODE_BYTES / 2);
-		dummy_addr->fffe = htons(0xfffe);
-		memcpy(dummy_addr->ipx_node_snd, &(daddr->node[3]),
-				IPX_ADDR_NODE_BYTES / 2);
-
-		if (connect(spx_sock, (struct sockaddr *) &dummy_connect,
-					sizeof(dummy_connect)) < 0) {
+		if (!ipxw_mux_spx_bind_and_connect(ret, h.prefix,
+					&(connect_rsp.spx_connect.addr),
+					daddr)) {
 			break;
 		}
 
 		/* fire off the first packet in the connection */
 		struct ipxw_mux_spx_msg spx_connect_req;
 		memset(&spx_connect_req, 0, sizeof(struct ipxw_mux_spx_msg));
-		ssize_t sent_len = send(spx_sock, &spx_connect_req,
+		ssize_t sent_len = send(ret.spx_sock, &spx_connect_req,
 				sizeof(struct ipxw_mux_spx_msg), 0);
 		if (sent_len < 0) {
 			break;
@@ -1352,6 +1406,71 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		}
 
 		ret.last_known_state = IPXW_MUX_SPX_CONN_REQ_SENT;
+
+		return ret;
+	} while (0);
+
+	ipxw_mux_spx_close(ret);
+
+	return ret;
+}
+
+struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
+		ipx_addr *remote_addr, __be16 remote_conn_id)
+{
+	struct ipxw_mux_spx_handle ret = ipxw_mux_spx_mk_handle(h);
+
+	struct ipxw_mux_msg accept_req;
+	accept_req.type = IPXW_MUX_SPX_ACCEPT;
+	accept_req.spx_accept.addr = *remote_addr;
+	accept_req.spx_accept.spx_sock = ret.spx_sock;
+	accept_req.spx_accept.conn_id = remote_conn_id;
+
+	struct ipxw_mux_msg accept_rsp;
+	accept_rsp.type = IPXW_MUX_CONF;
+	accept_rsp.conf.data_len = 0;
+
+	ssize_t rcvd_len = ipxw_mux_send_recv_conf_msg(h, &accept_req,
+			&accept_rsp);
+
+	do {
+		if (rcvd_len < 0) {
+			break;
+		}
+
+		if (accept_rsp.type != IPXW_MUX_SPX_ACCEPT) {
+			errno = EINVAL;
+			break;
+		}
+
+		if (accept_rsp.spx_accept.err != 0) {
+			errno = accept_rsp.spx_accept.err;
+			break;
+		}
+
+		ret.conn_id = accept_rsp.spx_accept.conn_id;
+		ret.last_known_state = IPXW_MUX_SPX_CONN_ACCEPTED;
+
+		if (!ipxw_mux_spx_bind_and_connect(ret, h.prefix,
+					&(accept_rsp.spx_accept.addr),
+					remote_addr)) {
+			break;
+		}
+
+		/* fire off the first packet in the connection */
+		struct ipxw_mux_spx_msg spx_accept_rsp;
+		memset(&spx_accept_rsp, 0, sizeof(struct ipxw_mux_spx_msg));
+		ssize_t sent_len = send(ret.spx_sock, &spx_accept_rsp,
+				sizeof(struct ipxw_mux_spx_msg), 0);
+		if (sent_len < 0) {
+			break;
+		}
+		if (sent_len != sizeof(struct ipxw_mux_spx_msg)) {
+			errno = ECOMM;
+			break;
+		}
+
+		ret.last_known_state = IPXW_MUX_SPX_CONN_ESTABLISHED;
 
 		return ret;
 	} while (0);

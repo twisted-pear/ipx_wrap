@@ -78,6 +78,10 @@ struct bpf_bind_entry {
 #define SPX_CC_ACK_REQUIRED 0x40
 #define SPX_CC_SYSTEM_PKT 0x80
 
+#define SPX_CC_MASK_SPX 0xF0
+#define SPX_CC_MASK_SPXII 0x0D
+
+#define SPX_DS_NONE 0x00
 #define SPX_DS_END_OF_CONN 0xFE
 #define SPX_DS_END_OF_CONN_ACK 0xFF
 
@@ -120,6 +124,8 @@ enum ipxw_mux_spx_connection_state {
 	IPXW_MUX_SPX_INVALID = 0,
 	IPXW_MUX_SPX_NEW,
 	IPXW_MUX_SPX_CONN_REQ_SENT,
+	IPXW_MUX_SPX_CONN_ACCEPTED,
+	IPXW_MUX_SPX_CONN_ESTABLISHED,
 	// TODO
 };
 
