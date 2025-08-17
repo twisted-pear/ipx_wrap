@@ -131,6 +131,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			BPF_FIB_LOOKUP_SKIP_NEIGH);
 	if (fib_res == 0) {
 		cb.is_for_local = false;
+		return TC_ACT_UNSPEC;
 	} else if (fib_res == BPF_FIB_LKUP_RET_NOT_FWDED) {
 		cb.is_for_local = true;
 	} else {
@@ -138,12 +139,14 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
+	/* packet is destined for the local machine */
+
 	struct ipxw_mux_msg_min *mux_msg = cur.pos;
 	struct ipxhdr *ipxh = &(mux_msg->ipxh);
 
 	struct bpf_bind_entry *e = NULL;
 
-	if (cb.is_bcast && cb.is_for_local) {
+	if (cb.is_bcast) {
 		struct mc_bind_entry_key key = {
 			.ifidx = skb->ingress_ifindex,
 			.dst_sock = ipxh->daddr.sock
@@ -157,20 +160,12 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 				&(ipxh->daddr));
 	}
 
-	/* no bindging entry */
+	/* no binding entry */
 	if (e == NULL) {
-		/* if packet was for the local machine, drop it */
-		if (cb.is_for_local) {
-			bpf_printk("no bind entry for local machine");
-			return TC_ACT_SHOT;
-		}
-
-		/* else handle the packet normally (i.e. route it) */
-		bpf_printk("packet is not for this machine, handle normally");
-		return TC_ACT_UNSPEC;
+		/* packet was for the local machine, drop it */
+		bpf_printk("no bind entry for local machine");
+		return TC_ACT_SHOT;
 	}
-
-	/* packet is destined for the local machine */
 
 	if (cb.is_bcast && !e->recv_bcast) {
 		bpf_printk("not interested in broadcast packet");
