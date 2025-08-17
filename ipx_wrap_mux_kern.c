@@ -64,6 +64,78 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } ipx_wrap_mux_spx_state SEC(".maps");
 
+enum ipx_wrap_spx_ingress_verdict {
+	SPX_DROP = 0,
+	SPX_PASS,
+	SPX_PASS_AND_ACK,
+	SPX_PASS_AND_END_ACK
+};
+
+static __always_inline enum ipx_wrap_spx_ingress_verdict
+ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
+		ipxw_mux_spx_msg_min *spx_msg)
+{
+	struct spxhdr *spxh = &(spx_msg->spxh);
+
+	bool end_of_msg = (spxh->connection_control & SPX_CC_END_OF_MSG) != 0;
+	bool attention = (spxh->connection_control & SPX_CC_ATTENTION) != 0;
+	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
+		0;
+	bool system_pkt = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
+	__u8 datastream_type = spxh->datastream_type;
+
+	/* check if the packet fits with our connection state */
+	if (spxh->dst_conn_id != spx_state->local_id) {
+		return SPX_DROP;
+	}
+	if (spx_state->remote_id != SPX_CONN_ID_UNKNOWN && spxh->src_conn_id !=
+			spx_state->remote_id) {
+		return SPX_DROP;
+	}
+	if (bpf_ntohs(spxh->seq_no) != spx_state->remote_expected_sequence) {
+		return SPX_DROP;
+	}
+	/* closing the connection is always permitted */
+	if (datastream_type == SPX_DS_END_OF_CONN) {
+		spx_state->state = IPXW_MUX_SPX_INVALID;
+		return (ack_required ? SPX_PASS_AND_END_ACK : SPX_PASS);
+	}
+
+	switch (spx_state->state) {
+		case IPXW_MUX_SPX_INVALID:
+		case IPXW_MUX_SPX_NEW:
+		case IPXW_MUX_SPX_CONN_ACCEPTED:
+			/* don't accept any SPX packets in this state */
+			return SPX_DROP;
+
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
+			/* this should be the very first packet the remote
+			 * station sends */
+			if (bpf_ntohs(spxh->ack_no) != 0) {
+				return SPX_DROP;
+			}
+			/* allowed/required connection control flags */
+			if (end_of_msg || attention || ack_required ||
+					!system_pkt) {
+				return SPX_DROP;
+			}
+
+			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
+			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
+
+			return SPX_PASS;
+
+		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			// TODO
+
+		default:
+			return SPX_DROP;
+	}
+
+	return SPX_DROP;
+}
+
 #define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
 
 SEC("tc/ingress")
@@ -118,6 +190,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	/* determine if the packet is for the local machine */
 	struct bpf_fib_lookup fib_params;
+	__builtin_memset(&fib_params, 0, sizeof(fib_params));
 	fib_params.family = AF_INET6;
 	__builtin_memcpy(fib_params.ipv6_dst, &(ip6h->daddr),
 			sizeof(fib_params.ipv6_dst));
@@ -142,6 +215,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	/* packet is destined for the local machine */
 
 	struct ipxw_mux_msg_min *mux_msg = cur.pos;
+	struct ipxw_mux_spx_msg_min *spx_msg = cur.pos;
 	struct ipxhdr *ipxh = &(mux_msg->ipxh);
 
 	struct bpf_bind_entry *e = NULL;
@@ -178,20 +252,57 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	struct bpf_sock *sock = bpf_map_lookup_elem(&ipx_wrap_mux_sock_ingress,
-			&(e->addr));
+	struct bpf_sock *sock = NULL;
+	struct bpf_spx_state *spx_state = NULL;
+	struct spxhdr *spxh = NULL;
+
+	/* if the packet is an SPX packet, see if it belongs to an existing
+	 * connection */
+	if (!cb.is_bcast && ipxh->type == SPX_PKT_TYPE) {
+		if (cur.pos + sizeof(struct ipxhdr) + sizeof(struct spxhdr) <=
+				data_end) {
+			spxh = cur.pos + sizeof(struct ipxhdr);
+			struct spx_conn_key conn_key = {
+				.bind_addr = e->addr,
+				.conn_id = spxh->dst_conn_id
+			};
+			sock = bpf_map_lookup_elem(
+					&ipx_wrap_mux_spx_sock_ingress,
+					&conn_key);
+		}
+
+		/* packet belongs to an SPX connection */
+		if (sock != NULL) {
+			spx_state = bpf_sk_storage_get(&ipx_wrap_mux_spx_state,
+					sock, NULL, 0);
+
+			/* weirdly no SPX state exists, handle the packet like
+			 * a normal IPX packet instead */
+			if (spx_state == NULL) {
+				bpf_sk_release(sock);
+				sock = NULL;
+			}
+		}
+	}
+
+	/* not an SPX packet or no SPX state, handle like a normal IPX packet
+	 * instead */
+	if (sock == NULL) {
+		sock = bpf_map_lookup_elem(&ipx_wrap_mux_sock_ingress,
+				&(e->addr));
+	}
+
 	if (sock == NULL) {
 		bpf_printk("no socket found");
 		return TC_ACT_SHOT;
 	}
 
 	long err = bpf_sk_assign(skb, sock, 0);
+	bpf_sk_release(sock);
 	if (err != 0) {
 		bpf_printk("failed to assign socket: %d", err);
-		bpf_sk_release(sock);
 		return TC_ACT_SHOT;
 	}
-	bpf_sk_release(sock);
 
 	bpf_printk("socket assigned!");
 
@@ -252,11 +363,23 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	enum ipx_wrap_spx_ingress_verdict spx_verdict = SPX_DROP;
+	if (spx_state != NULL) {
+		spx_verdict = ipx_wrap_spx_check_ingress(spx_state, spx_msg);
+		if (spx_verdict == SPX_DROP) {
+			return TC_ACT_SHOT;
+		}
+	}
+
 	/* insert the modified checksum */
 	__u32 csum_ofs = ((void *) &(udph->check)) - data;
 	if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
 			!= 0) {
 		return TC_ACT_SHOT;
+	}
+
+	if (spx_state != NULL) {
+		// TODO: if we want to send an SPX ack packet, do so here
 	}
 
 	bpf_printk("packet demuxed!");

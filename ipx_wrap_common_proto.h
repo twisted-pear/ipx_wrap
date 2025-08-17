@@ -126,7 +126,7 @@ enum ipxw_mux_spx_connection_state {
 	IPXW_MUX_SPX_CONN_REQ_SENT,
 	IPXW_MUX_SPX_CONN_ACCEPTED,
 	IPXW_MUX_SPX_CONN_ESTABLISHED,
-	// TODO
+	IPXW_MUX_SPX_CONN_WAITING_FOR_ACK
 };
 
 struct spx_conn_key {

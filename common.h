@@ -62,8 +62,10 @@ struct bpf_cb_info {
 		struct {
 			__u16 mark;
 			__u16 is_bcast:1,
-			     is_for_local:1,
-			     reserved:14;
+			      is_for_local:1,
+			      is_spx_ack:1,
+			      is_spx_end_of_conn_ack:1,
+			      reserved:12;
 		} __attribute__((packed));
 	};
 } __attribute__((packed));
