@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+// TODO: handle SPX seq/alloc no overflow
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -120,12 +121,29 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 				return SPX_DROP;
 			}
 
+			spx_state->remote_id = spxh->src_conn_id;
 			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
 
-			return SPX_PASS;
+			return (ack_required ? SPX_PASS_AND_ACK : SPX_PASS);
 
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+			/* we have none of our own packets "in flight", so the
+			 * remote station should not expect any */
+			if (bpf_ntohs(spxh->ack_no) !=
+					spx_state->local_current_sequence + 1)
+			{
+				return SPX_DROP;
+			}
+			/* can only accept packets up to our alloc number */
+			if (bpf_ntohs(spxh->seq_no) >
+					spx_state->local_alloc_no) {
+				return SPX_DROP;
+			}
+
+			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
+			return (ack_required ? SPX_PASS_AND_ACK : SPX_PASS);
+
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
 			// TODO
 
@@ -369,6 +387,38 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		if (spx_verdict == SPX_DROP) {
 			return TC_ACT_SHOT;
 		}
+
+		/* rewrite the SPX header to an SPX message */
+		bool end_of_msg = (spxh->connection_control &
+				SPX_CC_END_OF_MSG) != 0;
+		bool attention = (spxh->connection_control & SPX_CC_ATTENTION)
+			!= 0;
+		bool system_pkt = (spxh->connection_control &
+				SPX_CC_SYSTEM_PKT) != 0;
+		__u8 datastream_type = spxh->datastream_type;
+
+		/* remove SPX header from checksum */
+		csum_diff = bpf_csum_diff((__be32*) spxh, sizeof(struct
+					spxhdr), NULL, 0, csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+
+		/* clear the header so we can rewrite into an SPX msg */
+		__builtin_memset(spxh, 0, sizeof(struct spxhdr));
+
+		/* rewrite to SPX msg */
+		spx_msg->end_of_msg = end_of_msg;
+		spx_msg->attention = attention;
+		spx_msg->system = system_pkt;
+		spx_msg->datastream_type = datastream_type;
+
+		/* add SPX msg to checksum */
+		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
+				sizeof(struct spxhdr), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
 	}
 
 	/* insert the modified checksum */
@@ -380,6 +430,9 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	if (spx_state != NULL) {
 		// TODO: if we want to send an SPX ack packet, do so here
+		if (spx_verdict == SPX_PASS_AND_ACK) {
+		} else if (spx_verdict == SPX_PASS_AND_END_ACK) {
+		}
 	}
 
 	bpf_printk("packet demuxed!");
@@ -388,13 +441,20 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 }
 
 static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
-		*spx_state, struct ipxw_mux_spx_msg_min *spx_msg)
+		*spx_state, struct ipxw_mux_spx_msg_min *spx_msg, struct
+		bpf_cb_info *cb_info)
 {
 	struct ipxhdr *ipxh = &(spx_msg->ipxh);
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
 	bool end_of_msg = spx_msg->end_of_msg;
 	bool attention = spx_msg->attention;
+	bool system = false;
+	/* only acks are allowed as system packets outside of the handshake */
+	if (cb_info->mark == IPX_TO_IPV6UDP_REINJECT_MARK) {
+		system = cb_info->is_spx_ack ||
+			cb_info->is_spx_end_of_conn_ack;
+	}
 	__u8 datastream_type = spx_msg->datastream_type;
 
 	spxh->connection_control = 0;
@@ -403,6 +463,9 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	}
 	if (attention) {
 		spxh->connection_control |= SPX_CC_ATTENTION;
+	}
+	if (system) {
+		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
 	}
 
 	spxh->datastream_type = datastream_type;
@@ -415,9 +478,14 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 
+	// TODO: properly handle reflected ACKs (shorten them, fill in the
+	// fields etc)
 	switch (spx_state->state) {
 		case IPXW_MUX_SPX_INVALID:
 			return false;
+
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
+			/* retrying a connection is allowed */
 		case IPXW_MUX_SPX_NEW:
 			spxh->connection_control = SPX_CC_SYSTEM_PKT |
 				SPX_CC_ACK_REQUIRED;
@@ -445,6 +513,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 			spx_state->state = IPXW_MUX_SPX_CONN_REQ_SENT;
 
 			return true;
+
 		case IPXW_MUX_SPX_CONN_ACCEPTED:
 			spxh->connection_control = SPX_CC_SYSTEM_PKT;
 
@@ -468,6 +537,10 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
 
 			return true;
+
+		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			// TODO
 		default:
 			return false;
 	};
@@ -637,10 +710,17 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 
+		struct bpf_cb_info cb_info;
+		cb_info.cb[0] = skb->cb[0];
+		cb_info.cb[1] = skb->cb[1];
+		cb_info.cb[2] = skb->cb[2];
+		cb_info.cb[3] = skb->cb[3];
+		cb_info.cb[4] = skb->cb[4];
+
 		struct ipxw_mux_spx_msg_min *spx_msg = cur.pos;
 
 		/* prepare the SPX header */
-		if (!ipx_wrap_spx_egress(spx_state, spx_msg)) {
+		if (!ipx_wrap_spx_egress(spx_state, spx_msg, &cb_info)) {
 			return TC_ACT_SHOT;
 		}
 	}

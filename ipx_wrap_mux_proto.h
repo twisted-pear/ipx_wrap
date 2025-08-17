@@ -214,7 +214,8 @@ struct ipxw_mux_spx_msg {
 		struct {
 			__u8 end_of_msg:1,
 			     attention:1,
-			     reserved:6;
+			     system:1,
+			     reserved:5;
 			__u8 datastream_type;
 			STAILQ_ENTRY(ipxw_mux_spx_msg) q_entry;
 		} __attribute__((packed));
