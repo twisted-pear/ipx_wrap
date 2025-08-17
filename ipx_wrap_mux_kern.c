@@ -124,6 +124,7 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			spx_state->remote_id = spxh->src_conn_id;
 			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
+			bpf_printk("entered established state");
 
 			return (ack_required ? SPX_PASS_AND_ACK : SPX_PASS);
 
@@ -131,8 +132,7 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			/* we have none of our own packets "in flight", so the
 			 * remote station should not expect any */
 			if (bpf_ntohs(spxh->ack_no) !=
-					spx_state->local_current_sequence + 1)
-			{
+					spx_state->local_current_sequence) {
 				return SPX_DROP;
 			}
 			/* can only accept packets up to our alloc number */
@@ -141,11 +141,52 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 				return SPX_DROP;
 			}
 
+			bpf_printk("got pkt in established state");
+
+			/* update the remote's alloc number */
 			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
-			return (ack_required ? SPX_PASS_AND_ACK : SPX_PASS);
+
+			/* update the state */
+			if (!system_pkt) {
+				spx_state->remote_expected_sequence += 1;
+				spx_state->local_alloc_no += 1;
+			}
+
+			/* send an ACK if required */
+			if (ack_required) {
+				return SPX_PASS_AND_ACK;
+			}
+
+			return SPX_PASS;
 
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
-			// TODO
+			/* can only accept packets up to our alloc number */
+			if (bpf_ntohs(spxh->seq_no) >
+					spx_state->local_alloc_no) {
+				return SPX_DROP;
+			}
+
+			/* must be an ACK */
+			if (end_of_msg || attention || ack_required ||
+					!system_pkt) {
+				return SPX_DROP;
+			}
+
+			/* we want an ACK and it has to ACK the last packet we
+			 * sent */
+			if (bpf_ntohs(spxh->ack_no) !=
+					spx_state->local_current_sequence) {
+				return SPX_DROP;
+			}
+
+			/* update the remote's alloc number */
+			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
+
+			/* increment sequence number after receiving an ACK */
+			spx_state->local_current_sequence += 1;
+
+			/* retun to established state */
+			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
 
 		default:
 			return SPX_DROP;
@@ -266,7 +307,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	/* check packet type */
 	if (ipxh->type != e->pkt_type && !e->pkt_type_any) {
-		bpf_printk("packet type mismatch");
+		bpf_printk("packet type mismatch: %02x", ipxh->type);
 		return TC_ACT_SHOT;
 	}
 
@@ -421,22 +462,105 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		}
 	}
 
-	/* insert the modified checksum */
+	bpf_printk("packet demuxed!");
+
 	__u32 csum_ofs = ((void *) &(udph->check)) - data;
+	if (spx_state == NULL || (spx_verdict != SPX_PASS_AND_ACK &&
+				spx_verdict != SPX_PASS_AND_END_ACK)) {
+		/* insert the modified checksum */
+		if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
+				!= 0) {
+			return TC_ACT_SHOT;
+		}
+
+		return TC_ACT_OK;
+	}
+
+	/* we have to generate an ACK, we do this by rewriting the packet and
+	 * cloning it, the clone is sent to the appropriate egress interface,
+	 * then the original is restored and handled normally */
+
+	bpf_printk("preparing SPX ack");
+
+	/* FIB lookup for the ACK */
+	__builtin_memset(&fib_params, 0, sizeof(fib_params));
+	fib_params.family = AF_INET6;
+	__builtin_memcpy(fib_params.ipv6_dst, &(ip6h->saddr),
+			sizeof(fib_params.ipv6_dst));
+	__builtin_memcpy(fib_params.ipv6_src, &(ip6h->daddr),
+			sizeof(fib_params.ipv6_src));
+	fib_params.l4_protocol = IPPROTO_UDP;
+	fib_params.sport = bpf_htons(IPX_IN_IPV6_PORT);
+	fib_params.dport = bpf_htons(IPX_IN_IPV6_PORT);
+	fib_params.ifindex = skb->ingress_ifindex;
+	fib_res = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), 0);
+	// TODO: check how this works for packets from and to the local machine
+	if (fib_res != 0) {
+		bpf_printk("cannot route ACK");
+		return TC_ACT_SHOT;
+	}
+
+	/* save ETH and IPv6 headers */
+	struct ethhdr eth_bak = *eth;
+	struct ipv6hdr ip6h_bak = *ip6h;
+
+	/* update ETH and IPv6 headers */
+	__builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
+	__builtin_memcpy(&(ip6h->saddr), fib_params.ipv6_src,
+			sizeof(fib_params.ipv6_src));
+	__builtin_memcpy(&(ip6h->daddr), fib_params.ipv6_dst,
+			sizeof(fib_params.ipv6_dst));
+
+	/* update cb */
+	struct bpf_cb_info cb_new = {
+		.mark = IPX_SPX_REFLECTED_ACK,
+		.is_bcast = false,
+		.is_for_local = false,
+		.is_spx_ack = (spx_verdict == SPX_PASS_AND_ACK),
+		.is_spx_end_of_conn_ack = (spx_verdict == SPX_PASS_AND_END_ACK),
+		.spx_src = e->addr,
+		.spx_conn_id = spx_state->local_id
+	};
+	skb->cb[0] = cb_new.cb[0];
+	skb->cb[1] = cb_new.cb[1];
+	skb->cb[2] = cb_new.cb[2];
+	skb->cb[3] = cb_new.cb[3];
+	skb->cb[4] = cb_new.cb[4];
+
+	/* clone redirect the thusly generated ACK*/
+	if (bpf_clone_redirect(skb, fib_params.ifindex, 0) != 0) {
+		bpf_printk("clone redir of ACK failed");
+		return TC_ACT_SHOT;
+	}
+
+	/* restore ETH and IPv6 headers */
+	if (bpf_skb_store_bytes(skb, 0, &eth_bak, sizeof(struct ethhdr), 0) !=
+			0) {
+		bpf_printk("failed to restore ETH header");
+		return TC_ACT_SHOT;
+	}
+	if (bpf_skb_store_bytes(skb, sizeof(struct ethhdr), &ip6h_bak,
+				sizeof(struct ipv6hdr), 0) != 0) {
+		bpf_printk("failed to restore IPv6 header");
+		return TC_ACT_SHOT;
+	}
+
+	/* restore cb */
+	skb->cb[0] = cb.cb[0];
+	skb->cb[1] = cb.cb[1];
+	skb->cb[2] = cb.cb[2];
+	skb->cb[3] = cb.cb[3];
+	skb->cb[4] = cb.cb[4];
+
+	/* update the checksum for the original packet, the ACK has a wrong
+	 * checksum but it is never verified */
 	if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
 			!= 0) {
 		return TC_ACT_SHOT;
 	}
 
-	if (spx_state != NULL) {
-		// TODO: if we want to send an SPX ack packet, do so here
-		if (spx_verdict == SPX_PASS_AND_ACK) {
-		} else if (spx_verdict == SPX_PASS_AND_END_ACK) {
-		}
-	}
-
-	bpf_printk("packet demuxed!");
-
+	bpf_printk("sent ack and recvd SPX pkt");
 	return TC_ACT_OK;
 }
 
@@ -449,26 +573,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	bool end_of_msg = spx_msg->end_of_msg;
 	bool attention = spx_msg->attention;
-	bool system = false;
-	/* only acks are allowed as system packets outside of the handshake */
-	if (cb_info->mark == IPX_TO_IPV6UDP_REINJECT_MARK) {
-		system = cb_info->is_spx_ack ||
-			cb_info->is_spx_end_of_conn_ack;
-	}
 	__u8 datastream_type = spx_msg->datastream_type;
-
-	spxh->connection_control = 0;
-	if (end_of_msg) {
-		spxh->connection_control |= SPX_CC_END_OF_MSG;
-	}
-	if (attention) {
-		spxh->connection_control |= SPX_CC_ATTENTION;
-	}
-	if (system) {
-		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
-	}
-
-	spxh->datastream_type = datastream_type;
 
 	spxh->src_conn_id = spx_state->local_id;
 	spxh->dst_conn_id = spx_state->remote_id;
@@ -478,8 +583,32 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 
-	// TODO: properly handle reflected ACKs (shorten them, fill in the
-	// fields etc)
+	/* always allow ACKs and end-of-connection ACKs to go out */
+	if (cb_info->mark == IPX_SPX_REFLECTED_ACK) {
+		if (cb_info->is_spx_ack) {
+			spxh->connection_control = SPX_CC_SYSTEM_PKT;
+			spxh->datastream_type = SPX_DS_NONE;
+			return true;
+		}
+		if (cb_info->is_spx_end_of_conn_ack) {
+			spxh->connection_control = SPX_CC_SYSTEM_PKT;
+			spxh->datastream_type = SPX_DS_END_OF_CONN_ACK;
+			return true;
+		}
+
+		return false;
+	}
+
+	spxh->datastream_type = datastream_type;
+
+	spxh->connection_control = 0;
+	if (end_of_msg) {
+		spxh->connection_control |= SPX_CC_END_OF_MSG;
+	}
+	if (attention) {
+		spxh->connection_control |= SPX_CC_ATTENTION;
+	}
+
 	switch (spx_state->state) {
 		case IPXW_MUX_SPX_INVALID:
 			return false;
@@ -539,8 +668,20 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 			return true;
 
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+			/* cannot send packets since the remote is not ready
+			 * for it */
+			if (spx_state->remote_alloc_no <=
+					spx_state->local_current_sequence) {
+				return false;
+			}
+
+			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
+			spx_state->state = IPXW_MUX_SPX_CONN_WAITING_FOR_ACK;
+			return true;
+
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
-			// TODO
+			return false;
+
 		default:
 			return false;
 	};
@@ -548,16 +689,49 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	return false;
 }
 
+static __always_inline struct bpf_sock *get_client_sock_from_spx_conn(struct
+		bpf_cb_info *cb)
+{
+	if (cb->mark != IPX_SPX_REFLECTED_ACK) {
+		return NULL;
+	}
+
+	struct spx_conn_key conn_key = {
+		.bind_addr = cb->spx_src,
+		.conn_id = cb->spx_conn_id
+	};
+
+	struct bpf_sock *ret = bpf_map_lookup_elem(
+			&ipx_wrap_mux_spx_sock_ingress, &conn_key);
+	return ret;
+}
+
 SEC("tc/egress")
 int ipx_wrap_mux(struct __sk_buff *skb)
 {
 	bpf_printk("mux hit");
 
+	struct bpf_cb_info cb_info;
+	cb_info.cb[0] = skb->cb[0];
+	cb_info.cb[1] = skb->cb[1];
+	cb_info.cb[2] = skb->cb[2];
+	cb_info.cb[3] = skb->cb[3];
+	cb_info.cb[4] = skb->cb[4];
+
+	bool client_sock_must_release = false;
 	struct bpf_sock *client_sock = skb->sk;
+	/* no client socket, see if we have an SPX connection in cb */
+	if (client_sock == NULL) {
+		client_sock = get_client_sock_from_spx_conn(&cb_info);
+		client_sock_must_release = true;
+	}
+
 	/* no source socket, do nothing */
 	if (client_sock == NULL) {
 		return TC_ACT_UNSPEC;
 	}
+
+	bpf_printk("have egress sock");
 
 	struct ipx_addr *bind_addr = NULL;
 	struct bpf_spx_state *spx_state = NULL;
@@ -570,8 +744,14 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 		/* not one of our client sockets, do nothing */
 		if (spx_state == NULL) {
+			if (client_sock_must_release) {
+				bpf_sk_release(client_sock);
+			}
 			return TC_ACT_UNSPEC;
 		}
+	}
+	if (client_sock_must_release) {
+		bpf_sk_release(client_sock);
 	}
 
 	struct bpf_bind_entry spx_bind_entry;
@@ -710,18 +890,30 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 
-		struct bpf_cb_info cb_info;
-		cb_info.cb[0] = skb->cb[0];
-		cb_info.cb[1] = skb->cb[1];
-		cb_info.cb[2] = skb->cb[2];
-		cb_info.cb[3] = skb->cb[3];
-		cb_info.cb[4] = skb->cb[4];
-
 		struct ipxw_mux_spx_msg_min *spx_msg = cur.pos;
 
 		/* prepare the SPX header */
 		if (!ipx_wrap_spx_egress(spx_state, spx_msg, &cb_info)) {
 			return TC_ACT_SHOT;
+		}
+
+		/* cut the ACK packet down to size */
+		if (cb_info.mark == IPX_SPX_REFLECTED_ACK) {
+			bpf_printk("egress reflect");
+			size_t ack_len = sizeof(struct ipxhdr) + sizeof(struct
+					spxhdr);
+			ipx_msg->pktlen = bpf_htons(ack_len);
+
+			ack_len += sizeof(struct udphdr);
+			udph->len = bpf_htons(ack_len);
+			ip6h->payload_len = bpf_htons(ack_len);
+
+			ack_len += sizeof(struct ipv6hdr) + sizeof(struct
+					ethhdr);
+
+			if (bpf_skb_change_tail(skb, ack_len, 0) != 0) {
+				return TC_ACT_SHOT;
+			}
 		}
 	}
 

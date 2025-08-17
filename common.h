@@ -66,6 +66,8 @@ struct bpf_cb_info {
 			      is_spx_ack:1,
 			      is_spx_end_of_conn_ack:1,
 			      reserved:12;
+			struct ipx_addr spx_src;
+			__be16 spx_conn_id;
 		} __attribute__((packed));
 	};
 } __attribute__((packed));
@@ -75,5 +77,6 @@ _Static_assert(sizeof(struct bpf_cb_info) == (sizeof(__u32) * 5),
 
 #define IPX_TO_IPV6_REINJECT_MARK 0x4774
 #define IPX_TO_IPV6UDP_REINJECT_MARK 0x7447
+#define IPX_SPX_REFLECTED_ACK 0xdead
 
 #endif /* __COMMON_H__ */

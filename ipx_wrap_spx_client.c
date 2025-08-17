@@ -34,6 +34,9 @@ int main(int argc, char **argv)
 			bind_addr.ipx_node_snd,
 			sizeof(bind_addr.ipx_node_snd));
 	bind_msg.bind.addr.sock = htons(bind_sock);
+	bind_msg.bind.pkt_type = SPX_PKT_TYPE;
+	bind_msg.bind.pkt_type_any = false;
+	bind_msg.bind.recv_bcast = false;
 
 	struct ipxw_mux_handle h = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(h)) {
