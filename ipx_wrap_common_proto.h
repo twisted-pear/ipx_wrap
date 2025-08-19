@@ -105,7 +105,8 @@ struct ipxw_mux_spx_msg_min {
 			__u8 end_of_msg:1,
 			     attention:1,
 			     system:1,
-			     reserved:5;
+			     keep_alive:1,
+			     reserved:4;
 			__u8 datastream_type;
 		} __attribute__((packed));
 	};

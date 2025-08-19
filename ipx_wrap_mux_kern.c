@@ -68,6 +68,7 @@ struct {
 enum ipx_wrap_spx_ingress_verdict {
 	SPX_DROP = 0,
 	SPX_PASS,
+	SPX_DROP_AND_ACK,
 	SPX_PASS_AND_ACK,
 	SPX_PASS_AND_END_ACK
 };
@@ -93,7 +94,15 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			spx_state->remote_id) {
 		return SPX_DROP;
 	}
+	/* handle the loss of ACK packets that we send by also acking data
+	 * packets with a seq no lower than the current epxected one (but not
+	 * letting them go through to user space) */
+	if (bpf_ntohs(spxh->seq_no) < (spx_state->remote_expected_sequence &&
+				ack_required)) {
+		return SPX_DROP_AND_ACK;
+	}
 	if (bpf_ntohs(spxh->seq_no) != spx_state->remote_expected_sequence) {
+		bpf_printk("remote seq mismatch");
 		return SPX_DROP;
 	}
 	/* closing the connection is always permitted */
@@ -126,18 +135,20 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
 			bpf_printk("entered established state");
 
-			return (ack_required ? SPX_PASS_AND_ACK : SPX_PASS);
+			return SPX_PASS;
 
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 			/* we have none of our own packets "in flight", so the
 			 * remote station should not expect any */
 			if (bpf_ntohs(spxh->ack_no) !=
 					spx_state->local_current_sequence) {
+				bpf_printk("local seq mismatch");
 				return SPX_DROP;
 			}
 			/* can only accept packets up to our alloc number */
 			if (bpf_ntohs(spxh->seq_no) >
 					spx_state->local_alloc_no) {
+				bpf_printk("local alloc mismatch");
 				return SPX_DROP;
 			}
 
@@ -187,6 +198,8 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 
 			/* retun to established state */
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
+
+			return SPX_PASS;
 
 		default:
 			return SPX_DROP;
@@ -465,8 +478,9 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	bpf_printk("packet demuxed!");
 
 	__u32 csum_ofs = ((void *) &(udph->check)) - data;
-	if (spx_state == NULL || (spx_verdict != SPX_PASS_AND_ACK &&
-				spx_verdict != SPX_PASS_AND_END_ACK)) {
+	if (spx_state == NULL || (spx_verdict != SPX_DROP_AND_ACK &&
+				spx_verdict != SPX_PASS_AND_ACK && spx_verdict
+				!= SPX_PASS_AND_END_ACK)) {
 		/* insert the modified checksum */
 		if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
 				!= 0) {
@@ -517,7 +531,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		.mark = IPX_SPX_REFLECTED_ACK,
 		.is_bcast = false,
 		.is_for_local = false,
-		.is_spx_ack = (spx_verdict == SPX_PASS_AND_ACK),
+		.is_spx_ack = (spx_verdict == SPX_PASS_AND_ACK || spx_verdict
+				== SPX_DROP_AND_ACK),
 		.is_spx_end_of_conn_ack = (spx_verdict == SPX_PASS_AND_END_ACK),
 		.spx_src = e->addr,
 		.spx_conn_id = spx_state->local_id
@@ -531,6 +546,11 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	/* clone redirect the thusly generated ACK*/
 	if (bpf_clone_redirect(skb, fib_params.ifindex, 0) != 0) {
 		bpf_printk("clone redir of ACK failed");
+		return TC_ACT_SHOT;
+	}
+
+	/* if we only need to ACK, stop here */
+	if (spx_verdict == SPX_DROP_AND_ACK) {
 		return TC_ACT_SHOT;
 	}
 
@@ -561,6 +581,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	bpf_printk("sent ack and recvd SPX pkt");
+
 	return TC_ACT_OK;
 }
 
@@ -573,6 +594,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	bool end_of_msg = spx_msg->end_of_msg;
 	bool attention = spx_msg->attention;
+	bool keep_alive = spx_msg->keep_alive;
 	__u8 datastream_type = spx_msg->datastream_type;
 
 	spxh->src_conn_id = spx_state->local_id;
@@ -657,7 +679,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 				return false;
 			}
 
-			/* no data allowed in connection request */
+			/* no data allowed in connection reply */
 			if (bpf_ntohs(ipxh->pktlen) != sizeof(struct ipxhdr) +
 					sizeof(struct spxhdr)) {
 				return false;
@@ -675,11 +697,20 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 				return false;
 			}
 
+			/* allow sending keep alive packets without changing
+			 * state */
+			if (keep_alive) {
+				spxh->connection_control = SPX_CC_SYSTEM_PKT;
+				spxh->datastream_type = SPX_DS_NONE;
+				return true;
+			}
+
 			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
 			spx_state->state = IPXW_MUX_SPX_CONN_WAITING_FOR_ACK;
 			return true;
 
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			// TODO: allow retransmits here
 			return false;
 
 		default:

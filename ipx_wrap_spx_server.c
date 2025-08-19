@@ -81,6 +81,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("connection 0x%04hx accepted\n", remote_conn_id);
+	sleep(60);
 
 	free(data_msg);
 	ipxw_mux_unbind(h);

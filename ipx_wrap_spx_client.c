@@ -64,7 +64,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("connection initialized\n");
-	sleep(10);
+	sleep(60);
 
 	ipxw_mux_spx_close(spxh);
 	ipxw_mux_unbind(h);
