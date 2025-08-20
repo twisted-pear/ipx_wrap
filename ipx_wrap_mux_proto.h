@@ -204,11 +204,11 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 
 #define SPX_ABORT_TMO_TICKS 1500
 #define SPX_VERIFY_TMO_TICKS 108
-#define SPX_ACK_TMO_TICKS 54
+#define SPX_KEEP_ALIVE_TMO_TICKS 54
 #define SPX_RETRY_COUNT 10
 
 struct ipxw_mux_spx_msg {
-	struct ipxhdr ipxh;
+	struct ipxw_mux_msg mux_msg;
 	union {
 		struct spxhdr spxh;
 		struct {
@@ -216,9 +216,11 @@ struct ipxw_mux_spx_msg {
 			     attention:1,
 			     system:1,
 			     keep_alive:1,
-			     reserved:4;
+			     verify:1,
+			     reserved:3;
 			__u8 datastream_type;
-			STAILQ_ENTRY(ipxw_mux_spx_msg) q_entry;
+			__u16 local_current_sequence;
+			__u16 remote_alloc_no;
 		} __attribute__((packed));
 	};
 	__u8 data[0];
@@ -227,11 +229,12 @@ struct ipxw_mux_spx_msg {
 _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr), "ipxw_mux_spx_msg too large");
 
+struct ipxw_mux_spx_handle_state;
+
 struct ipxw_mux_spx_handle {
 	int spx_sock;
 	int conf_sock;
-	__be16 conn_id;
-	enum ipxw_mux_spx_connection_state last_known_state;
+	struct ipxw_mux_spx_handle_state *last_known_state;
 };
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
@@ -244,23 +247,24 @@ __be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg);
 struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 		ipx_addr *remote_addr, __be16 remote_conn_id);
 
-void ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
+bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
 
 void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);
 
 /* write message to SPX socket, may block if the caller did not check if the *
  * data socket is writeable and block is true */
-ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, const struct
-		ipxw_mux_spx_msg *msg, bool block);
+ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
+		*msg, size_t data_len, bool block);
 
 /* get the length of the received message from the header, may block */
 ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block);
 
-/* get a message from the data socket, assumes msg points to a buffer of at
+/* get a message from the SPX socket, assumes msg points to a buffer of at
  * least sizeof(ipxw_mux_spx_msg) bytes and that the maximum SPX payload length
- * that can be received is stored in msg->data_len, may block if the caller did
- * not check if data is available and block is true */
+ * that can be received is passed in data_len, may block if the caller did not
+ * check if data is available and block is true, returns 0 if the received
+ * message was a system message */
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
-		ipxw_mux_spx_msg *msg, bool block);
+		ipxw_mux_spx_msg *msg, size_t data_len, bool block);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

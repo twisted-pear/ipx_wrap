@@ -106,8 +106,11 @@ struct ipxw_mux_spx_msg_min {
 			     attention:1,
 			     system:1,
 			     keep_alive:1,
-			     reserved:4;
+			     verify:1,
+			     reserved:3;
 			__u8 datastream_type;
+			__u16 local_current_sequence;
+			__u16 remote_alloc_no;
 		} __attribute__((packed));
 	};
 	__u8 data[0];

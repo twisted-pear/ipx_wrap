@@ -466,6 +466,9 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		spx_msg->attention = attention;
 		spx_msg->system = system_pkt;
 		spx_msg->datastream_type = datastream_type;
+		spx_msg->local_current_sequence =
+			spx_state->local_current_sequence;
+		spx_msg->remote_alloc_no = spx_state->remote_alloc_no;
 
 		/* add SPX msg to checksum */
 		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
@@ -595,6 +598,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	bool end_of_msg = spx_msg->end_of_msg;
 	bool attention = spx_msg->attention;
 	bool keep_alive = spx_msg->keep_alive;
+	bool verify = spx_msg->verify;
 	__u8 datastream_type = spx_msg->datastream_type;
 
 	spxh->src_conn_id = spx_state->local_id;
@@ -697,6 +701,15 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 				return false;
 			}
 
+			/* allow sending connection verification requests
+			 * without changing state */
+			if (verify) {
+				spxh->connection_control = SPX_CC_SYSTEM_PKT |
+					SPX_CC_ACK_REQUIRED;
+				spxh->datastream_type = SPX_DS_NONE;
+				return true;
+			}
+
 			/* allow sending keep alive packets without changing
 			 * state */
 			if (keep_alive) {
@@ -710,8 +723,9 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 			return true;
 
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
-			// TODO: allow retransmits here
-			return false;
+			/* allow retransmits */
+			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
+			return true;
 
 		default:
 			return false;
