@@ -938,7 +938,7 @@ bool service_reload(void *ctx)
 static _Noreturn void usage(void)
 {
 	printf("Usage: ipx_wrap_sapd <32-bit hex prefix> <cfg file>\n");
-	exit(1);
+	exit(SRVC_ERR_USAGE);
 }
 
 int main(int argc, char **argv)

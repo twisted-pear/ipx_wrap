@@ -29,6 +29,21 @@
 // unbind
 // TODO: clean up sk_storage maps somehow too
 
+enum muxer_error_codes {
+	MUX_ERR_OK = 0,
+	MUX_ERR_USAGE,
+	MUX_ERR_BPF,
+	MUX_ERR_EPOLL_FD,
+	MUX_ERR_TMR_FD,
+	MUX_ERR_CTRL_FD,
+	MUX_ERR_IFACE_SCAN,
+	MUX_ERR_SIG_HANDLER,
+	MUX_ERR_EPOLL_WAIT,
+	MUX_ERR_CTRL_FAILURE,
+	MUX_ERR_TMR_FAILURE,
+	MUX_ERR_MAX
+};
+
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct if_entry;
@@ -1160,7 +1175,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
-		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 4);
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, MUX_ERR_EPOLL_FD);
 	}
 
 	struct epoll_event ev = {
@@ -1171,7 +1186,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
 		perror("registering ctrl socket for event polling");
-		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 5);
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock, MUX_ERR_CTRL_FD);
 	}
 
 	/* ignore SIGHUP, keep handler for SIGINT, SIGQUIT and SIGTERM */
@@ -1182,13 +1197,15 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
 			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
 		perror("resetting signal handler");
-		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 6);
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock,
+				MUX_ERR_SIG_HANDLER);
 	}
 	memset(&sig_act, 0, sizeof(sig_act));
 	sig_act.sa_handler = SIG_IGN;
 	if (sigaction(SIGHUP, &sig_act, NULL) < 0) {
 		perror("resetting signal handler");
-		cleanup_and_exit(iface, epoll_fd, ctrl_sock, 6);
+		cleanup_and_exit(iface, epoll_fd, ctrl_sock,
+				MUX_ERR_SIG_HANDLER);
 	}
 
 	ssize_t err;
@@ -1201,7 +1218,8 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 			}
 
 			perror("event polling");
-			cleanup_and_exit(iface, epoll_fd, ctrl_sock, 7);
+			cleanup_and_exit(iface, epoll_fd, ctrl_sock,
+					MUX_ERR_EPOLL_WAIT);
 		}
 
 		int i;
@@ -1212,7 +1230,8 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
 					cleanup_and_exit(iface, epoll_fd,
-							ctrl_sock, 8);
+							ctrl_sock,
+							MUX_ERR_CTRL_FAILURE);
 				}
 
 				/* incoming bind msg */
@@ -1275,7 +1294,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 		}
 	}
 
-	cleanup_and_exit(iface, epoll_fd, ctrl_sock, 0);
+	cleanup_and_exit(iface, epoll_fd, ctrl_sock, MUX_ERR_OK);
 }
 
 static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
@@ -1546,7 +1565,7 @@ static bool setup_bpf(void)
 static _Noreturn void usage()
 {
 	printf("Usage: ipx_wrap_mux <32-bit hex prefix>\n");
-	exit(1);
+	exit(MUX_ERR_USAGE);
 }
 
 int main(int argc, char **argv)
@@ -1565,32 +1584,33 @@ int main(int argc, char **argv)
 
 	if (!setup_bpf()) {
 		perror("load BPF kernel objects");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 2);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_BPF);
 	}
 
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 3);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_EPOLL_FD);
 	}
 
 	tmr_fd = setup_timer(epoll_fd);
 	if (tmr_fd < 0) {
 		perror("creating interface rescan timer");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 4);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_TMR_FD);
 	}
 
 	/* scan all interfaces for addresses within the prefix, we manage those
 	 * interfaces */
 	if (!scan_interfaces(prefix, epoll_fd, ctrl_sock)) {
 		perror("adding sub-process");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 5);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock,
+				MUX_ERR_IFACE_SCAN);
 	}
 
 	ctrl_sock = ipxw_mux_mk_ctrl_sock();
 	if (ctrl_sock < 0) {
 		perror("creating ctrl socket");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 6);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_CTRL_FD);
 	}
 
 	struct epoll_event ev = {
@@ -1601,7 +1621,7 @@ int main(int argc, char **argv)
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ctrl_sock, &ev) < 0) {
 		perror("registering ctrl socket for event polling");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 7);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_CTRL_FD);
 	}
 
 	struct sigaction sig_act;
@@ -1612,7 +1632,8 @@ int main(int argc, char **argv)
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
 			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
 		perror("setting signal handler");
-		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 8);
+		cleanup_and_exit(NULL, epoll_fd, ctrl_sock,
+				MUX_ERR_SIG_HANDLER);
 	}
 
 	ssize_t err;
@@ -1622,7 +1643,8 @@ int main(int argc, char **argv)
 		if (rescan_now) {
 			if (!scan_interfaces(prefix, epoll_fd, ctrl_sock)) {
 				perror("adding sub-process");
-				cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 9);
+				cleanup_and_exit(NULL, epoll_fd, ctrl_sock,
+						MUX_ERR_IFACE_SCAN);
 			}
 			rescan_now = false;
 		}
@@ -1634,7 +1656,8 @@ int main(int argc, char **argv)
 			}
 
 			perror("event polling");
-			cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 10);
+			cleanup_and_exit(NULL, epoll_fd, ctrl_sock,
+					MUX_ERR_EPOLL_WAIT);
 		}
 
 		int i;
@@ -1645,7 +1668,8 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "control socket error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 11);
+							ctrl_sock,
+							MUX_ERR_CTRL_FAILURE);
 				}
 
 				/* incoming bind msg */
@@ -1663,7 +1687,8 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "timer fd error\n");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 12);
+							ctrl_sock,
+							MUX_ERR_TMR_FAILURE);
 				}
 
 				/* rescan the interfaces */
@@ -1671,7 +1696,8 @@ int main(int argc, char **argv)
 							ctrl_sock)) {
 					perror("adding sub-process");
 					cleanup_and_exit(NULL, epoll_fd,
-							ctrl_sock, 13);
+							ctrl_sock,
+							MUX_ERR_IFACE_SCAN);
 				}
 
 				/* consume all expirations */
@@ -1698,7 +1724,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	cleanup_and_exit(NULL, epoll_fd, ctrl_sock, 0);
+	cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_OK);
 
 	return 0;
 }

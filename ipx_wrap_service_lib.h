@@ -19,6 +19,7 @@
 
 enum service_general_error_codes {
 	SRVC_ERR_OK = 0,
+	SRVC_ERR_USAGE,
 	SRVC_ERR_EPOLL_FD,
 	SRVC_ERR_TMR_FD,
 	SRVC_ERR_IFACE_SCAN,
