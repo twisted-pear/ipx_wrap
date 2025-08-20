@@ -1,9 +1,60 @@
+#include <assert.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 
 #include "ipx_wrap_mux_proto.h"
+
+#define MAX_EPOLL_EVENTS 64
+
+static bool keep_going = true;
+
+static void signal_handler(int signal)
+{
+	switch (signal) {
+		case SIGINT:
+		case SIGQUIT:
+		case SIGTERM:
+			keep_going = false;
+			break;
+		default:
+			assert(0);
+	}
+}
+
+static int setup_timer(int epoll_fd)
+{
+	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
+	if (tmr < 0) {
+		return -1;
+	}
+
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+		.data = {
+			.fd = tmr
+		}
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, tmr, &ev) < 0) {
+		close(tmr);
+		return -1;
+	}
+
+	struct itimerspec tmr_spec = {
+		.it_interval = { .tv_nsec = TICKS_MS * 1000 * 1000 },
+		.it_value = { .tv_nsec = TICKS_MS * 1000 * 1000 }
+	};
+	if (timerfd_settime(tmr, 0, &tmr_spec, NULL) < 0) {
+		close(tmr);
+		return -1;
+	}
+
+	return tmr;
+}
 
 int main(int argc, char **argv)
 {
@@ -64,7 +115,135 @@ int main(int argc, char **argv)
 	}
 
 	printf("connection initialized\n");
-	sleep(60);
+
+	int epoll_fd = epoll_create1(0);
+	if (epoll_fd < 0) {
+		perror("create epoll fd");
+		ipxw_mux_handle_close(h);
+		return 5;
+	}
+
+	int tmr_fd = setup_timer(epoll_fd);
+	if (tmr_fd < 0) {
+		perror("creating connection maintenance timer");
+		ipxw_mux_handle_close(h);
+		return 6;
+	}
+
+	struct epoll_event ev = {
+		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+		.data = {
+			.fd = ipxw_mux_spx_handle_sock(spxh)
+		}
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_spx_handle_sock(spxh),
+				&ev) < 0) {
+		perror("registering SPX socket for event polling");
+		ipxw_mux_handle_close(h);
+		return 7;
+	}
+
+	struct sigaction sig_act;
+	memset(&sig_act, 0, sizeof(sig_act));
+	sig_act.sa_handler = signal_handler;
+	if (sigaction(SIGINT, &sig_act, NULL) < 0
+			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
+			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
+		perror("setting signal handler");
+		ipxw_mux_handle_close(h);
+		return 8;
+	}
+
+	struct epoll_event evs[MAX_EPOLL_EVENTS];
+	while (keep_going) {
+		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
+		if (n_fds < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+
+			perror("event polling");
+			ipxw_mux_handle_close(h);
+			return 9;
+		}
+
+		int i;
+		for (i = 0; i < n_fds; i++) {
+			/* timer fd */
+			if (evs[i].data.fd == tmr_fd) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "timer fd error\n");
+					ipxw_mux_handle_close(h);
+					return 10;
+				}
+
+				/* maintain the connection */
+				if (!ipxw_mux_spx_maintain(spxh)) {
+					fprintf(stderr, "failed to maintain "
+							"connection\n");
+					ipxw_mux_handle_close(h);
+					return 11;
+				}
+
+				/* consume all expirations */
+				__u64 dummy;
+				read(tmr_fd, &dummy, sizeof(dummy));
+
+				continue;
+			}
+
+			/* the connection socket */
+
+			/* something went wrong */
+			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+				fprintf(stderr, "connection socket error\n");
+				ipxw_mux_handle_close(h);
+				return 12;
+			}
+
+			/* message received */
+			ssize_t expected_msg_len =
+				ipxw_mux_spx_peek_recvd_len(spxh, false);
+			if (expected_msg_len < 0) {
+				perror("receive peek error");
+				ipxw_mux_handle_close(h);
+				return 13;
+			}
+
+			struct ipxw_mux_spx_msg *msg = calloc(1,
+					expected_msg_len);
+			if (msg == NULL) {
+				perror("allocating message memory");
+				ipxw_mux_handle_close(h);
+				return 14;
+			}
+
+			ssize_t rcvd_len = ipxw_mux_spx_get_recvd(spxh, msg,
+					expected_msg_len - sizeof(struct
+						ipxw_mux_spx_msg), false);
+			if (rcvd_len < 0) {
+				perror("receive error");
+				ipxw_mux_handle_close(h);
+				return 15;
+			}
+
+			/* system msg */
+			if (rcvd_len == 0) {
+				continue;
+			}
+
+			printf("Received message :");
+			int j;
+			for (j = 0; j < rcvd_len - sizeof(struct
+						ipxw_mux_spx_msg); j++) {
+				printf("%02x ", msg->data[j]);
+			}
+			printf("\n");
+		}
+	}
+
+	printf("closing connection\n");
 
 	ipxw_mux_spx_close(spxh);
 	ipxw_mux_unbind(h);

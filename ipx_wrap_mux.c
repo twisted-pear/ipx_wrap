@@ -288,7 +288,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 					SPX_CONN_ID_UNKNOWN),
 			.local_id = conn_id,
 			.remote_alloc_no = 0,
-			.local_alloc_no = 1,
+			.local_alloc_no = 0,
 			.remote_expected_sequence = 0,
 			.local_current_sequence = 0,
 			.state = (accepted ? IPXW_MUX_SPX_CONN_ACCEPTED :

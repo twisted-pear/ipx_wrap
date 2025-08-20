@@ -1382,7 +1382,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr)
 {
 	struct ipxw_mux_spx_handle ret = ipxw_mux_spx_mk_handle(h);
-	if (ipxw_mux_spx_handle_is_error(ret)) {
+	if (ret.last_known_state == NULL || ret.spx_sock < 0) {
 		return ret;
 	}
 
@@ -1450,7 +1450,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 		ipx_addr *remote_addr, __be16 remote_conn_id)
 {
 	struct ipxw_mux_spx_handle ret = ipxw_mux_spx_mk_handle(h);
-	if (ipxw_mux_spx_handle_is_error(ret)) {
+	if (ret.last_known_state == NULL || ret.spx_sock < 0) {
 		return ret;
 	}
 
@@ -1574,6 +1574,11 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 			}
 
 			return true;
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
+			/* retransmit connection request if necessary */
+			h.last_known_state->last_msg_data_len = 0;
+			memset(&(h.last_known_state->last_msg), 0,
+					sizeof(struct ipxw_mux_spx_msg));
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
 			/* give up on the connection after too many retransmit
 			 * attempts */
@@ -1603,7 +1608,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 				// unrecoverable errors
 				return true;
 			}
-			if (sent_len != sizeof(struct ipxw_mux_spx_msg)) {
+			if (sent_len != last_msg_len) {
 				return true;
 			}
 
@@ -1611,6 +1616,8 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 			h.last_known_state->last_tx_attempts += 1;
 			h.last_known_state->ticks_since_last_keep_alive = 0;
 			h.last_known_state->ticks_since_last_verify = 0;
+
+			return true;
 
 		default:
 			break;
@@ -1663,7 +1670,7 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 		errno = ENOBUFS;
 		return -1;
 	}
-	if (h.last_known_state->remote_alloc_no <=
+	if (h.last_known_state->remote_alloc_no <
 			h.last_known_state->local_current_sequence) {
 		errno = ENOBUFS;
 		return -1;
@@ -1716,11 +1723,14 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 
 ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 {
-	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED &&
-			h.last_known_state->state !=
-			IPXW_MUX_SPX_CONN_WAITING_FOR_ACK) {
-		errno = EINVAL;
-		return -1;
+	switch (h.last_known_state->state) {
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
+		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			break;
+		default:
+			errno = EINVAL;
+			return -1;
 	}
 
 	struct ipxw_mux_spx_msg msg;
@@ -1769,11 +1779,14 @@ ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		ipxw_mux_spx_msg *msg, size_t data_len, bool block)
 {
-	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED &&
-			h.last_known_state->state !=
-			IPXW_MUX_SPX_CONN_WAITING_FOR_ACK) {
-		errno = EINVAL;
-		return -1;
+	switch (h.last_known_state->state) {
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
+		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			break;
+		default:
+			errno = EINVAL;
+			return -1;
 	}
 
 	if (data_len > SPX_MAX_DATA_LEN_WO_SIZNG) {
@@ -1810,6 +1823,7 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 	switch (h.last_known_state->state) {
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 			break;
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
 			/* this acks the last sent msg */
 			h.last_known_state->state =

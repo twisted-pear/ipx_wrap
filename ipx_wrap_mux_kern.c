@@ -696,7 +696,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 			/* cannot send packets since the remote is not ready
 			 * for it */
-			if (spx_state->remote_alloc_no <=
+			if (spx_state->remote_alloc_no <
 					spx_state->local_current_sequence) {
 				return false;
 			}
