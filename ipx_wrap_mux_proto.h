@@ -251,6 +251,10 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
 
 void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);
 
+/* check if the connection is in a state where transmitting messages is
+ * possible */
+bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h);
+
 /* write message to SPX socket, may block if the caller did not check if the *
  * data socket is writeable and block is true */
 ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg

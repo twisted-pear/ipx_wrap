@@ -1662,6 +1662,20 @@ void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h)
 	}
 }
 
+bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
+{
+	/* not ready to send or remote not ready to receive */
+	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED) {
+		return false;
+	}
+	if (h.last_known_state->remote_alloc_no <
+			h.last_known_state->local_current_sequence) {
+		return false;
+	}
+
+	return true;
+}
+
 ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 		*msg, size_t data_len, bool block)
 {
@@ -1717,6 +1731,8 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	/* sending data counts as both keep alive and verify */
 	h.last_known_state->ticks_since_last_keep_alive = 0;
 	h.last_known_state->ticks_since_last_verify = 0;
+
+	h.last_known_state->state = IPXW_MUX_SPX_CONN_WAITING_FOR_ACK;
 
 	return sent_len;
 }

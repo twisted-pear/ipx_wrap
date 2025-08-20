@@ -186,7 +186,8 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			/* we want an ACK and it has to ACK the last packet we
 			 * sent */
 			if (bpf_ntohs(spxh->ack_no) !=
-					spx_state->local_current_sequence) {
+					spx_state->local_current_sequence + 1)
+			{
 				return SPX_DROP;
 			}
 

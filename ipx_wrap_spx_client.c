@@ -143,6 +143,13 @@ int main(int argc, char **argv)
 		return 7;
 	}
 
+	ev.data.fd = fileno(stdin);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(stdin), &ev) < 0) {
+		perror("registering stdin for event polling");
+		ipxw_mux_handle_close(h);
+		return 8;
+	}
+
 	struct sigaction sig_act;
 	memset(&sig_act, 0, sizeof(sig_act));
 	sig_act.sa_handler = signal_handler;
@@ -151,8 +158,13 @@ int main(int argc, char **argv)
 			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
 		perror("setting signal handler");
 		ipxw_mux_handle_close(h);
-		return 8;
+		return 9;
 	}
+
+	struct __attribute__((packed)) {
+		struct ipxw_mux_spx_msg msg;
+		char data[SPX_MAX_DATA_LEN_WO_SIZNG];
+	} spx_msg;
 
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
 	while (keep_going) {
@@ -164,7 +176,7 @@ int main(int argc, char **argv)
 
 			perror("event polling");
 			ipxw_mux_handle_close(h);
-			return 9;
+			return 10;
 		}
 
 		int i;
@@ -175,7 +187,7 @@ int main(int argc, char **argv)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					fprintf(stderr, "timer fd error\n");
 					ipxw_mux_handle_close(h);
-					return 10;
+					return 11;
 				}
 
 				/* maintain the connection */
@@ -183,12 +195,46 @@ int main(int argc, char **argv)
 					fprintf(stderr, "failed to maintain "
 							"connection\n");
 					ipxw_mux_handle_close(h);
-					return 11;
+					return 12;
 				}
 
 				/* consume all expirations */
 				__u64 dummy;
 				read(tmr_fd, &dummy, sizeof(dummy));
+
+				continue;
+			}
+
+			/* stdin */
+			if (evs[i].data.fd == fileno(stdin)) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "stdin error\n");
+					ipxw_mux_handle_close(h);
+					return 13;
+				}
+
+				if (!ipxw_mux_spx_xmit_ready(spxh)) {
+					continue;
+				}
+
+				if (fgets(spx_msg.data,
+							SPX_MAX_DATA_LEN_WO_SIZNG,
+							stdin) == NULL) {
+					fprintf(stderr, "stdin EOF\n");
+					ipxw_mux_handle_close(h);
+					return 14;
+				}
+
+				ssize_t sent_len = ipxw_mux_spx_xmit(spxh,
+						&(spx_msg.msg),
+						strlen(spx_msg.data) + 1,
+						false);
+				if (sent_len < 0) {
+					perror("send");
+					ipxw_mux_handle_close(h);
+					return 15;
+				}
 
 				continue;
 			}
@@ -199,33 +245,32 @@ int main(int argc, char **argv)
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 				fprintf(stderr, "connection socket error\n");
 				ipxw_mux_handle_close(h);
-				return 12;
+				return 16;
 			}
 
 			/* message received */
 			ssize_t expected_msg_len =
 				ipxw_mux_spx_peek_recvd_len(spxh, false);
 			if (expected_msg_len < 0) {
-				perror("receive peek error");
+				perror("receive peek");
 				ipxw_mux_handle_close(h);
-				return 13;
+				return 17;
+			}
+			if (expected_msg_len > sizeof(spx_msg)) {
+				fprintf(stderr, "received SPX msg too "
+						"large\n");
+				ipxw_mux_handle_close(h);
+				return 18;
 			}
 
-			struct ipxw_mux_spx_msg *msg = calloc(1,
-					expected_msg_len);
-			if (msg == NULL) {
-				perror("allocating message memory");
-				ipxw_mux_handle_close(h);
-				return 14;
-			}
-
-			ssize_t rcvd_len = ipxw_mux_spx_get_recvd(spxh, msg,
-					expected_msg_len - sizeof(struct
-						ipxw_mux_spx_msg), false);
+			ssize_t rcvd_len = ipxw_mux_spx_get_recvd(spxh,
+					&(spx_msg.msg), expected_msg_len -
+					sizeof(struct ipxw_mux_spx_msg),
+					false);
 			if (rcvd_len < 0) {
-				perror("receive error");
+				perror("receive");
 				ipxw_mux_handle_close(h);
-				return 15;
+				return 19;
 			}
 
 			/* system msg */
@@ -233,13 +278,15 @@ int main(int argc, char **argv)
 				continue;
 			}
 
-			printf("Received message :");
-			int j;
-			for (j = 0; j < rcvd_len - sizeof(struct
-						ipxw_mux_spx_msg); j++) {
-				printf("%02x ", msg->data[j]);
+			/* print received message */
+			size_t data_len = rcvd_len - sizeof(struct
+					ipxw_mux_spx_msg);
+			if (data_len == 0) {
+				continue;
 			}
-			printf("\n");
+
+			spx_msg.data[data_len - 1] = '\0';
+			fputs(spx_msg.data, stdout);
 		}
 	}
 
