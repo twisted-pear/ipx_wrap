@@ -102,7 +102,6 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 		return SPX_DROP_AND_ACK;
 	}
 	if (bpf_ntohs(spxh->seq_no) != spx_state->remote_expected_sequence) {
-		bpf_printk("remote seq mismatch");
 		return SPX_DROP;
 	}
 	/* closing the connection is always permitted */
@@ -133,7 +132,6 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			spx_state->remote_id = spxh->src_conn_id;
 			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
-			bpf_printk("entered established state");
 
 			return SPX_PASS;
 
@@ -142,17 +140,13 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			 * remote station should not expect any */
 			if (bpf_ntohs(spxh->ack_no) !=
 					spx_state->local_current_sequence) {
-				bpf_printk("local seq mismatch");
 				return SPX_DROP;
 			}
 			/* can only accept packets up to our alloc number */
 			if (bpf_ntohs(spxh->seq_no) >
 					spx_state->local_alloc_no) {
-				bpf_printk("local alloc mismatch");
 				return SPX_DROP;
 			}
-
-			bpf_printk("got pkt in established state");
 
 			/* update the remote's alloc number */
 			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
@@ -281,7 +275,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	} else if (fib_res == BPF_FIB_LKUP_RET_NOT_FWDED) {
 		cb.is_for_local = true;
 	} else {
-		bpf_printk("FIB_lookup failed %d", fib_res);
 		return TC_ACT_UNSPEC;
 	}
 
@@ -310,18 +303,15 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	/* no binding entry */
 	if (e == NULL) {
 		/* packet was for the local machine, drop it */
-		bpf_printk("no bind entry for local machine");
 		return TC_ACT_SHOT;
 	}
 
 	if (cb.is_bcast && !e->recv_bcast) {
-		bpf_printk("not interested in broadcast packet");
 		return TC_ACT_SHOT;
 	}
 
 	/* check packet type */
 	if (ipxh->type != e->pkt_type && !e->pkt_type_any) {
-		bpf_printk("packet type mismatch: %02x", ipxh->type);
 		return TC_ACT_SHOT;
 	}
 
@@ -366,18 +356,14 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	if (sock == NULL) {
-		bpf_printk("no socket found");
 		return TC_ACT_SHOT;
 	}
 
 	long err = bpf_sk_assign(skb, sock, 0);
 	bpf_sk_release(sock);
 	if (err != 0) {
-		bpf_printk("failed to assign socket: %d", err);
 		return TC_ACT_SHOT;
 	}
-
-	bpf_printk("socket assigned!");
 
 	struct ipx_addr saddr = ipxh->saddr;
 	__u8 pkt_type = ipxh->type;
@@ -479,8 +465,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		}
 	}
 
-	bpf_printk("packet demuxed!");
-
 	__u32 csum_ofs = ((void *) &(udph->check)) - data;
 	if (spx_state == NULL || (spx_verdict != SPX_DROP_AND_ACK &&
 				spx_verdict != SPX_PASS_AND_ACK && spx_verdict
@@ -498,8 +482,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	 * cloning it, the clone is sent to the appropriate egress interface,
 	 * then the original is restored and handled normally */
 
-	bpf_printk("preparing SPX ack");
-
 	/* FIB lookup for the ACK */
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
 	fib_params.family = AF_INET6;
@@ -514,7 +496,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	fib_res = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), 0);
 	// TODO: check how this works for packets from and to the local machine
 	if (fib_res != 0) {
-		bpf_printk("cannot route ACK");
 		return TC_ACT_SHOT;
 	}
 
@@ -549,7 +530,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	/* clone redirect the thusly generated ACK*/
 	if (bpf_clone_redirect(skb, fib_params.ifindex, 0) != 0) {
-		bpf_printk("clone redir of ACK failed");
 		return TC_ACT_SHOT;
 	}
 
@@ -561,12 +541,10 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	/* restore ETH and IPv6 headers */
 	if (bpf_skb_store_bytes(skb, 0, &eth_bak, sizeof(struct ethhdr), 0) !=
 			0) {
-		bpf_printk("failed to restore ETH header");
 		return TC_ACT_SHOT;
 	}
 	if (bpf_skb_store_bytes(skb, sizeof(struct ethhdr), &ip6h_bak,
 				sizeof(struct ipv6hdr), 0) != 0) {
-		bpf_printk("failed to restore IPv6 header");
 		return TC_ACT_SHOT;
 	}
 
@@ -583,8 +561,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			!= 0) {
 		return TC_ACT_SHOT;
 	}
-
-	bpf_printk("sent ack and recvd SPX pkt");
 
 	return TC_ACT_OK;
 }
@@ -755,8 +731,6 @@ static __always_inline struct bpf_sock *get_client_sock_from_spx_conn(struct
 SEC("tc/egress")
 int ipx_wrap_mux(struct __sk_buff *skb)
 {
-	bpf_printk("mux hit");
-
 	struct bpf_cb_info cb_info;
 	cb_info.cb[0] = skb->cb[0];
 	cb_info.cb[1] = skb->cb[1];
@@ -776,8 +750,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	if (client_sock == NULL) {
 		return TC_ACT_UNSPEC;
 	}
-
-	bpf_printk("have egress sock");
 
 	struct ipx_addr *bind_addr = NULL;
 	struct bpf_spx_state *spx_state = NULL;
@@ -820,8 +792,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	bpf_printk("socket found!");
-
 	/* parse the packet and discard everything unexpected, we only want
 	 * IPv6 UDP with enough room to contain an IPX header */
 	void *data_end = (void *)(long)skb->data_end;
@@ -859,8 +829,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	bpf_printk("packet parsed");
-
 	struct ipxw_mux_msg_min *mux_msg = cur.pos;
 
 	/* if we have an SPX socket, create the xmit message from the SPX state
@@ -890,8 +858,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 				sizeof(struct ipxhdr))) {
 		return TC_ACT_SHOT;
 	}
-
-	bpf_printk("packet verified");
 
 	/* fill in the IPv6 addresses */
 	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
@@ -945,7 +911,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 		/* cut the ACK packet down to size */
 		if (cb_info.mark == IPX_SPX_REFLECTED_ACK) {
-			bpf_printk("egress reflect");
 			size_t ack_len = sizeof(struct ipxhdr) + sizeof(struct
 					spxhdr);
 			ipx_msg->pktlen = bpf_htons(ack_len);
@@ -962,8 +927,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 			}
 		}
 	}
-
-	bpf_printk("packet built");
 
 	return TC_ACT_UNSPEC;
 }
