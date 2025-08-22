@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <limits.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
@@ -8,6 +9,7 @@
 #include <sys/epoll.h>
 #include <sys/prctl.h>
 #include <sys/queue.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <sys/un.h>
@@ -154,6 +156,15 @@ static struct bind_entry *get_bind_entry_by_ipx_sock(struct if_entry *iface,
 	return bind;
 }
 
+static struct spx_connection *get_spx_conn_by_conn_id(struct bind_entry *e,
+		__be16 conn_id)
+{
+	struct spx_connection *c;
+
+	HASH_FIND(hh, e->ht_id_to_spx_conn, &conn_id, sizeof(__be16), c);
+	return c;
+}
+
 static struct sub_process *get_sub_process_by_sock(int sock)
 {
 	struct sub_process *sub;
@@ -171,68 +182,58 @@ static struct sub_process *get_sub_process_by_ipx_addr(struct ipx_if_addr
 	return sub;
 }
 
-static __be16 find_min_free_dyn_sock(struct if_entry *iface)
+static __be16 find_next_free_dyn_sock(struct if_entry *iface)
 {
-	// TODO: this might benefit from ranomization such that socket numbers
-	// cannot be predicted
-	__be16 min_free_dyn_sock = IPX_MIN_DYNAMIC_SOCKET;
-	struct bind_entry *e;
-	struct bind_entry *tmp;
-	HASH_ITER(h_ipx_sock, iface->ht_ipx_sock_to_bind, e, tmp) {
-		/* skip over entries with a socket smaller than
-		 * IPX_MIN_DYNAMIC_SOCKET */
-		if (ntohs(e->ipx_sock) < ntohs(min_free_dyn_sock)) {
-			continue;
-		}
+	size_t range = ntohs(IPX_MIN_WELL_KNOWN_SOCKET) -
+		ntohs(IPX_MIN_DYNAMIC_SOCKET);
+	__u16 offset;
 
-		/* all dynamic sockets in use */
-		if (ntohs(min_free_dyn_sock) >=
-				ntohs(IPX_MIN_WELL_KNOWN_SOCKET)) {
-			break;
-		}
+	/* if getting a random number fails, act as if no socket is free, the
+	 * condition is temporary until the URANDOM source has been seeded */
+	if (getrandom(&offset, sizeof(__u16), 0) != sizeof(__u16)) {
+		return IPX_MIN_WELL_KNOWN_SOCKET;
+	}
 
-		/* found a free dynamic socket */
-		if (ntohs(e->ipx_sock) > ntohs(min_free_dyn_sock)) {
-			break;
-		}
+	struct bind_entry *e = NULL;
 
-		/* current dynamic socket taken, try next one */
-		if (ntohs(e->ipx_sock) == ntohs(min_free_dyn_sock)) {
-			min_free_dyn_sock = htons(ntohs(min_free_dyn_sock) +
-					1);
+	offset = offset % range;
+	for (int i = 0; i < range; i++) {
+		__u16 candidate = ((offset + i) % range) +
+			ntohs(IPX_MIN_DYNAMIC_SOCKET);
+
+		e = get_bind_entry_by_ipx_sock(iface, htons(candidate));
+		if (e == NULL) {
+			return htons(candidate);
 		}
 	}
 
-	return min_free_dyn_sock;
+	return IPX_MIN_WELL_KNOWN_SOCKET;
 }
 
-static __be16 find_min_free_spx_conn_id(struct bind_entry *e)
+static __be16 find_next_free_spx_conn_id(struct bind_entry *e)
 {
-	// TODO: this might benefit from ranomization such that connection IDs
-	// cannot be predicted
-	__be16 min_free_spx_conn_id = 0;
-	struct spx_connection *c;
-	struct spx_connection *tmp;
-	HASH_ITER(hh, e->ht_id_to_spx_conn, c, tmp) {
-		/* all connection IDs in use */
-		if (ntohs(min_free_spx_conn_id) == ntohs(SPX_CONN_ID_UNKNOWN))
-		{
-			break;
-		}
+	size_t range = USHRT_MAX;
+	__u16 offset;
 
-		/* found a free connection ID */
-		if (ntohs(c->conn_id) > ntohs(min_free_spx_conn_id)) {
-			break;
-		}
+	/* if getting a random number fails, act as if no socket is free, the
+	 * condition is temporary until the URANDOM source has been seeded */
+	if (getrandom(&offset, sizeof(__u16), 0) != sizeof(__u16)) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
 
-		/* current connection ID taken, try next one */
-		if (ntohs(c->conn_id) == ntohs(min_free_spx_conn_id)) {
-			min_free_spx_conn_id =
-				htons(ntohs(min_free_spx_conn_id) + 1);
+	struct spx_connection *c = NULL;
+
+	offset = offset % range;
+	for (int i = 0; i < range; i++) {
+		__u16 candidate = ((offset + i) % range);
+
+		c = get_spx_conn_by_conn_id(e, htons(candidate));
+		if (c == NULL) {
+			return htons(candidate);
 		}
 	}
 
-	return min_free_spx_conn_id;
+	return SPX_CONN_ID_UNKNOWN;
 }
 
 static bool has_net_bind_service(struct ipxw_mux_handle h)
@@ -274,7 +275,8 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	conn_rsp->addr = bind_addr;
 	conn_rsp->err = ENOTSUP;
 
-	__be16 conn_id = find_min_free_spx_conn_id(e);
+	__be16 conn_id = find_next_free_spx_conn_id(e);
+	/* no free connection ID */
 	if (conn_id == SPX_CONN_ID_UNKNOWN) {
 		conn_rsp->err = EACCES;
 		return false;
@@ -392,15 +394,15 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 
 	/* no socket was specified, find the lowest dynamic socket */
 	if (ntohs(bind_msg->addr.sock) == 0) {
-		__be16 min_free_dyn_sock = find_min_free_dyn_sock(iface);
-		if (ntohs(min_free_dyn_sock) >=
+		__be16 next_free_dyn_sock = find_next_free_dyn_sock(iface);
+		if (ntohs(next_free_dyn_sock) >=
 				ntohs(IPX_MIN_WELL_KNOWN_SOCKET)) {
 			fprintf(stderr, "dynamic sockets exhausted\n");
 			errno = EADDRINUSE;
 			return false;
 		}
 
-		bind_msg->addr.sock = min_free_dyn_sock;
+		bind_msg->addr.sock = next_free_dyn_sock;
 	}
 
 	/* socket already in use */
@@ -571,7 +573,7 @@ static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
 	HASH_DEL(e->ht_id_to_spx_conn, conn);
 	free(conn);
 
-	printf("SPX connection %04hx closed\n", conn_key.conn_id);
+	printf("SPX connection %04hx closed\n", ntohs(conn_key.conn_id));
 }
 
 static void unbind_entry(struct bind_entry *e)

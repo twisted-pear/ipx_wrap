@@ -131,7 +131,7 @@ int main(int argc, char **argv)
 		return 7;
 	}
 
-	printf("connection 0x%04hx accepted\n", remote_conn_id);
+	printf("connection 0x%04hx accepted\n", ntohs(remote_conn_id));
 	free(data_msg);
 
 	int epoll_fd = epoll_create1(0);
