@@ -28,7 +28,7 @@ vmlinux.btf:
 %.skel.h: %.o vmlinux.h common.h
 	$(BPFT) gen skeleton $< > $@
 
-$(BPF_OBJ): %.o: %.c vmlinux.h common.h ipx_wrap_common_kern.h
+$(BPF_OBJ): %.o: %.c vmlinux.h common.h ipx_wrap_common_kern.h ipx_wrap_common_proto.h
 	$(CLANG) -S \
 	    -target bpf \
 	    -D __BPF_TRACING__ \
@@ -46,19 +46,19 @@ $(BPF_OBJ): %.o: %.c vmlinux.h common.h ipx_wrap_common_kern.h
 $(USER_TARGETS): %: %.c common.h
 	$(CC) $(CFLAGS) -L $(LIBBPF_PREFIX)/lib64/ -o $@ $< $(USER_LIBS)
 
-ipx_wrap_mux_proto.o: ipx_wrap_mux_proto.c ipx_wrap_mux_proto.h uthash.h
+ipx_wrap_mux_proto.o: ipx_wrap_mux_proto.c ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-ipx_wrap_service_lib.o: ipx_wrap_service_lib.c ipx_wrap_service_lib.h ipx_wrap_mux_proto.h uthash.h
+ipx_wrap_service_lib.o: ipx_wrap_service_lib.c ipx_wrap_service_lib.h ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h uthash.h ipx_wrap_mux_kern.skel.h
+$(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h ipx_wrap_mux_kern.skel.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o $(MUXER_LIBS)
 
-$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h
+$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o
 
-$(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
+$(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
 
 clean:
