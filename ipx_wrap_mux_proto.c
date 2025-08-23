@@ -1386,6 +1386,43 @@ __be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg)
 	return spxh->src_conn_id;
 }
 
+static void ipxw_mux_spx_close_internal(struct ipxw_mux_spx_handle *h)
+{
+	if (!ipxw_mux_spx_handle_is_error(*h)) {
+		/* send a close packet if possible */
+		if (h->last_known_state->state == IPXW_MUX_SPX_CONN_ESTABLISHED
+				|| h->last_known_state->state ==
+				IPXW_MUX_SPX_CONN_WAITING_FOR_ACK) {
+			struct ipxw_mux_spx_msg close_spx_msg;
+			memset(&close_spx_msg, 0, sizeof(struct
+						ipxw_mux_spx_msg));
+			close_spx_msg.datastream_type = SPX_DS_END_OF_CONN;
+			send(h->spx_sock, &close_spx_msg,
+					sizeof(close_spx_msg), MSG_DONTWAIT);
+		}
+
+		/* no error handling, nothing that can be done */
+		struct ipxw_mux_msg close_msg;
+		close_msg.type = IPXW_MUX_SPX_CLOSE;
+		close_msg.spx_close.conn_id = h->last_known_state->conn_id;
+		send(h->conf_sock, &close_msg, sizeof(close_msg),
+				MSG_DONTWAIT);
+	}
+
+	if (h->spx_sock >= 0) {
+		close(h->spx_sock);
+	}
+
+	h->spx_sock = -1;
+	h->conf_sock = -1; /* do not close config socket as it is used elsewhere
+			     too */
+
+	if (h->last_known_state != NULL) {
+		free(h->last_known_state);
+		h->last_known_state = NULL;
+	}
+}
+
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr)
 {
@@ -1449,7 +1486,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		return ret;
 	} while (0);
 
-	ipxw_mux_spx_close(ret);
+	ipxw_mux_spx_close_internal(&ret);
 
 	return ret;
 }
@@ -1517,7 +1554,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 		return ret;
 	} while (0);
 
-	ipxw_mux_spx_close(ret);
+	ipxw_mux_spx_close_internal(&ret);
 
 	return ret;
 }
@@ -1634,37 +1671,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 
 void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h)
 {
-	if (!ipxw_mux_spx_handle_is_error(h)) {
-		/* send a close packet if possible */
-		if (h.last_known_state->state == IPXW_MUX_SPX_CONN_ESTABLISHED
-				|| h.last_known_state->state ==
-				IPXW_MUX_SPX_CONN_WAITING_FOR_ACK) {
-			struct ipxw_mux_spx_msg close_spx_msg;
-			memset(&close_spx_msg, 0, sizeof(struct
-						ipxw_mux_spx_msg));
-			close_spx_msg.datastream_type = SPX_DS_END_OF_CONN;
-			send(h.spx_sock, &close_spx_msg, sizeof(close_spx_msg),
-					MSG_DONTWAIT);
-		}
-
-		/* no error handling, nothing that can be done */
-		struct ipxw_mux_msg close_msg;
-		close_msg.type = IPXW_MUX_SPX_CLOSE;
-		close_msg.spx_close.conn_id = h.last_known_state->conn_id;
-		send(h.conf_sock, &close_msg, sizeof(close_msg), MSG_DONTWAIT);
-	}
-
-	if (h.spx_sock >= 0) {
-		close(h.spx_sock);
-	}
-
-	h.spx_sock = -1;
-	h.conf_sock = -1; /* do not close config socket as it is used elsewhere
-			     too */
-
-	if (h.last_known_state != NULL) {
-		free(h.last_known_state);
-	}
+	ipxw_mux_spx_close_internal(&h);
 }
 
 bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
