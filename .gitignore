@@ -7,10 +7,6 @@
 /ipx_wrap_ripd
 /ipx_wrap_sapd
 /ipx_wrap_mux
-/ipx_wrap_tx_client
-/ipx_wrap_rx_client
-/ipx_wrap_spx_client
-/ipx_wrap_spx_server
 /ipxcat
 /vmlinux.h
 /vmlinux.btf

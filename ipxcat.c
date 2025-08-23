@@ -764,10 +764,10 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 
 static _Noreturn void usage(void)
 {
-	printf("Usage: ipxcat [-t <packet type>] <local IPX address> <remote IPX address>\n");
-	printf("       ipxcat -s <local IPX address> <remote IPX address>\n");
-	printf("       ipxcat -l [-t <packet type>] [-b] <local IPX address>\n");
-	printf("       ipxcat -l -s <local IPX address>\n");
+	printf("Usage: ipxcat [-v] [-t <packet type>] <local IPX address> <remote IPX address>\n");
+	printf("       ipxcat [-v] -s <local IPX address> <remote IPX address>\n");
+	printf("       ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>\n");
+	printf("       ipxcat [-v] -l -s <local IPX address>\n");
 	exit(IPXCAT_ERR_USAGE);
 }
 

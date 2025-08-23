@@ -29,7 +29,6 @@ On egress IPv6 packets sent within the set prefix are changed into IPX packets.
 On ingress IPX packets are changed into IPv6 packets with the source and
 destination addresses within the set prefix.
 
-<a id="if-cfg"></a>
 ### Interface Configuration
 
 The node portion of the IPX addresses is expected to be derived from the
@@ -181,31 +180,45 @@ Config File Format:
 ...
 ```
 
-## ipx_wrap_tx_client
+## ipxcat
 
-This is a simple client for `ipx_wrap_mux` that allows sending IPX packets.
-
-This program depends on a running `ipx_wrap_mux`.
-
-Usage:
-```
-Usage: ipx_wrap_tx_client <IPv6 bind addr> <hex IPX bind socket> <IPv6 destination addr> <hex IPX destination socket> <length of the data (bytes)> <IPX packet type>
-```
-
-Both IPv6 addresses are of the form specified in [Interface Configuration](#if-cfg).
-
-## ipx_wrap_rx_client
-
-This is a simple client for `ipx_wrap_mux` that allows receiving IPX packets.
+This is a netcat-like program for sending and receiving IPX packets. Both plain
+IPX and SPX are supported.
 
 This program depends on a running `ipx_wrap_mux`.
 
 Usage:
 ```
-Usage: ipx_wrap_rx_client <IPv6 bind addr> <hex IPX bind socket> <expected IPX packet type> <allow any packet type (0|1)> <receive broadcast packets (0|1)>
+Usage: ipxcat [-v] [-t <packet type>] <local IPX address> <remote IPX address>
+       ipxcat [-v] -s <local IPX address> <remote IPX address>
+       ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>
+       ipxcat [-v] -l -s <local IPX address>
 ```
 
-The IPv6 address is of the form specified in [Interface Configuration](#if-cfg).
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
+The `-l` flag puts the program in listening mode. In this mode IPX packets will
+be received or SPX connections accepted. A program in listening mode cannot
+send data unless it has accepted an SPX connection.
+
+The `-s` flag instructs the program to use SPX. In listening mode, the program
+will wait for an incoming SPX connection. Otherwise, it will attempt to connect
+to the remote IPX address. As SPX always uses the packet type `0x05`, the `-t`
+option is not allowed when using SPX.
+
+The `-b` flag instructs a program in listening mode to also accept broadcast
+packets. When not in listening mode or when using SPX this flag is not allowed.
+
+The `-t` option can be used to specify a packet type when SPX is not in use
+(`-s` is not present). If no packet type is specified, then a listening process
+will accept any packet type while a sending process will use the packet type
+`0x1e`.
+
+The `-v` flag will cause the program to print more detailed information to
+`stderr`.
 
 ## Acknowledgements
 
