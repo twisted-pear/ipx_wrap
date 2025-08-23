@@ -494,7 +494,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	fib_params.dport = bpf_htons(IPX_IN_IPV6_PORT);
 	fib_params.ifindex = skb->ingress_ifindex;
 	fib_res = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), 0);
-	// TODO: check how this works for packets from and to the local machine
 	if (fib_res != 0) {
 		return TC_ACT_SHOT;
 	}
