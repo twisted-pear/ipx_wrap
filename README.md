@@ -225,7 +225,7 @@ The `-v` flag will cause the program to print more detailed information to
 ### uthash
 
 The hash table implementation used throughout this project is `uthash` which
-was developed by Troy D. Hanson. and kindly provided under a [revised BSD
+was developed by Troy D. Hanson and kindly provided under a [revised BSD
 license](https://troydhanson.github.io/uthash/license.html).
 
 The documentation for `uthash` is available
