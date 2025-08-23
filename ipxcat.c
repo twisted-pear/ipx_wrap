@@ -527,7 +527,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					if (!send_out_spx_msg(&spx_out_queue,
 								epoll_fd,
 								spxh)) {
-						fprintf(stderr, "SPX socket error\n");
+						perror("SPX send");
 						cleanup_and_exit(epoll_fd,
 								tmr_fd,
 								IPXCAT_ERR_SPX_FAILURE);
@@ -613,7 +613,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				if (!send_out_ipx_msg(&ipx_out_queue,
 							epoll_fd,
 							ipxh)) {
-					fprintf(stderr, "IPX socket error\n");
+					perror("IPX send");
 					cleanup_and_exit(epoll_fd,
 							tmr_fd,
 							IPXCAT_ERR_IPX_FAILURE);
