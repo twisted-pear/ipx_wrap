@@ -1043,7 +1043,7 @@ struct ipxw_mux_handle ipxw_mux_recv_bind_msg(int ctrl_sock, struct
 		return ret;
 	} while (0);
 
-	/* close a received sockets if an error occurred */
+	/* close the received sockets if an error occurred */
 	ipxw_mux_handle_close(ret);
 
 	ret.data_sock = -1;
@@ -1562,6 +1562,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 {
 	if (ipxw_mux_spx_handle_is_error(h)) {
+		errno = EINVAL;
 		return false;
 	}
 
@@ -1573,6 +1574,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 	 * in too long */
 	if (h.last_known_state->ticks_since_last_remote_msg >
 			SPX_ABORT_TMO_TICKS) {
+		errno = ETIMEDOUT;
 		return false;
 	}
 
@@ -1598,12 +1600,17 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 						ipxw_mux_spx_msg),
 					MSG_DONTWAIT);
 
-			/* even if transmission fails, this call succeeds and
-			 * we retry on the next maintenance call */
+			/* even if transmission fails, this call succeeds for
+			 * some errors and we retry on the next maintenance
+			 * call */
 			if (sent_len < 0) {
-				// TODO: do actually really fail on certain
-				// unrecoverable errors
-				return true;
+				if (errno == EINTR || errno == EAGAIN || errno
+						== EWOULDBLOCK || errno ==
+						EMSGSIZE || errno == ENOBUFS) {
+					return true;
+				}
+
+				break;
 			}
 			if (sent_len != sizeof(struct ipxw_mux_spx_msg)) {
 				return true;
@@ -1627,6 +1634,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 			 * attempts */
 			if (h.last_known_state->last_tx_attempts >
 					SPX_RETRY_COUNT) {
+				errno = ETIMEDOUT;
 				break;
 			}
 
@@ -1644,12 +1652,17 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 					&(h.last_known_state->last_msg),
 					last_msg_len, MSG_DONTWAIT);
 
-			/* even if transmission fails, this call succeeds and
-			 * we retry on the next maintenance call */
+			/* even if transmission fails, this call succeeds for
+			 * some errors and we retry on the next maintenance
+			 * call */
 			if (sent_len < 0) {
-				// TODO: do actually really fail on certain
-				// unrecoverable errors
-				return true;
+				if (errno == EINTR || errno == EAGAIN || errno
+						== EWOULDBLOCK || errno ==
+						EMSGSIZE || errno == ENOBUFS) {
+					return true;
+				}
+
+				break;
 			}
 			if (sent_len != last_msg_len) {
 				return true;
@@ -1663,6 +1676,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 			return true;
 
 		default:
+			errno = EINVAL;
 			break;
 	}
 

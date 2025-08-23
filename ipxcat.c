@@ -380,8 +380,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 
 				/* maintain the SPX connection */
 				if (!ipxw_mux_spx_maintain(spxh)) {
-					fprintf(stderr, "failed to maintain "
-							"connection\n");
+					perror("maintaining connection");
 					cleanup_and_exit(epoll_fd, tmr_fd,
 							IPXCAT_ERR_SPX_MAINT);
 				}
@@ -627,7 +626,8 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 			}
 
 			/* handle incomming SPX connection here */
-			if (cfg->listen && cfg->use_spx) {
+			if (cfg->listen && cfg->use_spx &&
+					ipxw_mux_spx_handle_is_error(spxh)) {
 				__be16 remote_conn_id =
 					ipxw_mux_spx_check_for_conn_req(msg);
 				if (remote_conn_id != SPX_CONN_ID_UNKNOWN) {
