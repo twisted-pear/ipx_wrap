@@ -62,6 +62,41 @@ static struct ipxw_msg_queue spx_out_queue = STAILQ_HEAD_INITIALIZER(
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
 static struct ipxw_mux_spx_handle spxh = ipxw_mux_spx_handle_init;
 
+static ssize_t fgets_bin(char *s, size_t size, FILE *stream)
+{
+	ssize_t i;
+	for (i = 0; i < size; i++) {
+		int c = fgetc(stream);
+		if (c == EOF) {
+			break;
+		}
+
+		s[i] = c;
+		if (c == '\n') {
+			return i + 1;
+		}
+	}
+
+	if (i == 0) {
+		return EOF;
+	}
+
+	return i;
+}
+
+static ssize_t fputs_bin(const char *s, size_t size, FILE *stream)
+{
+	size_t i;
+	for (i = 0; i < size; i++) {
+		int err = fputc(s[i], stream);
+		if (err == EOF) {
+			return EOF;
+		}
+	}
+
+	return i;
+}
+
 static void signal_handler(int signal)
 {
 	switch (signal) {
@@ -435,16 +470,16 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					msg->xmit.daddr = cfg->remote_addr;
 				}
 
-				// TODO: make the length calculation also work
-				// with binary data
-				if (fgets(data, max_data_len, stdin) == NULL) {
+				ssize_t data_len = fgets_bin(data,
+						max_data_len, stdin);
+				if (data_len == EOF) {
 					free(msg);
 					stdin_closed = true;
 					continue;
 				}
 
 				/* record the message data length */
-				msg->xmit.data_len = strlen(data) + 1;
+				msg->xmit.data_len = data_len;
 				if (cfg->use_spx) {
 					msg->xmit.data_len += sizeof(struct
 							spxhdr);
@@ -557,7 +592,8 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				}
 				msg->data[data_len] = '\0';
 
-				fputs((char *) msg->data, stdout);
+				fputs_bin((char *) msg->data, data_len,
+						stdout);
 
 				free(msg);
 				continue;
@@ -696,17 +732,26 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					fprintf(stderr, "unexpected IPX message from");
 					print_ipxaddr(stderr,
 							&(msg->recv.saddr));
-					fprintf(stderr, ": %s\n", (char *)
-							msg->data);
+					fprintf(stderr, ": ");
+					fputs_bin((char *) msg->data, data_len,
+							stderr);
+					fprintf(stderr, "\n");
 				}
 			} else {
 				if (cfg->verbose) {
-					printf("message from ");
-					print_ipxaddr(stdout,
+					fflush(stdout);
+					fprintf(stderr, "message from ");
+					print_ipxaddr(stderr,
 							&(msg->recv.saddr));
-					printf(": ");
+					fprintf(stderr, ": ");
+					fflush(stderr);
 				}
-				fputs((char *) msg->data, stdout);
+				fputs_bin((char *) msg->data, data_len,
+						stdout);
+				if (cfg->verbose) {
+					fflush(stdout);
+					fprintf(stderr, "\n");
+				}
 			}
 
 			free(msg);

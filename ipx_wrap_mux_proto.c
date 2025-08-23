@@ -1739,7 +1739,6 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	}
 
 	/* clear output and disallowed message fields */
-	memset(&(msg->mux_msg), 0, sizeof(struct ipxw_mux_msg));
 	msg->keep_alive = 0;
 	msg->verify = 0;
 	msg->system = 0;
