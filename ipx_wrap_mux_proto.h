@@ -109,6 +109,8 @@ struct ipxw_mux_handle {
 	__be32 prefix;
 };
 
+#define ipxw_mux_handle_init { .data_sock = -1, .conf_sock = -1, .prefix = 0 }
+
 void ipxw_mux_handle_close(struct ipxw_mux_handle h);
 bool ipxw_mux_handle_is_error(struct ipxw_mux_handle h);
 int ipxw_mux_handle_data(struct ipxw_mux_handle h);
@@ -236,6 +238,9 @@ struct ipxw_mux_spx_handle {
 	int conf_sock;
 	struct ipxw_mux_spx_handle_state *last_known_state;
 };
+
+#define ipxw_mux_spx_handle_init { .spx_sock = -1, .conf_sock = -1, \
+	.last_known_state = NULL }
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
 int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);

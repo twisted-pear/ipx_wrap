@@ -646,11 +646,14 @@ struct ipxw_mux_handle ipxw_mux_bind(const struct ipxw_mux_msg *bind_msg)
 
 void ipxw_mux_unbind(struct ipxw_mux_handle h)
 {
-	struct ipxw_mux_msg unbind_msg;
+	if (!ipxw_mux_handle_is_error(h)) {
+		struct ipxw_mux_msg unbind_msg;
 
-	/* no error handling, nothing that can be done */
-	unbind_msg.type = IPXW_MUX_UNBIND;
-	send(h.conf_sock, &unbind_msg, sizeof(unbind_msg), MSG_DONTWAIT);
+		/* no error handling, nothing that can be done */
+		unbind_msg.type = IPXW_MUX_UNBIND;
+		send(h.conf_sock, &unbind_msg, sizeof(unbind_msg),
+				MSG_DONTWAIT);
+	}
 
 	ipxw_mux_handle_close(h);
 }
@@ -1277,6 +1280,11 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 	ret.spx_sock = -1;
 	ret.conf_sock = -1;
 
+	if (ipxw_mux_handle_is_error(h)) {
+		errno = EINVAL;
+		return ret;
+	}
+
 	ret.last_known_state = calloc(1, sizeof(struct
 				ipxw_mux_spx_handle_state));
 	if (ret.last_known_state == NULL) {
@@ -1517,7 +1525,6 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 {
 	if (ipxw_mux_spx_handle_is_error(h)) {
-		ipxw_mux_spx_close(h);
 		return false;
 	}
 
@@ -1529,7 +1536,6 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 	 * in too long */
 	if (h.last_known_state->ticks_since_last_remote_msg >
 			SPX_ABORT_TMO_TICKS) {
-		ipxw_mux_spx_close(h);
 		return false;
 	}
 
@@ -1623,7 +1629,6 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 			break;
 	}
 
-	ipxw_mux_spx_close(h);
 	return false;
 }
 
@@ -1664,6 +1669,10 @@ void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h)
 
 bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
 {
+	if (ipxw_mux_spx_handle_is_error(h)) {
+		return false;
+	}
+
 	/* not ready to send or remote not ready to receive */
 	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED) {
 		return false;
@@ -1679,6 +1688,11 @@ bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
 ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 		*msg, size_t data_len, bool block)
 {
+	if (ipxw_mux_spx_handle_is_error(h)) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	/* not ready to send or remote not ready to receive */
 	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED) {
 		errno = ENOBUFS;
@@ -1739,6 +1753,11 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 
 ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 {
+	if (ipxw_mux_spx_handle_is_error(h)) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	switch (h.last_known_state->state) {
 		case IPXW_MUX_SPX_CONN_REQ_SENT:
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
@@ -1795,6 +1814,11 @@ ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		ipxw_mux_spx_msg *msg, size_t data_len, bool block)
 {
+	if (ipxw_mux_spx_handle_is_error(h)) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	switch (h.last_known_state->state) {
 		case IPXW_MUX_SPX_CONN_REQ_SENT:
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
@@ -1831,7 +1855,6 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		msg->local_current_sequence;
 
 	if (msg->datastream_type == SPX_DS_END_OF_CONN) {
-		ipxw_mux_spx_close(h);
 		errno = ENOTCONN;
 		return -1;
 	}

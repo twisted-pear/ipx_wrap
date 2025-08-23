@@ -11,6 +11,7 @@
 /ipx_wrap_rx_client
 /ipx_wrap_spx_client
 /ipx_wrap_spx_server
+/ipxcat
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests
