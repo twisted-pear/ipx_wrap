@@ -72,6 +72,39 @@ enum ipx_wrap_spx_ingress_verdict {
 	SPX_PASS_AND_END_ACK
 };
 
+static __always_inline bool csum_replace_with_zero_check(struct __sk_buff *skb,
+		__u32 csum_ofs, __s64 csum_diff)
+{
+	/* replace the checksum normally */
+	if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
+			!= 0) {
+		return false;
+	}
+
+	/* get the new checksum from the packet */
+	__sum16 udp_csum;
+	if (bpf_skb_load_bytes(skb, csum_ofs, &udp_csum, sizeof(__sum16)) != 0)
+	{
+		bpf_printk("failed to read csum");
+		return false;
+	}
+
+	/* if the BPF helper stored a zero checksum */
+	if (udp_csum == 0x0000) {
+		udp_csum = 0xFFFF;
+
+		if (bpf_skb_store_bytes(skb, csum_ofs, &udp_csum,
+					sizeof(__sum16), 0) != 0) {
+			bpf_printk("failed to store csum");
+			return false;
+		}
+
+		bpf_printk("replaced zero csum!");
+	}
+
+	return true;
+}
+
 static __always_inline enum ipx_wrap_spx_ingress_verdict
 ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 		ipxw_mux_spx_msg_min *spx_msg)
@@ -466,15 +499,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			spx_state->local_current_sequence;
 		spx_msg->remote_alloc_no = spx_state->remote_alloc_no;
 
-		/* this is a gnarly hack, turns out without it the calculated
-		 * UDP checksum is wrong for some sequence number values */
-		spx_msg->inv_msg_data[0] = ~(spx_msg->msg_data[0]);
-		spx_msg->inv_msg_data[1] = ~(spx_msg->msg_data[1]);
-		spx_msg->inv_msg_data[2] = ~(spx_msg->msg_data[2]);
-		spx_msg->inv_msg_data[3] = ~(spx_msg->msg_data[3]);
-		spx_msg->inv_msg_data[4] = ~(spx_msg->msg_data[4]);
-		spx_msg->inv_msg_data[5] = ~(spx_msg->msg_data[5]);
-
 		/* add SPX msg to checksum */
 		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
 				sizeof(struct spxhdr), csum_diff);
@@ -488,8 +512,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 				spx_verdict != SPX_PASS_AND_ACK && spx_verdict
 				!= SPX_PASS_AND_END_ACK)) {
 		/* insert the modified checksum */
-		if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
-				!= 0) {
+		if (!csum_replace_with_zero_check(skb, csum_ofs, csum_diff)) {
 			return TC_ACT_SHOT;
 		}
 
@@ -574,8 +597,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	/* update the checksum for the original packet, the ACK has a wrong
 	 * checksum but it is never verified */
-	if (bpf_l4_csum_replace(skb, csum_ofs, 0, csum_diff, BPF_F_PSEUDO_HDR)
-			!= 0) {
+	if (!csum_replace_with_zero_check(skb, csum_ofs, csum_diff)) {
 		return TC_ACT_SHOT;
 	}
 
