@@ -13,6 +13,8 @@
 #define DEFAULT_IPX_DATA_LEN (SPX_MAX_DATA_LEN_WO_SIZNG - sizeof(struct \
 			ipxhdr))
 
+#define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD 4096
+
 enum ipxcat_error_codes {
 	IPXCAT_ERR_OK = 0,
 	IPXCAT_ERR_USAGE,
@@ -49,16 +51,66 @@ struct ipxcat_cfg {
 	bool pkt_type_any;
 	__u8 pkt_type;
 	__u16 max_ipx_data_len;
+	size_t tx_queue_pause_threshold;
 	struct ipx_addr local_addr;
 	struct ipx_addr remote_addr;
 };
 
 static bool keep_going = true;
 static bool stdin_closed = false;
-static struct ipxw_msg_queue ipx_out_queue = STAILQ_HEAD_INITIALIZER(
-		ipx_out_queue);
-static struct ipxw_msg_queue spx_out_queue = STAILQ_HEAD_INITIALIZER(
-		spx_out_queue);
+
+struct counted_msg_queue {
+	struct ipxw_msg_queue q;
+	size_t n;
+};
+
+static bool counted_msg_queue_empty(struct counted_msg_queue *q)
+{
+	bool ret = STAILQ_EMPTY(&(q->q));
+
+	if (ret) {
+		assert(q->n == 0);
+	}
+
+	return ret;
+}
+
+static struct ipxw_mux_msg *counted_msg_queue_peek(struct counted_msg_queue *q)
+{
+	return STAILQ_FIRST(&(q->q));
+}
+
+static struct ipxw_mux_msg *counted_msg_queue_pop(struct counted_msg_queue *q)
+{
+	struct ipxw_mux_msg *ret = STAILQ_FIRST(&(q->q));
+
+	STAILQ_REMOVE_HEAD(&(q->q), q_entry);
+	q->n--;
+
+	return ret;
+}
+
+static void counted_msg_queue_push(struct counted_msg_queue *q, struct
+		ipxw_mux_msg *msg)
+{
+	STAILQ_INSERT_TAIL(&(q->q), msg, q_entry);
+	q->n++;
+}
+
+static size_t counted_msg_queue_nitems(struct counted_msg_queue *q)
+{
+	return q->n;
+}
+
+static struct counted_msg_queue ipx_out_queue = {
+	.q = STAILQ_HEAD_INITIALIZER(ipx_out_queue.q),
+	.n = 0
+};
+static struct counted_msg_queue spx_out_queue = {
+	.q = STAILQ_HEAD_INITIALIZER(spx_out_queue.q),
+	.n = 0
+};
+
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
 static struct ipxw_mux_spx_handle spxh = ipxw_mux_spx_handle_init;
 
@@ -167,7 +219,7 @@ static void print_ipxaddr(FILE *f, const struct ipx_addr *addr)
 			addr->node[5], ntohs(addr->sock));
 }
 
-static bool queue_out_msg(struct ipxw_msg_queue *q, int epoll_fd, int fd,
+static bool queue_out_msg(struct counted_msg_queue *q, int epoll_fd, int fd,
 		struct ipxw_mux_msg *msg)
 {
 	/* reregister for ready-to-write events, now that messages are
@@ -181,16 +233,16 @@ static bool queue_out_msg(struct ipxw_msg_queue *q, int epoll_fd, int fd,
 	}
 
 	/* queue the config message on the config socket */
-	STAILQ_INSERT_TAIL(q, msg, q_entry);
+	counted_msg_queue_push(q, msg);
 
 	return true;
 }
 
-static bool send_out_ipx_msg(struct ipxw_msg_queue *q, int epoll_fd, struct
+static bool send_out_ipx_msg(struct counted_msg_queue *q, int epoll_fd, struct
 		ipxw_mux_handle h)
 {
 	/* no msgs to send */
-	if (STAILQ_EMPTY(q)) {
+	if (counted_msg_queue_empty(q)) {
 		/* unregister from ready-to-write events to avoid busy polling
 		 */
 		struct epoll_event ev = {
@@ -203,7 +255,7 @@ static bool send_out_ipx_msg(struct ipxw_msg_queue *q, int epoll_fd, struct
 		return true;
 	}
 
-	struct ipxw_mux_msg *msg = STAILQ_FIRST(q);
+	struct ipxw_mux_msg *msg = counted_msg_queue_peek(q);
 	ssize_t err = ipxw_mux_xmit(h, msg, false);
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
@@ -216,17 +268,17 @@ static bool send_out_ipx_msg(struct ipxw_msg_queue *q, int epoll_fd, struct
 		/* other error, make sure to get rid of the message */
 	}
 
-	STAILQ_REMOVE_HEAD(q, q_entry);
+	counted_msg_queue_pop(q);
 	free(msg);
 
 	return (err >= 0);
 }
 
-static bool send_out_spx_msg(struct ipxw_msg_queue *q, int epoll_fd, struct
+static bool send_out_spx_msg(struct counted_msg_queue *q, int epoll_fd, struct
 		ipxw_mux_spx_handle h)
 {
 	/* no msgs to send */
-	if (STAILQ_EMPTY(q)) {
+	if (counted_msg_queue_empty(q)) {
 		/* unregister from ready-to-write events to avoid busy polling
 		 */
 		struct epoll_event ev = {
@@ -244,7 +296,7 @@ static bool send_out_spx_msg(struct ipxw_msg_queue *q, int epoll_fd, struct
 		return true;
 	}
 
-	struct ipxw_mux_msg *msg = STAILQ_FIRST(q);
+	struct ipxw_mux_msg *msg = counted_msg_queue_peek(q);
 	struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *) msg;
 	ssize_t err = ipxw_mux_spx_xmit(h, spx_msg, msg->xmit.data_len -
 			sizeof(struct spxhdr), false);
@@ -259,7 +311,7 @@ static bool send_out_spx_msg(struct ipxw_msg_queue *q, int epoll_fd, struct
 		/* other error, make sure to get rid of the message */
 	}
 
-	STAILQ_REMOVE_HEAD(q, q_entry);
+	counted_msg_queue_pop(q);
 	free(msg);
 
 	return (err >= 0);
@@ -277,14 +329,14 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, enum
 	}
 
 	/* remove all undelivered messages */
-	while (!STAILQ_EMPTY(&ipx_out_queue)) {
-		struct ipxw_mux_msg *msg = STAILQ_FIRST(&ipx_out_queue);
-		STAILQ_REMOVE_HEAD(&ipx_out_queue, q_entry);
+	while (!counted_msg_queue_empty(&ipx_out_queue)) {
+		struct ipxw_mux_msg *msg =
+			counted_msg_queue_pop(&ipx_out_queue);
 		free(msg);
 	}
-	while (!STAILQ_EMPTY(&spx_out_queue)) {
-		struct ipxw_mux_msg *msg = STAILQ_FIRST(&spx_out_queue);
-		STAILQ_REMOVE_HEAD(&spx_out_queue, q_entry);
+	while (!counted_msg_queue_empty(&spx_out_queue)) {
+		struct ipxw_mux_msg *msg =
+			counted_msg_queue_pop(&spx_out_queue);
 		free(msg);
 	}
 
@@ -380,8 +432,9 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 	while (keep_going) {
 		/* stop if STDIN reached EOF and no messages to send remain */
 		if (stdin_closed) {
-			if (STAILQ_EMPTY(&ipx_out_queue) &&
-					STAILQ_EMPTY(&spx_out_queue)) {
+			if (counted_msg_queue_empty(&ipx_out_queue) &&
+					counted_msg_queue_empty(&spx_out_queue))
+			{
 				keep_going = false;
 			}
 		}
@@ -434,6 +487,18 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					assert(0);
 				}
 
+				struct counted_msg_queue *q = &ipx_out_queue;
+				if (cfg->use_spx) {
+					q = &spx_out_queue;
+				}
+
+				/* queue is full, try again later */
+				if (counted_msg_queue_nitems(q) >
+						cfg->tx_queue_pause_threshold)
+				{
+					continue;
+				}
+
 				struct ipxw_mux_msg *msg = NULL;
 				size_t max_data_len = cfg->max_ipx_data_len;
 				if (cfg->use_spx) {
@@ -457,12 +522,10 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				msg->type = IPXW_MUX_XMIT;
 
 				char *data = (char *) msg->data;
-				struct ipxw_msg_queue *q = &ipx_out_queue;
 				int sockfd = ipxw_mux_handle_data(ipxh);
 				if (cfg->use_spx) {
 					data = (char *) ((struct ipxw_mux_spx_msg *)
 							msg)->data;
-					q = &spx_out_queue;
 					sockfd =
 						ipxw_mux_spx_handle_sock(spxh);
 				} else {
@@ -535,7 +598,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				}
 
 				/* nothing to read from SPX socket */
-				if (!(evs[i].events & EPOLLIN)) {
+				if ((evs[i].events & EPOLLIN) == 0) {
 					continue;
 				}
 
@@ -621,7 +684,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 			}
 
 			/* nothing to read from IPX socket */
-			if (!(evs[i].events & EPOLLIN)) {
+			if ((evs[i].events & EPOLLIN) == 0) {
 				continue;
 			}
 
@@ -793,6 +856,7 @@ int main(int argc, char **argv)
 		.use_spx = false,
 		.accept_broadcasts = false,
 		.pkt_type_any = true,
+		.tx_queue_pause_threshold =  DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
 		.pkt_type = DEFAULT_PKT_TYPE,
 		.max_ipx_data_len = DEFAULT_IPX_DATA_LEN
 	};

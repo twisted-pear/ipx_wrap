@@ -102,15 +102,21 @@ struct ipxw_mux_spx_msg_min {
 	union {
 		struct spxhdr spxh;
 		struct {
-			__u8 end_of_msg:1,
-			     attention:1,
-			     system:1,
-			     keep_alive:1,
-			     verify:1,
-			     reserved:3;
-			__u8 datastream_type;
-			__u16 local_current_sequence;
-			__u16 remote_alloc_no;
+			union {
+				struct {
+					__u8 end_of_msg:1,
+					     attention:1,
+					     system:1,
+					     keep_alive:1,
+					     verify:1,
+					     reserved:3;
+					__u8 datastream_type;
+					__u16 local_current_sequence;
+					__u16 remote_alloc_no;
+				} __attribute__((packed));
+				__u8 msg_data[6];
+			};
+			__u8 inv_msg_data[6];
 		} __attribute__((packed));
 	};
 	__u8 data[0];
@@ -151,5 +157,12 @@ struct bpf_spx_state {
 	enum ipxw_mux_spx_connection_state state;
 	__be32 prefix;
 };
+
+static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
+{
+	__s16 res;
+	__builtin_sub_overflow(a, b, &res);
+	return res < 0;
+}
 
 #endif /* __IPX_WRAP_COMMON_PROTO_H__ */

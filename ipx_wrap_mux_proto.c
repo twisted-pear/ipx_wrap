@@ -1396,6 +1396,8 @@ static void ipxw_mux_spx_close_internal(struct ipxw_mux_spx_handle *h)
 			struct ipxw_mux_spx_msg close_spx_msg;
 			memset(&close_spx_msg, 0, sizeof(struct
 						ipxw_mux_spx_msg));
+			close_spx_msg.local_current_sequence =
+				h->last_known_state->local_current_sequence;
 			close_spx_msg.datastream_type = SPX_DS_END_OF_CONN;
 			send(h->spx_sock, &close_spx_msg,
 					sizeof(close_spx_msg), MSG_DONTWAIT);
@@ -1698,8 +1700,8 @@ bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
 	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED) {
 		return false;
 	}
-	if (h.last_known_state->remote_alloc_no <
-			h.last_known_state->local_current_sequence) {
+	if (spx_seq_less_than(h.last_known_state->remote_alloc_no,
+				h.last_known_state->local_current_sequence)) {
 		return false;
 	}
 
@@ -1719,8 +1721,8 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 		errno = ENOBUFS;
 		return -1;
 	}
-	if (h.last_known_state->remote_alloc_no <
-			h.last_known_state->local_current_sequence) {
+	if (spx_seq_less_than(h.last_known_state->remote_alloc_no,
+				h.last_known_state->local_current_sequence)) {
 		errno = ENOBUFS;
 		return -1;
 	}
@@ -1743,7 +1745,8 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	msg->verify = 0;
 	msg->system = 0;
 	msg->remote_alloc_no = 0;
-	msg->local_current_sequence = 0;
+	msg->local_current_sequence =
+		h.last_known_state->local_current_sequence;
 
 	size_t msg_len = sizeof(struct ipxw_mux_spx_msg) + data_len;
 

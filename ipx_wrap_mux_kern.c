@@ -1,5 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-// TODO: handle SPX seq/alloc no overflow
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -97,8 +96,9 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 	/* handle the loss of ACK packets that we send by also acking data
 	 * packets with a seq no lower than the current epxected one (but not
 	 * letting them go through to user space) */
-	if (bpf_ntohs(spxh->seq_no) < (spx_state->remote_expected_sequence &&
-				ack_required)) {
+	if (spx_seq_less_than(bpf_ntohs(spxh->seq_no),
+				spx_state->remote_expected_sequence) &&
+			ack_required) {
 		return SPX_DROP_AND_ACK;
 	}
 	if (bpf_ntohs(spxh->seq_no) != spx_state->remote_expected_sequence) {
@@ -143,8 +143,8 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 				return SPX_DROP;
 			}
 			/* can only accept packets up to our alloc number */
-			if (bpf_ntohs(spxh->seq_no) >
-					spx_state->local_alloc_no) {
+			if (spx_seq_less_than(spx_state->local_alloc_no,
+						bpf_ntohs(spxh->seq_no))) {
 				return SPX_DROP;
 			}
 
@@ -153,8 +153,13 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 
 			/* update the state */
 			if (!system_pkt) {
-				spx_state->remote_expected_sequence += 1;
-				spx_state->local_alloc_no += 1;
+				__builtin_add_overflow(
+						spx_state->remote_expected_sequence,
+						1,
+						&(spx_state->remote_expected_sequence));
+				__builtin_add_overflow(
+						spx_state->local_alloc_no, 1,
+						&(spx_state->local_alloc_no));
 			}
 
 			/* send an ACK if required */
@@ -166,8 +171,8 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
 			/* can only accept packets up to our alloc number */
-			if (bpf_ntohs(spxh->seq_no) >
-					spx_state->local_alloc_no) {
+			if (spx_seq_less_than(spx_state->local_alloc_no,
+						bpf_ntohs(spxh->seq_no))) {
 				return SPX_DROP;
 			}
 
@@ -179,8 +184,10 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 
 			/* we want an ACK and it has to ACK the last packet we
 			 * sent */
-			if (bpf_ntohs(spxh->ack_no) !=
-					spx_state->local_current_sequence + 1)
+			__u16 local_next_sequence;
+			__builtin_add_overflow(spx_state->local_current_sequence,
+					1, &local_next_sequence);
+			if (bpf_ntohs(spxh->ack_no) != local_next_sequence)
 			{
 				return SPX_DROP;
 			}
@@ -189,7 +196,9 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 
 			/* increment sequence number after receiving an ACK */
-			spx_state->local_current_sequence += 1;
+			__builtin_add_overflow(spx_state->local_current_sequence,
+					1,
+					&(spx_state->local_current_sequence));
 
 			/* retun to established state */
 			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
@@ -457,6 +466,15 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			spx_state->local_current_sequence;
 		spx_msg->remote_alloc_no = spx_state->remote_alloc_no;
 
+		/* this is a gnarly hack, turns out without it the calculated
+		 * UDP checksum is wrong for some sequence number values */
+		spx_msg->inv_msg_data[0] = ~(spx_msg->msg_data[0]);
+		spx_msg->inv_msg_data[1] = ~(spx_msg->msg_data[1]);
+		spx_msg->inv_msg_data[2] = ~(spx_msg->msg_data[2]);
+		spx_msg->inv_msg_data[3] = ~(spx_msg->msg_data[3]);
+		spx_msg->inv_msg_data[4] = ~(spx_msg->msg_data[4]);
+		spx_msg->inv_msg_data[5] = ~(spx_msg->msg_data[5]);
+
 		/* add SPX msg to checksum */
 		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
 				sizeof(struct spxhdr), csum_diff);
@@ -576,6 +594,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	bool keep_alive = spx_msg->keep_alive;
 	bool verify = spx_msg->verify;
 	__u8 datastream_type = spx_msg->datastream_type;
+	__u16 msg_seq = spx_msg->local_current_sequence;
 
 	spxh->src_conn_id = spx_state->local_id;
 	spxh->dst_conn_id = spx_state->remote_id;
@@ -672,8 +691,9 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 			/* cannot send packets since the remote is not ready
 			 * for it */
-			if (spx_state->remote_alloc_no <
-					spx_state->local_current_sequence) {
+			if (spx_seq_less_than(spx_state->remote_alloc_no,
+						spx_state->local_current_sequence))
+			{
 				return false;
 			}
 
@@ -694,11 +714,19 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 				return true;
 			}
 
+			if (msg_seq != spx_state->local_current_sequence) {
+				return false;
+			}
+
 			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
 			spx_state->state = IPXW_MUX_SPX_CONN_WAITING_FOR_ACK;
 			return true;
 
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			if (msg_seq != spx_state->local_current_sequence) {
+				return false;
+			}
+
 			/* allow retransmits */
 			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
 			return true;
