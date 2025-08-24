@@ -283,8 +283,9 @@ static long calc_ipx_in_ipv6_csum_loopfn(__u64 index, void* ctx)
 	return 0;
 }
 
-static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
-		ipv6hdr *ip6h, struct udphdr *udph, struct __sk_buff *ctx)
+static __always_inline __sum16 calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh,
+		struct ipv6hdr *ip6h, struct udphdr *udph, struct __sk_buff
+		*ctx)
 {
 	/* pseudo header */
 	__s64 diff = bpf_csum_diff(NULL, 0, (__be32*) &ip6h->saddr,
@@ -334,7 +335,14 @@ static __always_inline __wsum calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh, struct
 	}
 	diff = bpf_csum_diff(NULL, 0, &rest, sizeof(rest), lctx.diff);
 
-	return ~diff;
+	__sum16 ret = ~diff;
+
+	/* handle case where the checksum is zero */
+	if (ret == 0) {
+		ret = 0xFFFF;
+	}
+
+	return ret;
 }
 
 static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
