@@ -85,7 +85,6 @@ static __always_inline bool csum_replace_with_zero_check(struct __sk_buff *skb,
 	__sum16 udp_csum;
 	if (bpf_skb_load_bytes(skb, csum_ofs, &udp_csum, sizeof(__sum16)) != 0)
 	{
-		bpf_printk("failed to read csum");
 		return false;
 	}
 
@@ -95,11 +94,8 @@ static __always_inline bool csum_replace_with_zero_check(struct __sk_buff *skb,
 
 		if (bpf_skb_store_bytes(skb, csum_ofs, &udp_csum,
 					sizeof(__sum16), 0) != 0) {
-			bpf_printk("failed to store csum");
 			return false;
 		}
-
-		bpf_printk("replaced zero csum!");
 	}
 
 	return true;
