@@ -219,10 +219,15 @@ struct ipxw_mux_spx_msg {
 			     system:1,
 			     keep_alive:1,
 			     verify:1,
-			     reserved:3;
+			     ack:1,
+			     ack_required:1,
+			     reserved:1;
 			__u8 datastream_type;
-			__u16 local_current_sequence;
 			__u16 remote_alloc_no;
+			__u16 local_alloc_no;
+			__u16 remote_expected_sequence;
+			__u16 local_current_sequence;
+			__u16 seq_no;
 		} __attribute__((packed));
 	};
 	__u8 data[0];
@@ -264,6 +269,10 @@ bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h);
  * data socket is writeable and block is true */
 ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 		*msg, size_t data_len, bool block);
+
+/* check if the connection is in a state where receiving messages is possible
+ */
+bool ipxw_mux_spx_recv_ready(struct ipxw_mux_spx_handle h);
 
 /* get the length of the received message from the header, may block */
 ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block);

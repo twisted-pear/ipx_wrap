@@ -67,9 +67,7 @@ struct {
 enum ipx_wrap_spx_ingress_verdict {
 	SPX_DROP = 0,
 	SPX_PASS,
-	SPX_DROP_AND_ACK,
-	SPX_PASS_AND_ACK,
-	SPX_PASS_AND_END_ACK
+	SPX_DROP_AND_ACK
 };
 
 static __always_inline bool csum_replace_with_zero_check(struct __sk_buff *skb,
@@ -107,11 +105,8 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 {
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
-	bool end_of_msg = (spxh->connection_control & SPX_CC_END_OF_MSG) != 0;
-	bool attention = (spxh->connection_control & SPX_CC_ATTENTION) != 0;
 	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
 		0;
-	bool system_pkt = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
 	__u8 datastream_type = spxh->datastream_type;
 
 	/* check if the packet fits with our connection state */
@@ -135,110 +130,20 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 	}
 	/* closing the connection is always permitted */
 	if (datastream_type == SPX_DS_END_OF_CONN) {
-		spx_state->state = IPXW_MUX_SPX_INVALID;
-		return (ack_required ? SPX_PASS_AND_END_ACK : SPX_PASS);
+		return SPX_PASS;
 	}
 
-	switch (spx_state->state) {
-		case IPXW_MUX_SPX_INVALID:
-		case IPXW_MUX_SPX_NEW:
-		case IPXW_MUX_SPX_CONN_ACCEPTED:
-			/* don't accept any SPX packets in this state */
+	if (spx_state->remote_id == SPX_CONN_ID_UNKNOWN) {
+		/* accept a new connection ID only from a first packet */
+		if (bpf_ntohs(spxh->seq_no) != 0 || bpf_ntohs(spxh->ack_no) !=
+				0) {
 			return SPX_DROP;
+		}
 
-		case IPXW_MUX_SPX_CONN_REQ_SENT:
-			/* this should be the very first packet the remote
-			 * station sends */
-			if (bpf_ntohs(spxh->ack_no) != 0) {
-				return SPX_DROP;
-			}
-			/* allowed/required connection control flags */
-			if (end_of_msg || attention || ack_required ||
-					!system_pkt) {
-				return SPX_DROP;
-			}
-
-			spx_state->remote_id = spxh->src_conn_id;
-			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
-			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
-
-			return SPX_PASS;
-
-		case IPXW_MUX_SPX_CONN_ESTABLISHED:
-			/* we have none of our own packets "in flight", so the
-			 * remote station should not expect any */
-			if (bpf_ntohs(spxh->ack_no) !=
-					spx_state->local_current_sequence) {
-				return SPX_DROP;
-			}
-			/* can only accept packets up to our alloc number */
-			if (spx_seq_less_than(spx_state->local_alloc_no,
-						bpf_ntohs(spxh->seq_no))) {
-				return SPX_DROP;
-			}
-
-			/* update the remote's alloc number */
-			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
-
-			/* update the state */
-			if (!system_pkt) {
-				__builtin_add_overflow(
-						spx_state->remote_expected_sequence,
-						1,
-						&(spx_state->remote_expected_sequence));
-				__builtin_add_overflow(
-						spx_state->local_alloc_no, 1,
-						&(spx_state->local_alloc_no));
-			}
-
-			/* send an ACK if required */
-			if (ack_required) {
-				return SPX_PASS_AND_ACK;
-			}
-
-			return SPX_PASS;
-
-		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
-			/* can only accept packets up to our alloc number */
-			if (spx_seq_less_than(spx_state->local_alloc_no,
-						bpf_ntohs(spxh->seq_no))) {
-				return SPX_DROP;
-			}
-
-			/* must be an ACK */
-			if (end_of_msg || attention || ack_required ||
-					!system_pkt) {
-				return SPX_DROP;
-			}
-
-			/* we want an ACK and it has to ACK the last packet we
-			 * sent */
-			__u16 local_next_sequence;
-			__builtin_add_overflow(spx_state->local_current_sequence,
-					1, &local_next_sequence);
-			if (bpf_ntohs(spxh->ack_no) != local_next_sequence)
-			{
-				return SPX_DROP;
-			}
-
-			/* update the remote's alloc number */
-			spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
-
-			/* increment sequence number after receiving an ACK */
-			__builtin_add_overflow(spx_state->local_current_sequence,
-					1,
-					&(spx_state->local_current_sequence));
-
-			/* retun to established state */
-			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
-
-			return SPX_PASS;
-
-		default:
-			return SPX_DROP;
+		spx_state->remote_id = spxh->src_conn_id;
 	}
 
-	return SPX_DROP;
+	return SPX_PASS;
 }
 
 #define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
@@ -475,7 +380,12 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			!= 0;
 		bool system_pkt = (spxh->connection_control &
 				SPX_CC_SYSTEM_PKT) != 0;
+		bool ack_required = (spxh->connection_control &
+				SPX_CC_ACK_REQUIRED) != 0;
 		__u8 datastream_type = spxh->datastream_type;
+		__u16 remote_alloc_no = bpf_ntohs(spxh->alloc_no);
+		__u16 seq_no = bpf_ntohs(spxh->seq_no);
+		__u16 ack_no = bpf_ntohs(spxh->ack_no);
 
 		/* remove SPX header from checksum */
 		csum_diff = bpf_csum_diff((__be32*) spxh, sizeof(struct
@@ -491,10 +401,11 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		spx_msg->end_of_msg = end_of_msg;
 		spx_msg->attention = attention;
 		spx_msg->system = system_pkt;
+		spx_msg->ack_required = ack_required;
 		spx_msg->datastream_type = datastream_type;
-		spx_msg->local_current_sequence =
-			spx_state->local_current_sequence;
-		spx_msg->remote_alloc_no = spx_state->remote_alloc_no;
+		spx_msg->remote_alloc_no = remote_alloc_no;
+		spx_msg->seq_no = seq_no;
+		spx_msg->remote_expected_sequence = ack_no;
 
 		/* add SPX msg to checksum */
 		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
@@ -505,9 +416,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	__u32 csum_ofs = ((void *) &(udph->check)) - data;
-	if (spx_state == NULL || (spx_verdict != SPX_DROP_AND_ACK &&
-				spx_verdict != SPX_PASS_AND_ACK && spx_verdict
-				!= SPX_PASS_AND_END_ACK)) {
+	if (spx_state == NULL || spx_verdict != SPX_DROP_AND_ACK) {
 		/* insert the modified checksum */
 		if (!csum_replace_with_zero_check(skb, csum_ofs, csum_diff)) {
 			return TC_ACT_SHOT;
@@ -517,8 +426,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	/* we have to generate an ACK, we do this by rewriting the packet and
-	 * cloning it, the clone is sent to the appropriate egress interface,
-	 * then the original is restored and handled normally */
+	 * reflecting it */
 
 	/* FIB lookup for the ACK */
 	__builtin_memset(&fib_params, 0, sizeof(fib_params));
@@ -536,10 +444,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	/* save ETH and IPv6 headers */
-	struct ethhdr eth_bak = *eth;
-	struct ipv6hdr ip6h_bak = *ip6h;
-
 	/* update ETH and IPv6 headers */
 	__builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
 	__builtin_memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
@@ -553,9 +457,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		.mark = IPX_SPX_REFLECTED_ACK,
 		.is_bcast = false,
 		.is_for_local = false,
-		.is_spx_ack = (spx_verdict == SPX_PASS_AND_ACK || spx_verdict
-				== SPX_DROP_AND_ACK),
-		.is_spx_end_of_conn_ack = (spx_verdict == SPX_PASS_AND_END_ACK),
+		.is_spx_end_of_conn_ack = (spx_msg->datastream_type ==
+				SPX_DS_END_OF_CONN),
 		.spx_src = e->addr,
 		.spx_conn_id = spx_state->local_id
 	};
@@ -565,78 +468,78 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	skb->cb[3] = cb_new.cb[3];
 	skb->cb[4] = cb_new.cb[4];
 
-	/* clone redirect the thusly generated ACK*/
-	if (bpf_clone_redirect(skb, fib_params.ifindex, 0) != 0) {
-		return TC_ACT_SHOT;
-	}
-
-	/* if we only need to ACK, stop here */
-	if (spx_verdict == SPX_DROP_AND_ACK) {
-		return TC_ACT_SHOT;
-	}
-
-	/* restore ETH and IPv6 headers */
-	if (bpf_skb_store_bytes(skb, 0, &eth_bak, sizeof(struct ethhdr), 0) !=
-			0) {
-		return TC_ACT_SHOT;
-	}
-	if (bpf_skb_store_bytes(skb, sizeof(struct ethhdr), &ip6h_bak,
-				sizeof(struct ipv6hdr), 0) != 0) {
-		return TC_ACT_SHOT;
-	}
-
-	/* restore cb */
-	skb->cb[0] = cb.cb[0];
-	skb->cb[1] = cb.cb[1];
-	skb->cb[2] = cb.cb[2];
-	skb->cb[3] = cb.cb[3];
-	skb->cb[4] = cb.cb[4];
-
-	/* update the checksum for the original packet, the ACK has a wrong
-	 * checksum but it is never verified */
-	if (!csum_replace_with_zero_check(skb, csum_ofs, csum_diff)) {
-		return TC_ACT_SHOT;
-	}
-
-	return TC_ACT_OK;
+	/* redirect the thusly generated ACK */
+	return bpf_redirect(fib_params.ifindex, 0);
 }
 
 static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		*spx_state, struct ipxw_mux_spx_msg_min *spx_msg, struct
 		bpf_cb_info *cb_info)
 {
-	struct ipxhdr *ipxh = &(spx_msg->ipxh);
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
 	bool end_of_msg = spx_msg->end_of_msg;
 	bool attention = spx_msg->attention;
+	bool system = spx_msg->system;
 	bool keep_alive = spx_msg->keep_alive;
 	bool verify = spx_msg->verify;
+	bool ack = spx_msg->ack;
+	bool ack_required = spx_msg->ack_required;
 	__u8 datastream_type = spx_msg->datastream_type;
 	__u16 msg_seq = spx_msg->local_current_sequence;
+	__u16 msg_ack = spx_msg->remote_expected_sequence;
+	__u16 msg_loc_alloc = spx_msg->local_alloc_no;
+	__u16 msg_rem_alloc = spx_msg->remote_alloc_no;
 
 	spxh->src_conn_id = spx_state->local_id;
 	spxh->dst_conn_id = spx_state->remote_id;
 
-	spxh->seq_no = bpf_htons(spx_state->local_current_sequence);
-	spxh->ack_no = bpf_htons(spx_state->remote_expected_sequence);
+	spxh->seq_no = bpf_htons(msg_seq);
+	spxh->ack_no = bpf_htons(msg_ack);
 
-	spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
+	spxh->alloc_no = bpf_htons(msg_loc_alloc);
 
-	/* always allow ACKs and end-of-connection ACKs to go out */
+	/* always allow reflected ACKs to go out, use the last known
+	 * information to fill in the header */
 	if (cb_info->mark == IPX_SPX_REFLECTED_ACK) {
-		if (cb_info->is_spx_ack) {
-			spxh->connection_control = SPX_CC_SYSTEM_PKT;
-			spxh->datastream_type = SPX_DS_NONE;
-			return true;
-		}
-		if (cb_info->is_spx_end_of_conn_ack) {
-			spxh->connection_control = SPX_CC_SYSTEM_PKT;
-			spxh->datastream_type = SPX_DS_END_OF_CONN_ACK;
-			return true;
-		}
+		spxh->seq_no = spx_state->local_current_sequence;
+		spxh->ack_no = spx_state->remote_expected_sequence;
+		spxh->alloc_no = spx_state->local_alloc_no;
+		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		spxh->datastream_type = (cb_info->is_spx_end_of_conn_ack ?
+				SPX_DS_END_OF_CONN_ACK : SPX_DS_NONE);
+		return true;
+	}
 
-		return false;
+	spx_state->local_current_sequence = msg_seq;
+	spx_state->remote_expected_sequence = msg_ack;
+	spx_state->local_alloc_no = msg_loc_alloc;
+	spx_state->remote_alloc_no = msg_rem_alloc;
+
+	/* allow sending connection verification requests
+	 * without changing state */
+	if (verify) {
+		spxh->connection_control = SPX_CC_SYSTEM_PKT |
+			SPX_CC_ACK_REQUIRED;
+		spxh->datastream_type = SPX_DS_NONE;
+		return true;
+	}
+
+	/* allow sending keep alive packets */
+	if (keep_alive) {
+		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		spxh->datastream_type = SPX_DS_NONE;
+		return true;
+	}
+
+	/* allow sending ACK packets */
+	if (ack) {
+		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		spxh->datastream_type = SPX_DS_NONE;
+		if (datastream_type == SPX_DS_END_OF_CONN_ACK) {
+			spxh->datastream_type = SPX_DS_END_OF_CONN_ACK;
+		}
+		return true;
 	}
 
 	spxh->datastream_type = datastream_type;
@@ -648,113 +551,14 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	if (attention) {
 		spxh->connection_control |= SPX_CC_ATTENTION;
 	}
+	if (ack_required) {
+		spxh->connection_control |= SPX_CC_ACK_REQUIRED;
+	}
+	if (system) {
+		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
+	}
 
-	switch (spx_state->state) {
-		case IPXW_MUX_SPX_INVALID:
-			return false;
-
-		case IPXW_MUX_SPX_CONN_REQ_SENT:
-			/* retrying a connection is allowed */
-		case IPXW_MUX_SPX_NEW:
-			spxh->connection_control = SPX_CC_SYSTEM_PKT |
-				SPX_CC_ACK_REQUIRED;
-
-			/* no special type allowed in connection request */
-			if (datastream_type != SPX_DS_NONE) {
-				return false;
-			}
-
-			/* some sanity checks */
-			if (spxh->dst_conn_id != SPX_CONN_ID_UNKNOWN) {
-				return false;
-			}
-			if (bpf_ntohs(spxh->seq_no) != 0 ||
-					bpf_ntohs(spxh->ack_no) != 0) {
-				return false;
-			}
-
-			/* no data allowed in connection request */
-			if (bpf_ntohs(ipxh->pktlen) != sizeof(struct ipxhdr) +
-					sizeof(struct spxhdr)) {
-				return false;
-			}
-
-			spx_state->state = IPXW_MUX_SPX_CONN_REQ_SENT;
-
-			return true;
-
-		case IPXW_MUX_SPX_CONN_ACCEPTED:
-			spxh->connection_control = SPX_CC_SYSTEM_PKT;
-
-			/* no special type allowed in connection request */
-			if (datastream_type != SPX_DS_NONE) {
-				return false;
-			}
-
-			/* some sanity checks */
-			if (bpf_ntohs(spxh->seq_no) != 0 ||
-					bpf_ntohs(spxh->ack_no) != 0) {
-				return false;
-			}
-
-			/* no data allowed in connection reply */
-			if (bpf_ntohs(ipxh->pktlen) != sizeof(struct ipxhdr) +
-					sizeof(struct spxhdr)) {
-				return false;
-			}
-
-			spx_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
-
-			return true;
-
-		case IPXW_MUX_SPX_CONN_ESTABLISHED:
-			/* cannot send packets since the remote is not ready
-			 * for it */
-			if (spx_seq_less_than(spx_state->remote_alloc_no,
-						spx_state->local_current_sequence))
-			{
-				return false;
-			}
-
-			/* allow sending connection verification requests
-			 * without changing state */
-			if (verify) {
-				spxh->connection_control = SPX_CC_SYSTEM_PKT |
-					SPX_CC_ACK_REQUIRED;
-				spxh->datastream_type = SPX_DS_NONE;
-				return true;
-			}
-
-			/* allow sending keep alive packets without changing
-			 * state */
-			if (keep_alive) {
-				spxh->connection_control = SPX_CC_SYSTEM_PKT;
-				spxh->datastream_type = SPX_DS_NONE;
-				return true;
-			}
-
-			if (msg_seq != spx_state->local_current_sequence) {
-				return false;
-			}
-
-			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
-			spx_state->state = IPXW_MUX_SPX_CONN_WAITING_FOR_ACK;
-			return true;
-
-		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
-			if (msg_seq != spx_state->local_current_sequence) {
-				return false;
-			}
-
-			/* allow retransmits */
-			spxh->connection_control |= SPX_CC_ACK_REQUIRED;
-			return true;
-
-		default:
-			return false;
-	};
-
-	return false;
+	return true;
 }
 
 static __always_inline struct bpf_sock *get_client_sock_from_spx_conn(struct

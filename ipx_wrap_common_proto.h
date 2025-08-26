@@ -108,10 +108,15 @@ struct ipxw_mux_spx_msg_min {
 			     system:1,
 			     keep_alive:1,
 			     verify:1,
-			     reserved:3;
+			     ack:1,
+			     ack_required:1,
+			     reserved:1;
 			__u8 datastream_type;
-			__u16 local_current_sequence;
 			__u16 remote_alloc_no;
+			__u16 local_alloc_no;
+			__u16 remote_expected_sequence;
+			__u16 local_current_sequence;
+			__u16 seq_no;
 		} __attribute__((packed));
 	};
 	__u8 data[0];
@@ -132,7 +137,9 @@ enum ipxw_mux_spx_connection_state {
 	IPXW_MUX_SPX_CONN_REQ_SENT,
 	IPXW_MUX_SPX_CONN_ACCEPTED,
 	IPXW_MUX_SPX_CONN_ESTABLISHED,
-	IPXW_MUX_SPX_CONN_WAITING_FOR_ACK
+	IPXW_MUX_SPX_CONN_MUST_SEND_ACK,
+	IPXW_MUX_SPX_CONN_WAITING_FOR_ACK,
+	IPXW_MUX_SPX_CONN_CLOSED
 };
 
 struct spx_conn_key {
@@ -149,7 +156,6 @@ struct bpf_spx_state {
 	__u16 local_alloc_no;
 	__u16 remote_expected_sequence;
 	__u16 local_current_sequence;
-	enum ipxw_mux_spx_connection_state state;
 	__be32 prefix;
 };
 

@@ -1246,6 +1246,8 @@ struct ipxw_mux_spx_handle_state {
 	enum ipxw_mux_spx_connection_state state;
 	__be16 conn_id;
 	__u16 remote_alloc_no;
+	__u16 local_alloc_no;
+	__u16 remote_expected_sequence;
 	__u16 local_current_sequence;
 	__u16 last_tx_attempts;
 	__u16 ticks_since_last_keep_alive;
@@ -1386,21 +1388,45 @@ __be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg)
 	return spxh->src_conn_id;
 }
 
+static void ipxw_mux_fill_msg_from_state(struct ipxw_mux_spx_handle h, struct
+		ipxw_mux_spx_msg *msg)
+{
+	msg->local_current_sequence =
+		h.last_known_state->local_current_sequence;
+	msg->remote_expected_sequence =
+		h.last_known_state->remote_expected_sequence;
+	msg->local_alloc_no = h.last_known_state->local_alloc_no;
+	msg->remote_alloc_no = h.last_known_state->remote_alloc_no;
+}
+
 static void ipxw_mux_spx_close_internal(struct ipxw_mux_spx_handle *h)
 {
 	if (!ipxw_mux_spx_handle_is_error(*h)) {
 		/* send a close packet if possible */
-		if (h->last_known_state->state == IPXW_MUX_SPX_CONN_ESTABLISHED
-				|| h->last_known_state->state ==
-				IPXW_MUX_SPX_CONN_WAITING_FOR_ACK) {
-			struct ipxw_mux_spx_msg close_spx_msg;
-			memset(&close_spx_msg, 0, sizeof(struct
-						ipxw_mux_spx_msg));
-			close_spx_msg.local_current_sequence =
-				h->last_known_state->local_current_sequence;
-			close_spx_msg.datastream_type = SPX_DS_END_OF_CONN;
-			send(h->spx_sock, &close_spx_msg,
-					sizeof(close_spx_msg), MSG_DONTWAIT);
+		switch (h->last_known_state->state) {
+			case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+				/* try to get our hands on the latest ACK if we
+				 * can */
+				struct ipxw_mux_spx_msg latest_ack;
+				ipxw_mux_spx_get_recvd(*h, &latest_ack, 0,
+						false);
+			case IPXW_MUX_SPX_CONN_ESTABLISHED:
+			case IPXW_MUX_SPX_CONN_MUST_SEND_ACK:
+				struct ipxw_mux_spx_msg close_spx_msg;
+				memset(&close_spx_msg, 0, sizeof(struct
+							ipxw_mux_spx_msg));
+				ipxw_mux_fill_msg_from_state(*h,
+						&close_spx_msg);
+				close_spx_msg.system = true;
+				close_spx_msg.ack_required = true;
+				close_spx_msg.datastream_type =
+					SPX_DS_END_OF_CONN;
+				send(h->spx_sock, &close_spx_msg,
+						sizeof(close_spx_msg),
+						MSG_DONTWAIT);
+				break;
+			default:
+				break;
 		}
 
 		/* no error handling, nothing that can be done */
@@ -1473,6 +1499,10 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		/* fire off the first packet in the connection */
 		struct ipxw_mux_spx_msg spx_connect_req;
 		memset(&spx_connect_req, 0, sizeof(struct ipxw_mux_spx_msg));
+		spx_connect_req.system = true;
+		spx_connect_req.ack_required = true;
+		spx_connect_req.datastream_type = SPX_DS_NONE;
+
 		ssize_t sent_len = send(ret.spx_sock, &spx_connect_req,
 				sizeof(struct ipxw_mux_spx_msg), 0);
 		if (sent_len < 0) {
@@ -1541,6 +1571,8 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 		/* fire off the first packet in the connection */
 		struct ipxw_mux_spx_msg spx_accept_rsp;
 		memset(&spx_accept_rsp, 0, sizeof(struct ipxw_mux_spx_msg));
+		spx_accept_rsp.system = true;
+		spx_accept_rsp.datastream_type = SPX_DS_NONE;
 		ssize_t sent_len = send(ret.spx_sock, &spx_accept_rsp,
 				sizeof(struct ipxw_mux_spx_msg), 0);
 		if (sent_len < 0) {
@@ -1559,6 +1591,43 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 	ipxw_mux_spx_close_internal(&ret);
 
 	return ret;
+}
+
+static bool ipxw_mux_spx_send_ack(struct ipxw_mux_spx_handle h, bool
+		end_of_conn)
+{
+	assert(h.last_known_state->state == IPXW_MUX_SPX_CONN_MUST_SEND_ACK);
+
+	struct ipxw_mux_spx_msg ack_msg;
+	memset(&ack_msg, 0, sizeof(struct ipxw_mux_spx_msg));
+	ipxw_mux_fill_msg_from_state(h, &ack_msg);
+	ack_msg.ack = true;
+	if (end_of_conn) {
+		ack_msg.datastream_type = SPX_DS_END_OF_CONN_ACK;
+	}
+
+	/* transmit the ack message */
+	ssize_t sent_len = send(h.spx_sock, &ack_msg, sizeof(struct
+				ipxw_mux_spx_msg), MSG_DONTWAIT);
+
+	if (sent_len < 0) {
+		return false;
+	}
+	if (sent_len != sizeof(struct ipxw_mux_spx_msg)) {
+		errno = ECOMM;
+		return false;
+	}
+
+	/* reset the counters */
+	h.last_known_state->ticks_since_last_keep_alive = 0;
+
+	/* update the state */
+	h.last_known_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
+	if (end_of_conn) {
+		h.last_known_state->state = IPXW_MUX_SPX_CONN_CLOSED;
+	}
+
+	return true;
 }
 
 bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
@@ -1585,6 +1654,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 			struct ipxw_mux_spx_msg spx_msg;
 			memset(&spx_msg, 0, sizeof(struct ipxw_mux_spx_msg));
+			ipxw_mux_fill_msg_from_state(h, &spx_msg);
 
 			if (h.last_known_state->ticks_since_last_verify >
 					SPX_VERIFY_TMO_TICKS) {
@@ -1626,6 +1696,20 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 			}
 
 			return true;
+		case IPXW_MUX_SPX_CONN_MUST_SEND_ACK:
+			if (!ipxw_mux_spx_send_ack(h, false)) {
+				if (errno == EINTR || errno == EAGAIN || errno
+						== EWOULDBLOCK || errno ==
+						EMSGSIZE || errno == ENOBUFS ||
+						errno == ECOMM) {
+					return true;
+				}
+
+				break;
+			}
+
+			return true;
+
 		case IPXW_MUX_SPX_CONN_REQ_SENT:
 			/* retransmit connection request if necessary */
 			h.last_known_state->last_msg_data_len = 0;
@@ -1696,6 +1780,13 @@ bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
 		return false;
 	}
 
+	/* if an ack is outstanding, try to send it here */
+	if (h.last_known_state->state == IPXW_MUX_SPX_CONN_MUST_SEND_ACK) {
+		if (!ipxw_mux_spx_send_ack(h, false)) {
+			return false;
+		}
+	}
+
 	/* not ready to send or remote not ready to receive */
 	if (h.last_known_state->state != IPXW_MUX_SPX_CONN_ESTABLISHED) {
 		return false;
@@ -1741,12 +1832,12 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	}
 
 	/* clear output and disallowed message fields */
-	msg->keep_alive = 0;
-	msg->verify = 0;
-	msg->system = 0;
-	msg->remote_alloc_no = 0;
-	msg->local_current_sequence =
-		h.last_known_state->local_current_sequence;
+	msg->keep_alive = false;
+	msg->verify = false;
+	msg->system = false;
+	msg->ack = false;
+	msg->ack_required = true;
+	ipxw_mux_fill_msg_from_state(h, msg);
 
 	size_t msg_len = sizeof(struct ipxw_mux_spx_msg) + data_len;
 
@@ -1772,6 +1863,31 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	h.last_known_state->state = IPXW_MUX_SPX_CONN_WAITING_FOR_ACK;
 
 	return sent_len;
+}
+
+bool ipxw_mux_spx_recv_ready(struct ipxw_mux_spx_handle h)
+{
+	if (ipxw_mux_spx_handle_is_error(h)) {
+		return false;
+	}
+
+	/* if an ack is outstanding, try to send it here */
+	if (h.last_known_state->state == IPXW_MUX_SPX_CONN_MUST_SEND_ACK) {
+		if (!ipxw_mux_spx_send_ack(h, false)) {
+			return false;
+		}
+	}
+
+	switch (h.last_known_state->state) {
+		case IPXW_MUX_SPX_CONN_REQ_SENT:
+		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			return true;
+		default:
+			return false;
+	}
+
+	return false;
 }
 
 ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
@@ -1872,21 +1988,105 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		return -1;
 	}
 
-	h.last_known_state->ticks_since_last_remote_msg = 0;
-	h.last_known_state->remote_alloc_no = msg->remote_alloc_no;
-	h.last_known_state->local_current_sequence =
-		msg->local_current_sequence;
-
 	if (msg->datastream_type == SPX_DS_END_OF_CONN) {
+		h.last_known_state->state = IPXW_MUX_SPX_CONN_MUST_SEND_ACK;
+		ipxw_mux_spx_send_ack(h, true);
 		errno = ENOTCONN;
 		return -1;
 	}
 
+	if (spx_seq_less_than(h.last_known_state->local_alloc_no, msg->seq_no))
+	{
+		/* invalid message, no output */
+		memset(msg, 0, sizeof(struct ipxw_mux_spx_msg) + data_len);
+		return 0;
+	}
+
 	switch (h.last_known_state->state) {
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
+			if (h.last_known_state->local_current_sequence !=
+					msg->remote_expected_sequence) {
+				/* invalid message, no output */
+				memset(msg, 0, sizeof(struct ipxw_mux_spx_msg)
+						+ data_len);
+				return 0;
+			}
+
+			/* update the state */
+			if (!msg->system) {
+				__builtin_add_overflow(
+						h.last_known_state->remote_expected_sequence,
+						1,
+						&(h.last_known_state->remote_expected_sequence));
+				__builtin_add_overflow(
+						h.last_known_state->local_alloc_no,
+						1,
+						&(h.last_known_state->local_alloc_no));
+
+			}
+
+			if (msg->ack_required) {
+				h.last_known_state->state =
+					IPXW_MUX_SPX_CONN_MUST_SEND_ACK;
+				ipxw_mux_spx_send_ack(h, false);
+			}
+
 			break;
 		case IPXW_MUX_SPX_CONN_REQ_SENT:
+			/* message must have the correct flags */
+			if (msg->end_of_msg || msg->attention ||
+					msg->ack_required || !msg->system) {
+				/* invalid message, no output */
+				memset(msg, 0, sizeof(struct ipxw_mux_spx_msg)
+						+ data_len);
+				return 0;
+			}
+
+			/* this should be the very first packet the remote
+			 * station sends */
+			if (msg->remote_expected_sequence != 0) {
+				/* invalid message, no output */
+				memset(msg, 0, sizeof(struct ipxw_mux_spx_msg)
+						+ data_len);
+				return 0;
+			}
+
+			/* this acks the last sent msg */
+			h.last_known_state->state =
+				IPXW_MUX_SPX_CONN_ESTABLISHED;
+			h.last_known_state->last_tx_attempts = 0;
+			break;
+
 		case IPXW_MUX_SPX_CONN_WAITING_FOR_ACK:
+			/* message must be an ACK */
+			if (msg->end_of_msg || msg->attention ||
+					msg->ack_required || !msg->system) {
+				/* invalid message, no output */
+				memset(msg, 0, sizeof(struct ipxw_mux_spx_msg)
+						+ data_len);
+				return 0;
+			}
+
+			/* we want an ACK and it has to ACK the last packet we
+			 * sent */
+			__u16 local_next_sequence;
+			__builtin_add_overflow(
+					h.last_known_state->local_current_sequence,
+					1, &local_next_sequence);
+			if (msg->remote_expected_sequence !=
+					local_next_sequence) {
+				/* invalid message, no output */
+				memset(msg, 0, sizeof(struct ipxw_mux_spx_msg)
+						+ data_len);
+				return 0;
+			}
+
+			/* increment sequence number after receiving an ACK */
+			__builtin_add_overflow(
+					h.last_known_state->local_current_sequence,
+					1,
+					&(h.last_known_state->local_current_sequence));
+
 			/* this acks the last sent msg */
 			h.last_known_state->state =
 				IPXW_MUX_SPX_CONN_ESTABLISHED;
@@ -1896,6 +2096,10 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 			assert(0);
 	}
 
+	/* update the state */
+	h.last_known_state->ticks_since_last_remote_msg = 0;
+	h.last_known_state->remote_alloc_no = msg->remote_alloc_no;
+
 	if (msg->system) {
 		/* no output in case of system msg */
 		memset(msg, 0, sizeof(struct ipxw_mux_spx_msg) + data_len);
@@ -1903,11 +2107,16 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 	}
 
 	/* clear system fields before output */
-	msg->system = 0;
-	msg->keep_alive = 0;
-	msg->verify = 0;
-	msg->local_current_sequence = 0;
+	msg->system = false;
+	msg->keep_alive = false;
+	msg->verify = false;
+	msg->ack = false;
+	msg->ack_required = false;
 	msg->remote_alloc_no = 0;
+	msg->local_alloc_no = 0;
+	msg->remote_expected_sequence = 0;
+	msg->local_current_sequence = 0;
+	msg->seq_no = 0;
 
 	return rcvd_len;
 }

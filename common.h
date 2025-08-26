@@ -63,9 +63,8 @@ struct bpf_cb_info {
 			__u16 mark;
 			__u16 is_bcast:1,
 			      is_for_local:1,
-			      is_spx_ack:1,
 			      is_spx_end_of_conn_ack:1,
-			      reserved:12;
+			      reserved:13;
 			struct ipx_addr spx_src;
 			__be16 spx_conn_id;
 		} __attribute__((packed));

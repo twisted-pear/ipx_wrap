@@ -290,7 +290,7 @@ static bool print_in_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 		/* should not get IPX messages in these configs */
 		if (cfg->use_spx || !cfg->listen) {
 			if (cfg->verbose) {
-				fprintf(stderr, "unexpected IPX message from");
+				fprintf(stderr, "unexpected IPX message from ");
 				print_ipxaddr(stderr,
 						&(msg->recv.saddr));
 				fprintf(stderr, ": ");
@@ -526,6 +526,11 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 static void spx_recv_loop(int epoll_fd, int tmr_fd, struct ipxcat_cfg *cfg)
 {
 	while (true) {
+		/* cannot receive right now */
+		if (!ipxw_mux_spx_recv_ready(spxh)) {
+			return;
+		}
+
 		/* SPX message received */
 		ssize_t expected_msg_len = ipxw_mux_spx_peek_recvd_len(spxh,
 				false);
