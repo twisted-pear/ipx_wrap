@@ -13,13 +13,15 @@
 #define DEFAULT_IPX_DATA_LEN (SPX_MAX_DATA_LEN_WO_SIZNG - sizeof(struct \
 			ipxhdr))
 
-#define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD 4096
+#define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (1024)
+#define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (1024)
 
 enum ipxcat_error_codes {
 	IPXCAT_ERR_OK = 0,
 	IPXCAT_ERR_USAGE,
 	IPXCAT_ERR_EPOLL_FD,
 	IPXCAT_ERR_TMR_FD,
+	IPXCAT_ERR_STDOUT_FD,
 	IPXCAT_ERR_STDIN_FD,
 	IPXCAT_ERR_CONF_FD,
 	IPXCAT_ERR_IPX_FD,
@@ -52,12 +54,15 @@ struct ipxcat_cfg {
 	__u8 pkt_type;
 	__u16 max_ipx_data_len;
 	size_t tx_queue_pause_threshold;
+	size_t rx_queue_pause_threshold;
 	struct ipx_addr local_addr;
 	struct ipx_addr remote_addr;
 };
 
 static bool keep_going = true;
 static bool stdin_closed = false;
+static bool stdin_is_file = false;
+static bool stdout_is_file = false;
 
 struct counted_msg_queue {
 	struct ipxw_msg_queue q;
@@ -108,6 +113,10 @@ static struct counted_msg_queue ipx_out_queue = {
 };
 static struct counted_msg_queue spx_out_queue = {
 	.q = STAILQ_HEAD_INITIALIZER(spx_out_queue.q),
+	.n = 0
+};
+static struct counted_msg_queue in_queue = {
+	.q = STAILQ_HEAD_INITIALIZER(in_queue.q),
 	.n = 0
 };
 
@@ -219,6 +228,94 @@ static void print_ipxaddr(FILE *f, const struct ipx_addr *addr)
 			addr->node[5], ntohs(addr->sock));
 }
 
+static bool queue_in_msg(int epoll_fd, struct ipxw_mux_msg *msg)
+{
+	/* reregister for ready-to-write events, now that messages are
+	 * available */
+	if (!stdout_is_file) {
+		struct epoll_event ev = {
+			.events = EPOLLOUT | EPOLLERR | EPOLLHUP,
+			.data.fd = fileno(stdout)
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fileno(stdout), &ev) <
+				0) {
+			return false;
+		}
+	}
+
+	/* queue the input message */
+	counted_msg_queue_push(&in_queue, msg);
+
+	return true;
+}
+
+static void print_in_msg(int epoll_fd, struct ipxcat_cfg *cfg)
+{
+	/* no msgs to print */
+	if (counted_msg_queue_empty(&in_queue)) {
+		if (!stdout_is_file) {
+			/* unregister from ready-to-write events to avoid busy
+			 * polling */
+			struct epoll_event ev = {
+				.events = EPOLLERR | EPOLLHUP,
+				.data.fd = fileno(stdout)
+			};
+			epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fileno(stdout),
+					&ev);
+		}
+
+		return;
+	}
+
+	struct ipxw_mux_msg *msg = counted_msg_queue_pop(&in_queue);
+	size_t data_len = msg->recv.data_len;
+
+	if (msg->recv.is_spx) {
+		/* should never get SPX messages without an SPX connection */
+		if (ipxw_mux_spx_handle_is_error(spxh)) {
+			assert(0);
+		}
+		if (!cfg->use_spx) {
+			assert(0);
+		}
+
+		struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *)
+			msg;
+		fputs_bin((char *) spx_msg->data, data_len, stdout);
+	} else {
+		/* should not get IPX messages in these configs */
+		if (cfg->use_spx || !cfg->listen) {
+			if (cfg->verbose) {
+				fprintf(stderr, "unexpected IPX message from");
+				print_ipxaddr(stderr,
+						&(msg->recv.saddr));
+				fprintf(stderr, ": ");
+				fputs_bin((char *) msg->data, data_len,
+						stderr);
+				fprintf(stderr, "\n");
+			}
+		} else {
+			if (cfg->verbose) {
+				fflush(stdout);
+				fprintf(stderr, "message from ");
+				print_ipxaddr(stderr,
+						&(msg->recv.saddr));
+				fprintf(stderr, ": ");
+				fflush(stderr);
+			}
+			fputs_bin((char *) msg->data, data_len,
+					stdout);
+			if (cfg->verbose) {
+				fflush(stdout);
+				fprintf(stderr, "\n");
+			}
+		}
+
+	}
+
+	free(msg);
+}
+
 static bool queue_out_msg(struct counted_msg_queue *q, int epoll_fd, int fd,
 		struct ipxw_mux_msg *msg)
 {
@@ -232,7 +329,7 @@ static bool queue_out_msg(struct counted_msg_queue *q, int epoll_fd, int fd,
 		return false;
 	}
 
-	/* queue the config message on the config socket */
+	/* queue the output message */
 	counted_msg_queue_push(q, msg);
 
 	return true;
@@ -317,6 +414,77 @@ static bool send_out_spx_msg(struct counted_msg_queue *q, int epoll_fd, struct
 	return (err >= 0);
 }
 
+static bool read_and_queue_out_msg(int epoll_fd, struct ipxcat_cfg *cfg)
+{
+	/* we cannot send anything in this configuration */
+	if (cfg->listen && !cfg->use_spx) {
+		return true;
+	}
+
+	/* no SPX connection established yet */
+	if (cfg->use_spx && ipxw_mux_spx_handle_is_error(spxh)) {
+		return true;
+	}
+
+	struct counted_msg_queue *q = &ipx_out_queue;
+	if (cfg->use_spx) {
+		q = &spx_out_queue;
+	}
+
+	/* queue is full, try again later */
+	if (counted_msg_queue_nitems(q) > cfg->tx_queue_pause_threshold) {
+		return true;
+	}
+
+	struct ipxw_mux_msg *msg = NULL;
+	size_t max_data_len = cfg->max_ipx_data_len;
+	if (cfg->use_spx) {
+		msg = calloc(1, sizeof(struct ipxw_mux_spx_msg) +
+				SPX_MAX_DATA_LEN_WO_SIZNG);
+		max_data_len = SPX_MAX_DATA_LEN_WO_SIZNG;
+	} else {
+		msg = calloc(1, sizeof(struct ipxw_mux_msg) +
+				cfg->max_ipx_data_len);
+	}
+
+	if (msg == NULL) {
+		return false;
+	}
+
+	msg->type = IPXW_MUX_XMIT;
+
+	char *data = (char *) msg->data;
+	int sockfd = ipxw_mux_handle_data(ipxh);
+	if (cfg->use_spx) {
+		data = (char *) ((struct ipxw_mux_spx_msg *) msg)->data;
+		sockfd = ipxw_mux_spx_handle_sock(spxh);
+	} else {
+		msg->xmit.pkt_type = cfg->pkt_type;
+		msg->xmit.daddr = cfg->remote_addr;
+	}
+
+	ssize_t data_len = fgets_bin(data, max_data_len, stdin);
+	/* nothing more to send, prepare to end the program */
+	if (data_len == EOF) {
+		free(msg);
+		stdin_closed = true;
+		return true;
+	}
+
+	/* record the message data length */
+	msg->xmit.data_len = data_len;
+	if (cfg->use_spx) {
+		msg->xmit.data_len += sizeof(struct spxhdr);
+	}
+
+	if (!queue_out_msg(q, epoll_fd, sockfd, msg)) {
+		free(msg);
+		return false;
+	}
+
+	return true;
+}
+
 static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, enum
 		ipxcat_error_codes code)
 {
@@ -357,7 +525,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 	bind_msg.bind.pkt_type_any = cfg->pkt_type_any;
 	bind_msg.bind.recv_bcast = cfg->accept_broadcasts;
 
-	struct ipxw_mux_handle ipxh = ipxw_mux_bind(&bind_msg);
+	ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {
 		perror("IPX bind");
 		cleanup_and_exit(epoll_fd, tmr_fd, IPXCAT_ERR_BIND);
@@ -389,16 +557,39 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 		cleanup_and_exit(epoll_fd, tmr_fd, IPXCAT_ERR_IPX_FD);
 	}
 
+	/* get ready to send output to STDOUT */
+	ev.events = EPOLLOUT | EPOLLERR | EPOLLHUP;
+	ev.data.fd = fileno(stdout);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(stdout),
+				&ev) < 0) {
+		/* EPERM most likely means that stdout is a regular file, in
+		 * that case we cannot poll and just try to read it in every
+		 * loop interation */
+		if (errno == EPERM) {
+			stdout_is_file = true;
+		} else {
+			perror("registering stdout for event polling");
+			cleanup_and_exit(epoll_fd, tmr_fd,
+					IPXCAT_ERR_STDOUT_FD);
+		}
+	}
+
 	if (!cfg->listen) {
-		/* only take input from STDIN when we are an IPX sender or SPX
-		 * initiator */
+		/* start taking input from STDIN */
 		ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 		ev.data.fd = fileno(stdin);
 		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(stdin), &ev) < 0)
 		{
-			perror("registering stdin for event polling");
-			cleanup_and_exit(epoll_fd, tmr_fd,
-					IPXCAT_ERR_STDIN_FD);
+			/* EPERM most likely means that stdin is a regular
+			 * file, in that case we cannot poll and just try to
+			 * read it in every loop interation */
+			if (errno == EPERM) {
+				stdin_is_file = true;
+			} else {
+				perror("registering stdin for event polling");
+				cleanup_and_exit(epoll_fd, tmr_fd,
+						IPXCAT_ERR_STDIN_FD);
+			}
 		}
 
 		/* initiate SPX connection */
@@ -410,6 +601,7 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 						IPXCAT_ERR_SPX_CONNECT);
 			}
 
+			/* register SPX socket for reception */
 			ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 			ev.data.fd = ipxw_mux_spx_handle_sock(spxh);
 			if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
@@ -439,7 +631,22 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 			}
 		}
 
-		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
+		/* stdout */
+		if (stdout_is_file) {
+			print_in_msg(epoll_fd, cfg);
+		}
+
+		/* stdin */
+		if (stdin_is_file) {
+			if (!read_and_queue_out_msg(epoll_fd, cfg)) {
+				perror("queueing message");
+				cleanup_and_exit(epoll_fd, tmr_fd,
+						IPXCAT_ERR_MSG_QUEUE);
+			}
+		}
+
+		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS,
+				TICKS_MS);
 		if (n_fds < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -480,81 +687,19 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				continue;
 			}
 
+			/* stdout */
+			if (evs[i].data.fd == fileno(stdout)) {
+				print_in_msg(epoll_fd, cfg);
+				continue;
+			}
+
 			/* stdin */
 			if (evs[i].data.fd == fileno(stdin)) {
-				/* we cannot send anything in this configuration */
-				if (cfg->listen && !cfg->use_spx) {
-					assert(0);
-				}
-
-				struct counted_msg_queue *q = &ipx_out_queue;
-				if (cfg->use_spx) {
-					q = &spx_out_queue;
-				}
-
-				/* queue is full, try again later */
-				if (counted_msg_queue_nitems(q) >
-						cfg->tx_queue_pause_threshold)
-				{
-					continue;
-				}
-
-				struct ipxw_mux_msg *msg = NULL;
-				size_t max_data_len = cfg->max_ipx_data_len;
-				if (cfg->use_spx) {
-					msg = calloc(1, sizeof(struct
-								ipxw_mux_spx_msg)
-							+
-							SPX_MAX_DATA_LEN_WO_SIZNG);
-					max_data_len = SPX_MAX_DATA_LEN_WO_SIZNG;
-				} else {
-					msg = calloc(1, sizeof(struct
-								ipxw_mux_msg) +
-							cfg->max_ipx_data_len);
-				}
-
-				if (msg == NULL) {
-					perror("allocating message");
-					cleanup_and_exit(epoll_fd, tmr_fd,
-							IPXCAT_ERR_MSG_ALLOC);
-				}
-
-				msg->type = IPXW_MUX_XMIT;
-
-				char *data = (char *) msg->data;
-				int sockfd = ipxw_mux_handle_data(ipxh);
-				if (cfg->use_spx) {
-					data = (char *) ((struct ipxw_mux_spx_msg *)
-							msg)->data;
-					sockfd =
-						ipxw_mux_spx_handle_sock(spxh);
-				} else {
-					msg->xmit.pkt_type = cfg->pkt_type;
-					msg->xmit.daddr = cfg->remote_addr;
-				}
-
-				ssize_t data_len = fgets_bin(data,
-						max_data_len, stdin);
-				if (data_len == EOF) {
-					free(msg);
-					stdin_closed = true;
-					continue;
-				}
-
-				/* record the message data length */
-				msg->xmit.data_len = data_len;
-				if (cfg->use_spx) {
-					msg->xmit.data_len += sizeof(struct
-							spxhdr);
-				}
-
-				if (!queue_out_msg(q, epoll_fd, sockfd, msg)) {
-					free(msg);
+				if (!read_and_queue_out_msg(epoll_fd, cfg)) {
 					perror("queueing message");
 					cleanup_and_exit(epoll_fd, tmr_fd,
 							IPXCAT_ERR_MSG_QUEUE);
 				}
-
 				continue;
 			}
 
@@ -646,7 +791,13 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					continue;
 				}
 
-				/* print received message */
+				if (counted_msg_queue_nitems(&in_queue) >
+						cfg->rx_queue_pause_threshold)
+				{
+					free(msg);
+					continue;
+				}
+
 				size_t data_len = rcvd_len - sizeof(struct
 						ipxw_mux_spx_msg);
 				if (data_len == 0) {
@@ -655,10 +806,16 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				}
 				msg->data[data_len] = '\0';
 
-				fputs_bin((char *) msg->data, data_len,
-						stdout);
+				/* queue received message */
+				msg->mux_msg.recv.data_len = data_len;
+				msg->mux_msg.recv.is_spx = 1;
+				if (!queue_in_msg(epoll_fd, &(msg->mux_msg))) {
+					free(msg);
+					perror("queueing message");
+					cleanup_and_exit(epoll_fd, tmr_fd,
+							IPXCAT_ERR_MSG_QUEUE);
+				}
 
-				free(msg);
 				continue;
 			}
 
@@ -750,10 +907,19 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
 								fileno(stdin),
 								&ev) < 0) {
-						perror("registering stdin for event polling");
-						cleanup_and_exit(epoll_fd,
-								tmr_fd,
-								IPXCAT_ERR_STDIN_FD);
+						/* EPERM most likely means that
+						 * stdin is a regular file, in
+						 * that case we cannot poll and
+						 * just try to read it in every
+						 * loop interation */
+						if (errno == EPERM) {
+							stdin_is_file = true;
+						} else {
+							perror("registering stdin for event polling");
+							cleanup_and_exit(epoll_fd,
+									tmr_fd,
+									IPXCAT_ERR_STDIN_FD);
+						}
 					}
 
 					/* register SPX socket for reception */
@@ -781,7 +947,12 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 				}
 			}
 
-			/* print received message */
+			if (counted_msg_queue_nitems(&in_queue) >
+					cfg->rx_queue_pause_threshold) {
+				free(msg);
+				continue;
+			}
+
 			size_t data_len = msg->recv.data_len;
 			if (data_len == 0) {
 				free(msg);
@@ -789,38 +960,18 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 			}
 			msg->data[data_len] = '\0';
 
-			/* should not get IPX messages in these configs */
-			if (cfg->use_spx || !cfg->listen) {
-				if (cfg->verbose) {
-					fprintf(stderr, "unexpected IPX message from");
-					print_ipxaddr(stderr,
-							&(msg->recv.saddr));
-					fprintf(stderr, ": ");
-					fputs_bin((char *) msg->data, data_len,
-							stderr);
-					fprintf(stderr, "\n");
-				}
-			} else {
-				if (cfg->verbose) {
-					fflush(stdout);
-					fprintf(stderr, "message from ");
-					print_ipxaddr(stderr,
-							&(msg->recv.saddr));
-					fprintf(stderr, ": ");
-					fflush(stderr);
-				}
-				fputs_bin((char *) msg->data, data_len,
-						stdout);
-				if (cfg->verbose) {
-					fflush(stdout);
-					fprintf(stderr, "\n");
-				}
+			/* queue received message */
+			msg->recv.is_spx = 0;
+			if (!queue_in_msg(epoll_fd, msg)) {
+				free(msg);
+				perror("queueing message");
+				cleanup_and_exit(epoll_fd, tmr_fd,
+						IPXCAT_ERR_MSG_QUEUE);
 			}
 
-			free(msg);
+			continue;
 		}
 	}
-
 
 	cleanup_and_exit(epoll_fd, tmr_fd, IPXCAT_ERR_OK);
 }
@@ -857,6 +1008,7 @@ int main(int argc, char **argv)
 		.accept_broadcasts = false,
 		.pkt_type_any = true,
 		.tx_queue_pause_threshold =  DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
+		.rx_queue_pause_threshold =  DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
 		.pkt_type = DEFAULT_PKT_TYPE,
 		.max_ipx_data_len = DEFAULT_IPX_DATA_LEN
 	};

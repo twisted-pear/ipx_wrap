@@ -31,7 +31,8 @@ struct ipxw_mux_msg_recv {
 	struct ipx_addr saddr;
 	__u8 pkt_type;
 	__u8 is_bcast:1,
-	     reserved:7;
+	     is_spx:1,
+	     reserved:6;
 	__u16 data_len;
 	__u16 reserved2;
 } __attribute__((packed));

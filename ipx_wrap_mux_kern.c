@@ -445,6 +445,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	mux_msg->recv.saddr = saddr;
 	mux_msg->recv.pkt_type = pkt_type;
 	mux_msg->recv.is_bcast = cb.is_bcast;
+	mux_msg->recv.is_spx = (spx_state != NULL);
 	mux_msg->recv.data_len = data_len;
 
 	/* add recv msg header to checksum */
