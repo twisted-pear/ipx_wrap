@@ -53,6 +53,7 @@ struct ipxcat_cfg {
 	bool pkt_type_any;
 	__u8 pkt_type;
 	__u16 max_ipx_data_len;
+	__u16 max_spx_data_len;
 	size_t tx_queue_pause_threshold;
 	size_t rx_queue_pause_threshold;
 	struct ipx_addr local_addr;
@@ -446,8 +447,8 @@ static bool read_and_queue_out_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 	size_t max_data_len = cfg->max_ipx_data_len;
 	if (cfg->use_spx) {
 		msg = calloc(1, sizeof(struct ipxw_mux_spx_msg) +
-				SPX_MAX_DATA_LEN_WO_SIZNG);
-		max_data_len = SPX_MAX_DATA_LEN_WO_SIZNG;
+				cfg->max_spx_data_len);
+		max_data_len = cfg->max_spx_data_len;
 	} else {
 		msg = calloc(1, sizeof(struct ipxw_mux_msg) +
 				cfg->max_ipx_data_len);
@@ -1006,10 +1007,10 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 
 static _Noreturn void usage(void)
 {
-	printf("Usage: ipxcat [-v] [-t <packet type>] <local IPX address> <remote IPX address>\n");
-	printf("       ipxcat [-v] -s <local IPX address> <remote IPX address>\n");
+	printf("Usage: ipxcat [-v] [-d <maximum data bytes>] [-t <packet type>] <local IPX address> <remote IPX address>\n");
+	printf("       ipxcat [-v] -s [-d <maximum data bytes>] <local IPX address> <remote IPX address>\n");
 	printf("       ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>\n");
-	printf("       ipxcat [-v] -l -s <local IPX address>\n");
+	printf("       ipxcat [-v] -l -s [-d <maximum data bytes>] <local IPX address>\n");
 	exit(IPXCAT_ERR_USAGE);
 }
 
@@ -1021,6 +1022,16 @@ static bool verify_cfg(struct ipxcat_cfg *cfg)
 
 	if (cfg->use_spx && (cfg->accept_broadcasts || cfg->pkt_type !=
 				SPX_PKT_TYPE)) {
+		return false;
+	}
+
+	if (cfg->max_ipx_data_len < 1 || cfg->max_ipx_data_len >
+			IPX_MAX_DATA_LEN) {
+		return false;
+	}
+
+	if (cfg->use_spx && (cfg->max_spx_data_len < 1 || cfg->max_spx_data_len
+				> SPX_MAX_DATA_LEN_WO_SIZNG)) {
 		return false;
 	}
 
@@ -1038,16 +1049,22 @@ int main(int argc, char **argv)
 		.tx_queue_pause_threshold =  DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
 		.rx_queue_pause_threshold =  DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
 		.pkt_type = DEFAULT_PKT_TYPE,
-		.max_ipx_data_len = DEFAULT_IPX_DATA_LEN
+		.max_ipx_data_len = DEFAULT_IPX_DATA_LEN,
+		.max_spx_data_len = SPX_MAX_DATA_LEN_WO_SIZNG
 	};
 
 	/* parse and verify command-line arguments */
 
 	int opt;
-	while ((opt = getopt(argc, argv, "blst:v")) != -1) {
+	while ((opt = getopt(argc, argv, "bd:lst:v")) != -1) {
 		switch (opt) {
 			case 'b':
 				cfg.accept_broadcasts = true;
+				break;
+			case 'd':
+				__u16 max_data_len = strtoul(optarg, NULL, 0);
+				cfg.max_ipx_data_len = max_data_len;
+				cfg.max_spx_data_len = max_data_len;
 				break;
 			case 'l':
 				cfg.listen = true;
