@@ -518,9 +518,9 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	/* always allow reflected ACKs to go out, use the last known
 	 * information to fill in the header */
 	if (cb_info->mark == IPX_SPX_REFLECTED_ACK) {
-		spxh->seq_no = spx_state->local_current_sequence;
-		spxh->ack_no = spx_state->remote_expected_sequence;
-		spxh->alloc_no = spx_state->local_alloc_no;
+		spxh->seq_no = bpf_htons(spx_state->local_current_sequence);
+		spxh->ack_no = bpf_htons(spx_state->remote_expected_sequence);
+		spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 		spxh->connection_control = SPX_CC_SYSTEM_PKT;
 		spxh->datastream_type = (cb_info->is_spx_end_of_conn_ack ?
 				SPX_DS_END_OF_CONN_ACK : SPX_DS_NONE);
