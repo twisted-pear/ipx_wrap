@@ -468,6 +468,22 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	skb->cb[3] = cb_new.cb[3];
 	skb->cb[4] = cb_new.cb[4];
 
+	/* cut the ACK packet down to size */
+	size_t ack_len = sizeof(struct ipxhdr) + sizeof(struct
+			spxhdr);
+	mux_msg->recv.data_len = ack_len;
+
+	ack_len += sizeof(struct udphdr);
+	udph->len = bpf_htons(ack_len);
+	ip6h->payload_len = bpf_htons(ack_len);
+
+	ack_len += sizeof(struct ipv6hdr) + sizeof(struct
+			ethhdr);
+
+	if (bpf_skb_change_tail(skb, ack_len, 0) != 0) {
+		return TC_ACT_SHOT;
+	}
+
 	/* redirect the thusly generated ACK */
 	return bpf_redirect(fib_params.ifindex, 0);
 }
@@ -757,24 +773,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		/* prepare the SPX header */
 		if (!ipx_wrap_spx_egress(spx_state, spx_msg, &cb_info)) {
 			return TC_ACT_SHOT;
-		}
-
-		/* cut the ACK packet down to size */
-		if (cb_info.mark == IPX_SPX_REFLECTED_ACK) {
-			size_t ack_len = sizeof(struct ipxhdr) + sizeof(struct
-					spxhdr);
-			ipx_msg->pktlen = bpf_htons(ack_len);
-
-			ack_len += sizeof(struct udphdr);
-			udph->len = bpf_htons(ack_len);
-			ip6h->payload_len = bpf_htons(ack_len);
-
-			ack_len += sizeof(struct ipv6hdr) + sizeof(struct
-					ethhdr);
-
-			if (bpf_skb_change_tail(skb, ack_len, 0) != 0) {
-				return TC_ACT_SHOT;
-			}
 		}
 	}
 
