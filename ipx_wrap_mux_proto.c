@@ -1256,7 +1256,7 @@ struct ipxw_mux_spx_handle_state {
 	__u16 last_msg_data_len;
 	struct {
 		struct ipxw_mux_spx_msg last_msg;
-		__u8 data[SPX_MAX_DATA_LEN_WO_SIZNG];
+		__u8 data[SPX_MAX_DATA_LEN];
 	} __attribute__((packed));
 };
 
@@ -1819,7 +1819,7 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	}
 
 	/* check message length */
-	if (data_len > SPX_MAX_DATA_LEN_WO_SIZNG) {
+	if (data_len > SPX_MAX_DATA_LEN) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -1935,7 +1935,7 @@ ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 			break;
 		}
 		data_len -= sizeof(struct spxhdr);
-		if (data_len > SPX_MAX_DATA_LEN_WO_SIZNG) {
+		if (data_len > SPX_MAX_DATA_LEN) {
 			errno = EREMOTEIO;
 			break;
 		}
@@ -1968,7 +1968,7 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 			return -1;
 	}
 
-	if (data_len > SPX_MAX_DATA_LEN_WO_SIZNG) {
+	if (data_len > SPX_MAX_DATA_LEN) {
 		errno = EINVAL;
 		return -1;
 	}

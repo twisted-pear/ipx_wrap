@@ -125,9 +125,9 @@ struct ipxw_mux_spx_msg_min {
 _Static_assert(sizeof(struct ipxw_mux_spx_msg_min) == sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr), "ipxw_mux_spx_msg_min too large");
 
-#define SPX_MAX_PKT_LEN 576 /* limit without size negotiation */
-#define SPX_MAX_DATA_LEN_WO_SIZNG (SPX_MAX_PKT_LEN - (sizeof(struct ipxhdr) \
-			+ sizeof(struct spxhdr)))
+#define SPX_MAX_PKT_LEN_WO_SIZNG 576 /* limit without size negotiation */
+#define SPX_MAX_DATA_LEN_WO_SIZNG (SPX_MAX_PKT_LEN_WO_SIZNG - (sizeof(struct \
+				ipxhdr) + sizeof(struct spxhdr)))
 
 #define SPX_MAX_DATA_LEN (IPX_MAX_DATA_LEN - sizeof(struct spxhdr))
 
