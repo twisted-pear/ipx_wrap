@@ -77,13 +77,7 @@ static int add_route(__be32 net, struct ipx_addr *gw, __be32 hops, __be32
 	}
 
 	/* set gateway */
-	ip6 = (struct ipv6_eui64_addr *) &rt.rtmsg_gateway;
-	ip6->prefix = prefix;
-	ip6->ipx_net = gw->net;
-	memcpy(ip6->ipx_node_fst, gw->node, sizeof(gw->node) / 2);
-	ip6->fffe = htons(0xfffe);
-	memcpy(ip6->ipx_node_snd, gw->node + (sizeof(gw->node) / 2),
-			sizeof(gw->node) / 2);
+	ipx_to_ipv6_addr(&(rt.rtmsg_gateway), gw, prefix);
 
 	/* set metric from the hopcount */
 	rt.rtmsg_metric = ntohs(hops) * RIP_METRIC_MULT;

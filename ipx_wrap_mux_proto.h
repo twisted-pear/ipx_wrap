@@ -5,6 +5,8 @@
 #include <bpf/bpf.h>
 #include <errno.h>
 #include <ifaddrs.h>
+#include <linux/ipv6.h>
+#include <linux/udp.h>
 #include <sys/queue.h>
 
 #include "common.h"
@@ -284,5 +286,11 @@ ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block);
  * message was a system message */
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		ipxw_mux_spx_msg *msg, size_t data_len, bool block);
+
+/* helpers */
+
+int ipxw_get_outif_max_ipx_data_len_for_dst(struct ipxw_mux_handle h, struct
+		ipx_addr *dst);
+int ipxw_get_outif_max_spx_data_len_for_peer(struct ipxw_mux_spx_handle h);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

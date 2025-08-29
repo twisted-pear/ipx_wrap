@@ -218,26 +218,8 @@ static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh,
 	newhdr->hop_limit = (ipxh->tc > IPX_TC_MAX) ? 0 : IPX_TC_MAX -
 		ipxh->tc;
 
-	struct ipv6_eui64_addr *saddr6 = (void *) &newhdr->saddr;
-	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr->daddr;
-
-	saddr6->prefix = ifcfg->prefix;
-	saddr6->ipx_net = ipxh->saddr.net;
-	__builtin_memcpy(saddr6->ipx_node_fst, ipxh->saddr.node,
-			sizeof(saddr6->ipx_node_fst));
-	saddr6->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(saddr6->ipx_node_snd, ipxh->saddr.node +
-			sizeof(saddr6->ipx_node_fst),
-			sizeof(saddr6->ipx_node_snd));
-
-	daddr6->prefix = ifcfg->prefix;
-	daddr6->ipx_net = ipxh->daddr.net;
-	__builtin_memcpy(daddr6->ipx_node_fst, ipxh->daddr.node,
-			sizeof(daddr6->ipx_node_fst));
-	daddr6->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(daddr6->ipx_node_snd, ipxh->daddr.node +
-			sizeof(daddr6->ipx_node_fst),
-			sizeof(daddr6->ipx_node_snd));
+	ipx_to_ipv6_addr(&(newhdr->saddr), &(ipxh->saddr), ifcfg->prefix);
+	ipx_to_ipv6_addr(&(newhdr->daddr), &(ipxh->daddr), ifcfg->prefix);
 }
 
 static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, struct

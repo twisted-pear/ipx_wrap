@@ -10,8 +10,7 @@
 #include "ipx_wrap_mux_proto.h"
 
 #define DEFAULT_PKT_TYPE 0x1E
-#define DEFAULT_IPX_DATA_LEN (SPX_MAX_DATA_LEN_WO_SIZNG - sizeof(struct \
-			ipxhdr))
+#define DEFAULT_IPX_DATA_LEN (SPX_MAX_PKT_LEN_WO_SIZNG - IPX_WIRE_OVERHEAD)
 
 #define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (1024)
 #define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (1024)
@@ -28,6 +27,8 @@ enum ipxcat_error_codes {
 	IPXCAT_ERR_SPX_FD,
 	IPXCAT_ERR_SIG_HANDLER,
 	IPXCAT_ERR_BIND,
+	IPXCAT_ERR_GET_OIF_DATA_LEN,
+	IPXCAT_ERR_OIF_DATA_LEN_ZERO,
 	IPXCAT_ERR_EPOLL_WAIT,
 	IPXCAT_ERR_TMR_FAILURE,
 	IPXCAT_ERR_CONF_FAILURE,
@@ -750,6 +751,33 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 		fprintf(stderr, "bound to ");
 		print_ipxaddr(stderr, &(cfg->local_addr));
 		fprintf(stderr, "\n");
+	}
+
+	if (!cfg->listen && !cfg->use_spx) {
+		int max_oif_data_len =
+			ipxw_get_outif_max_ipx_data_len_for_dst(ipxh,
+					&(cfg->remote_addr));
+		if (max_oif_data_len < 0) {
+			perror("getting output interface max data length");
+			cleanup_and_exit(epoll_fd, tmr_fd, cfg,
+					IPXCAT_ERR_GET_OIF_DATA_LEN);
+		}
+		if (max_oif_data_len == 0) {
+			fprintf(stderr, "output interface MTU too small\n");
+			cleanup_and_exit(epoll_fd, tmr_fd, cfg,
+					IPXCAT_ERR_OIF_DATA_LEN_ZERO);
+		}
+
+		if (cfg->max_ipx_data_len > max_oif_data_len) {
+			if (cfg->verbose) {
+				fprintf(stderr, "output interface MTU too "
+						"small for %hu bytes of data, "
+						"reducing to %u\n",
+						cfg->max_ipx_data_len,
+						max_oif_data_len);
+			}
+			cfg->max_ipx_data_len = max_oif_data_len;
+		}
 	}
 
 	struct epoll_event ev = {

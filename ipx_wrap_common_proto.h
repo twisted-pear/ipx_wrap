@@ -1,8 +1,17 @@
 #ifndef __IPX_WRAP_COMMON_PROTO_H__
 #define __IPX_WRAP_COMMON_PROTO_H__
 
-#define IPXW_MUX_MSG_LEN (65535 - 8) /* more will not fit into a UDP packet,
-					without extension header trickery */
+#define MAX_DGRAM_LEN 65535 /* max length of a UDP packet */
+
+#define IPXW_MUX_MSG_LEN (MAX_DGRAM_LEN - sizeof(struct udphdr)) /* more will
+								    not fit
+								    into a UDP
+								    packet,
+								    without
+								    extension
+								    header
+								    trickery */
+
 
 enum ipxw_mux_msg_type {
 	IPXW_MUX_BIND_ACK = 0,
@@ -165,5 +174,14 @@ static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
 	__builtin_sub_overflow(a, b, &res);
 	return res < 0;
 }
+
+#define IPX_WIRE_OVERHEAD (sizeof(struct ipxhdr))
+#define SPX_WIRE_OVERHEAD (sizeof(struct ipxhdr) + sizeof(struct spxhdr))
+
+#define IPX_IN_IPV6UDP_OVERHEAD (sizeof(struct ipv6hdr) + sizeof(struct \
+			udphdr))
+
+#define IPX_WRAP_OVERHEAD (IPX_WIRE_OVERHEAD + IPX_IN_IPV6UDP_OVERHEAD)
+#define SPX_WRAP_OVERHEAD (SPX_WIRE_OVERHEAD + IPX_IN_IPV6UDP_OVERHEAD)
 
 #endif /* __IPX_WRAP_COMMON_PROTO_H__ */

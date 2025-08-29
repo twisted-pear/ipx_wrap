@@ -1,13 +1,17 @@
 #include <assert.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/limits.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <linux/limits.h>
-#include <errno.h>
-#include <unistd.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
+#include <unistd.h>
 
 #include "uthash.h"
 #include "ipx_wrap_mux_proto.h"
@@ -573,16 +577,8 @@ struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
 			.sin6_flowinfo = 0,
 			.sin6_scope_id = 0
 		};
-		struct ipv6_eui64_addr *dummy_addr = (struct ipv6_eui64_addr *)
-			&(dummy_bind.sin6_addr);
-		dummy_addr->prefix = res.ack.prefix;
-		dummy_addr->ipx_net = bind_msg->bind.addr.net;
-		memcpy(dummy_addr->ipx_node_fst, bind_msg->bind.addr.node,
-				IPX_ADDR_NODE_BYTES / 2);
-		dummy_addr->fffe = htons(0xfffe);
-		memcpy(dummy_addr->ipx_node_snd,
-				&(bind_msg->bind.addr.node[3]),
-				IPX_ADDR_NODE_BYTES / 2);
+		ipx_to_ipv6_addr(&(dummy_bind.sin6_addr),
+				&(bind_msg->bind.addr), res.ack.prefix);
 
 		if (bind(data_sock, (struct sockaddr *) &dummy_bind,
 					sizeof(dummy_bind)) < 0) {
@@ -801,15 +797,7 @@ ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 		.sin6_flowinfo = 0,
 		.sin6_scope_id = 0
 	};
-	struct ipv6_eui64_addr *dummy_daddr = (struct ipv6_eui64_addr *)
-		&dummy_dst.sin6_addr;
-	dummy_daddr->prefix = h.prefix;
-	dummy_daddr->ipx_net = msg->xmit.daddr.net;
-	memcpy(dummy_daddr->ipx_node_fst, msg->xmit.daddr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	dummy_daddr->fffe = htons(0xfffe);
-	memcpy(dummy_daddr->ipx_node_snd, &(msg->xmit.daddr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
+	ipx_to_ipv6_addr(&(dummy_dst.sin6_addr), &(msg->xmit.daddr), h.prefix);
 
 	/* send message, may block */
 	/* rewriting to IPX happens in the BPF program */
@@ -1317,14 +1305,7 @@ static bool ipxw_mux_spx_bind_and_connect(struct ipxw_mux_spx_handle h, __be32
 		.sin6_flowinfo = 0,
 		.sin6_scope_id = 0
 	};
-	struct ipv6_eui64_addr *dummy_addr = (struct ipv6_eui64_addr *)
-		&(dummy_bind.sin6_addr);
-	dummy_addr->prefix = prefix;
-	dummy_addr->ipx_net = saddr->net;
-	memcpy(dummy_addr->ipx_node_fst, saddr->node, IPX_ADDR_NODE_BYTES / 2);
-	dummy_addr->fffe = htons(0xfffe);
-	memcpy(dummy_addr->ipx_node_snd, &(saddr->node[3]), IPX_ADDR_NODE_BYTES
-			/ 2);
+	ipx_to_ipv6_addr(&(dummy_bind.sin6_addr), saddr, prefix);
 
 	if (bind(h.spx_sock, (struct sockaddr *) &dummy_bind,
 				sizeof(dummy_bind)) < 0) {
@@ -1339,13 +1320,7 @@ static bool ipxw_mux_spx_bind_and_connect(struct ipxw_mux_spx_handle h, __be32
 		.sin6_flowinfo = 0,
 		.sin6_scope_id = 0
 	};
-	dummy_addr = (struct ipv6_eui64_addr *) &(dummy_connect.sin6_addr);
-	dummy_addr->prefix = prefix;
-	dummy_addr->ipx_net = daddr->net;
-	memcpy(dummy_addr->ipx_node_fst, daddr->node, IPX_ADDR_NODE_BYTES / 2);
-	dummy_addr->fffe = htons(0xfffe);
-	memcpy(dummy_addr->ipx_node_snd, &(daddr->node[3]), IPX_ADDR_NODE_BYTES
-			/ 2);
+	ipx_to_ipv6_addr(&(dummy_connect.sin6_addr), daddr, prefix);
 
 	if (connect(h.spx_sock, (struct sockaddr *) &dummy_connect,
 				sizeof(dummy_connect)) < 0) {
@@ -2119,4 +2094,189 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 	msg->seq_no = 0;
 
 	return rcvd_len;
+}
+
+/* helpers */
+
+#define NLMSG_BUF_SIZE 1024
+
+static int get_src_to_dst_outif(struct in6_addr *src, struct in6_addr *dst)
+{
+	struct {
+		union {
+			struct {
+				struct nlmsghdr nh;
+				struct rtmsg rtm;
+			};
+		char buf[NLMSG_BUF_SIZE];
+		};
+	} nlmsg;
+	memset(&nlmsg, 0, sizeof(nlmsg));
+
+	int nlsock = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+	if (nlsock < 0) {
+		return -1;
+	}
+
+	nlmsg.nh.nlmsg_len = NLMSG_LENGTH(sizeof(nlmsg.rtm));
+	nlmsg.nh.nlmsg_flags = NLM_F_REQUEST;
+	nlmsg.nh.nlmsg_type = RTM_GETROUTE;
+
+	nlmsg.rtm.rtm_family = AF_INET6;
+	nlmsg.rtm.rtm_table = RT_TABLE_MAIN;
+	nlmsg.rtm.rtm_type = RTN_UNICAST;
+	nlmsg.rtm.rtm_protocol = RTPROT_KERNEL;
+	nlmsg.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
+
+	struct rtattr *rta = (struct rtattr *)(((char *) &nlmsg) +
+			NLMSG_ALIGN(nlmsg.nh.nlmsg_len));
+	rta->rta_type = RTA_SRC;
+	rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+	memcpy(RTA_DATA(rta), src, sizeof(struct in6_addr));
+	nlmsg.nh.nlmsg_len = NLMSG_ALIGN(nlmsg.nh.nlmsg_len) +
+		RTA_LENGTH(sizeof(struct in6_addr));
+
+	rta = (struct rtattr *)(((char *) &nlmsg) +
+			NLMSG_ALIGN(nlmsg.nh.nlmsg_len));
+	rta->rta_type = RTA_DST;
+	rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+	memcpy(RTA_DATA(rta), dst, sizeof(struct in6_addr));
+	nlmsg.nh.nlmsg_len = NLMSG_ALIGN(nlmsg.nh.nlmsg_len) +
+		RTA_LENGTH(sizeof(struct in6_addr));
+
+	do {
+		if (send(nlsock, &nlmsg, nlmsg.nh.nlmsg_len, MSG_DONTWAIT) < 0)
+		{
+			break;
+		}
+
+		ssize_t rcv_len = recv(nlsock, nlmsg.buf, sizeof(nlmsg),
+				MSG_DONTWAIT);
+		if (rcv_len < 0) {
+			break;
+		}
+
+		struct nlmsghdr *hdr = (struct nlmsghdr *) nlmsg.buf;
+		for (; NLMSG_OK(hdr, rcv_len); hdr = NLMSG_NEXT(hdr, rcv_len))
+		{
+			struct rtmsg *route_msg = (struct rtmsg *)
+				NLMSG_DATA(hdr);
+			rta = (struct rtattr *) (route_msg + 1);
+
+			if (route_msg->rtm_family == AF_INET6) {
+				for (; RTA_OK(rta, rcv_len); rta =
+						RTA_NEXT(rta, rcv_len)) {
+					if (rta->rta_type == RTA_OIF) {
+						int ifidx = *((int *)
+								RTA_DATA(rta));
+						close(nlsock);
+						return ifidx;
+					}
+				}
+			}
+		}
+
+		errno = ENOENT;
+	} while (0);
+
+	close(nlsock);
+	return -1;
+}
+
+static int get_if_mtu_for_sock(int ifidx, int sockfd) {
+	struct ifreq ifr;
+	if (if_indextoname(ifidx, ifr.ifr_name) == NULL) {
+		return -1;
+	}
+
+	if (ioctl(sockfd, SIOCGIFMTU, &ifr) == -1) {
+		return -1;
+	}
+
+	return ifr.ifr_mtu;
+}
+
+int ipxw_get_outif_max_ipx_data_len_for_dst(struct ipxw_mux_handle h, struct
+		ipx_addr *dst)
+{
+	if (ipxw_mux_handle_is_error(h)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_in6 sa_src;
+	socklen_t sa_src_len = sizeof(struct sockaddr_in6);
+	if (getsockname(ipxw_mux_handle_data(h), (struct sockaddr *) &sa_src,
+				&sa_src_len) != 0) {
+		return -1;
+	}
+	if (sa_src_len != sizeof(struct sockaddr_in6)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct in6_addr ip6_dst;
+	ipx_to_ipv6_addr(&ip6_dst, dst, h.prefix);
+
+	int oifidx = get_src_to_dst_outif(&(sa_src.sin6_addr), &ip6_dst);
+	if (oifidx < 0) {
+		return -1;
+	}
+
+	int mtu = get_if_mtu_for_sock(oifidx, ipxw_mux_handle_data(h));
+	if (mtu < 0) {
+		return -1;
+	}
+
+	if (mtu < IPX_WRAP_OVERHEAD) {
+		return 0;
+	}
+
+	return (mtu - IPX_WRAP_OVERHEAD);
+}
+
+int ipxw_get_outif_max_spx_data_len_for_peer(struct ipxw_mux_spx_handle h)
+{
+	if (ipxw_mux_spx_handle_is_error(h)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_in6 sa_src;
+	socklen_t sa_src_len = sizeof(struct sockaddr_in6);
+	if (getsockname(ipxw_mux_spx_handle_sock(h), (struct sockaddr *)
+				&sa_src, &sa_src_len) != 0) {
+		return -1;
+	}
+	if (sa_src_len != sizeof(struct sockaddr_in6)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_in6 sa_dst;
+	socklen_t sa_dst_len = sizeof(struct sockaddr_in6);
+	if (getpeername(ipxw_mux_spx_handle_sock(h), (struct sockaddr *)
+				&sa_dst, &sa_dst_len) != 0) {
+		return -1;
+	}
+	if (sa_dst_len != sizeof(struct sockaddr_in6)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	int oifidx = get_src_to_dst_outif(&(sa_src.sin6_addr), &(sa_dst.sin6_addr));
+	if (oifidx < 0) {
+		return -1;
+	}
+
+	int mtu = get_if_mtu_for_sock(oifidx, ipxw_mux_spx_handle_sock(h));
+	if (mtu < 0) {
+		return -1;
+	}
+
+	if (mtu < SPX_WRAP_OVERHEAD) {
+		return 0;
+	}
+
+	return (mtu - SPX_WRAP_OVERHEAD);
 }
