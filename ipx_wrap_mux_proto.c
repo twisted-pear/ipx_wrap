@@ -1633,7 +1633,8 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 
 			if (h.last_known_state->ticks_since_last_verify >
 					SPX_VERIFY_TMO_TICKS) {
-				spx_msg.verify = true;
+				spx_msg.keep_alive = true;
+				spx_msg.ack_required = true;
 			} else if
 				(h.last_known_state->ticks_since_last_keep_alive
 				 > SPX_KEEP_ALIVE_TMO_TICKS) {
@@ -1665,7 +1666,7 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 
 			/* reset the counters */
 			h.last_known_state->ticks_since_last_keep_alive = 0;
-			if (spx_msg.verify) {
+			if (spx_msg.ack_required) {
 				h.last_known_state->ticks_since_last_verify =
 					0;
 			}
@@ -1808,7 +1809,6 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 
 	/* clear output and disallowed message fields */
 	msg->keep_alive = false;
-	msg->verify = false;
 	msg->system = false;
 	msg->ack = false;
 	msg->ack_required = true;
@@ -2084,13 +2084,11 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 	/* clear system fields before output */
 	msg->system = false;
 	msg->keep_alive = false;
-	msg->verify = false;
 	msg->ack = false;
 	msg->ack_required = false;
 	msg->remote_alloc_no = 0;
 	msg->local_alloc_no = 0;
 	msg->remote_expected_sequence = 0;
-	msg->local_current_sequence = 0;
 	msg->seq_no = 0;
 
 	return rcvd_len;

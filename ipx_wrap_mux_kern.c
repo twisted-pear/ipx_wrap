@@ -498,7 +498,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	bool attention = spx_msg->attention;
 	bool system = spx_msg->system;
 	bool keep_alive = spx_msg->keep_alive;
-	bool verify = spx_msg->verify;
+	bool verify = spx_msg->keep_alive && spx_msg->ack_required;
 	bool ack = spx_msg->ack;
 	bool ack_required = spx_msg->ack_required;
 	__u8 datastream_type = spx_msg->datastream_type;
@@ -532,8 +532,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	spx_state->local_alloc_no = msg_loc_alloc;
 	spx_state->remote_alloc_no = msg_rem_alloc;
 
-	/* allow sending connection verification requests
-	 * without changing state */
+	/* allow sending connection verification requests */
 	if (verify) {
 		spxh->connection_control = SPX_CC_SYSTEM_PKT |
 			SPX_CC_ACK_REQUIRED;

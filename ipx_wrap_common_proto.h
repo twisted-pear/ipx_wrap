@@ -195,16 +195,17 @@ struct ipxw_mux_spx_msg {
 			     attention:1,
 			     system:1,
 			     keep_alive:1,
-			     verify:1,
 			     ack:1,
 			     ack_required:1,
-			     reserved:1;
+			     reserved:2;
 			__u8 datastream_type;
 			__u16 remote_alloc_no;
 			__u16 local_alloc_no;
 			__u16 remote_expected_sequence;
-			__u16 local_current_sequence;
-			__u16 seq_no;
+			union {
+				__u16 local_current_sequence;
+				__u16 seq_no;
+			};
 		} __attribute__((packed));
 	};
 	__u8 data[0];
