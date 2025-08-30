@@ -119,8 +119,10 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 #define SPX_KEEP_ALIVE_TMO_TICKS 54
 #define SPX_RETRY_COUNT 10
 
-_Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
-		sizeof(struct spxhdr), "ipxw_mux_spx_msg too large");
+struct spxii_negotiate_size_hdr {
+	__be16 negotiation_size;
+	__u8 data[0];
+} __attribute__((packed));
 
 struct ipxw_mux_spx_handle_state;
 

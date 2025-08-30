@@ -197,7 +197,8 @@ struct ipxw_mux_spx_msg {
 			     keep_alive:1,
 			     ack:1,
 			     ack_required:1,
-			     reserved:2;
+			     spxii:1,
+			     negotiate_size:1;
 			__u8 datastream_type;
 			__u16 remote_alloc_no;
 			__u16 local_alloc_no;
@@ -212,7 +213,7 @@ struct ipxw_mux_spx_msg {
 } __attribute__((packed));
 
 _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
-		sizeof(struct spxhdr), "ipxw_mux_spx_msg_min too large");
+		sizeof(struct spxhdr), "ipxw_mux_spx_msg too large");
 
 #define SPX_MAX_PKT_LEN_WO_SIZNG 576 /* limit without size negotiation */
 #define SPX_MAX_DATA_LEN_WO_SIZNG (SPX_MAX_PKT_LEN_WO_SIZNG - (sizeof(struct \

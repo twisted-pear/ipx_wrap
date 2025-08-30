@@ -1242,6 +1242,7 @@ struct ipxw_mux_spx_handle_state {
 	__u16 ticks_since_last_verify;
 	__u16 ticks_since_last_remote_msg;
 	__u16 last_msg_data_len;
+	bool spxii;
 	struct {
 		struct ipxw_mux_spx_msg last_msg;
 		__u8 data[SPX_MAX_DATA_LEN];
@@ -1811,6 +1812,7 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	msg->keep_alive = false;
 	msg->system = false;
 	msg->ack = false;
+	msg->negotiate_size = false;
 	msg->ack_required = true;
 	ipxw_mux_fill_msg_from_state(h, msg);
 
@@ -2086,6 +2088,7 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 	msg->keep_alive = false;
 	msg->ack = false;
 	msg->ack_required = false;
+	msg->negotiate_size = false;
 	msg->remote_alloc_no = 0;
 	msg->local_alloc_no = 0;
 	msg->remote_expected_sequence = 0;

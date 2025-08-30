@@ -77,7 +77,9 @@ struct bpf_cb_info {
 			__u16 is_bcast:1,
 			      is_for_local:1,
 			      is_spx_end_of_conn_ack:1,
-			      reserved:13;
+			      is_spxii:1,
+			      is_negotiate_size:1,
+			      reserved:11;
 			struct ipx_addr spx_src;
 			__be16 spx_conn_id;
 		} __attribute__((packed));

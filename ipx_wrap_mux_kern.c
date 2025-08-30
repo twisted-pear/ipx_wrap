@@ -382,6 +382,9 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 				SPX_CC_SYSTEM_PKT) != 0;
 		bool ack_required = (spxh->connection_control &
 				SPX_CC_ACK_REQUIRED) != 0;
+		bool spxii = (spxh->connection_control & SPX_CC_SPXII) != 0;
+		bool negotiate_size = (spxh->connection_control &
+				SPX_CC_NEGOTIATE_SIZE) != 0;
 		__u8 datastream_type = spxh->datastream_type;
 		__u16 remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 		__u16 seq_no = bpf_ntohs(spxh->seq_no);
@@ -402,6 +405,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		spx_msg->attention = attention;
 		spx_msg->system = system_pkt;
 		spx_msg->ack_required = ack_required;
+		spx_msg->spxii = spxii;
+		spx_msg->negotiate_size = negotiate_size;
 		spx_msg->datastream_type = datastream_type;
 		spx_msg->remote_alloc_no = remote_alloc_no;
 		spx_msg->seq_no = seq_no;
@@ -459,6 +464,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		.is_for_local = false,
 		.is_spx_end_of_conn_ack = (spx_msg->datastream_type ==
 				SPX_DS_END_OF_CONN),
+		.is_spxii = spx_msg->spxii,
+		.is_negotiate_size = spx_msg->negotiate_size,
 		.spx_src = e->addr,
 		.spx_conn_id = spx_state->local_id
 	};
@@ -501,6 +508,8 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	bool verify = spx_msg->keep_alive && spx_msg->ack_required;
 	bool ack = spx_msg->ack;
 	bool ack_required = spx_msg->ack_required;
+	bool spxii = spx_msg->spxii;
+	bool negotiate_size = spx_msg->negotiate_size;
 	__u8 datastream_type = spx_msg->datastream_type;
 	__u16 msg_seq = spx_msg->local_current_sequence;
 	__u16 msg_ack = spx_msg->remote_expected_sequence;
@@ -522,9 +531,21 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		spxh->ack_no = bpf_htons(spx_state->remote_expected_sequence);
 		spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		if (cb_info->is_spxii) {
+			spxh->connection_control |= SPX_CC_SPXII;
+			if (cb_info->is_negotiate_size) {
+				spxh->connection_control |=
+					SPX_CC_NEGOTIATE_SIZE;
+			}
+		}
 		spxh->datastream_type = (cb_info->is_spx_end_of_conn_ack ?
 				SPX_DS_END_OF_CONN_ACK : SPX_DS_NONE);
 		return true;
+	}
+
+	spxh->connection_control = 0;
+	if (spxii) {
+		spxh->connection_control |= SPX_CC_SPXII;
 	}
 
 	spx_state->local_current_sequence = msg_seq;
@@ -534,7 +555,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	/* allow sending connection verification requests */
 	if (verify) {
-		spxh->connection_control = SPX_CC_SYSTEM_PKT |
+		spxh->connection_control |= SPX_CC_SYSTEM_PKT |
 			SPX_CC_ACK_REQUIRED;
 		spxh->datastream_type = SPX_DS_NONE;
 		return true;
@@ -542,14 +563,14 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	/* allow sending keep alive packets */
 	if (keep_alive) {
-		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
 		spxh->datastream_type = SPX_DS_NONE;
 		return true;
 	}
 
 	/* allow sending ACK packets */
 	if (ack) {
-		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
 		spxh->datastream_type = SPX_DS_NONE;
 		if (datastream_type == SPX_DS_END_OF_CONN_ACK) {
 			spxh->datastream_type = SPX_DS_END_OF_CONN_ACK;
@@ -559,7 +580,6 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	spxh->datastream_type = datastream_type;
 
-	spxh->connection_control = 0;
 	if (end_of_msg) {
 		spxh->connection_control |= SPX_CC_END_OF_MSG;
 	}
@@ -571,6 +591,9 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	}
 	if (system) {
 		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
+	}
+	if (spxii && negotiate_size) {
+		spxh->connection_control |= SPX_CC_NEGOTIATE_SIZE;
 	}
 
 	return true;
