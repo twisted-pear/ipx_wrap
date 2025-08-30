@@ -119,11 +119,6 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 #define SPX_KEEP_ALIVE_TMO_TICKS 54
 #define SPX_RETRY_COUNT 10
 
-struct spxii_negotiate_size_hdr {
-	__be16 negotiation_size;
-	__u8 data[0];
-} __attribute__((packed));
-
 struct ipxw_mux_spx_handle_state;
 
 struct ipxw_mux_spx_handle {
@@ -136,21 +131,28 @@ struct ipxw_mux_spx_handle {
 	.last_known_state = NULL }
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
+bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h);
 int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);
 
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
-		struct ipx_addr *daddr);
+		struct ipx_addr *daddr, bool spxii);
 
-__be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg);
+__be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg, bool
+		*is_spxii);
 struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
-		ipx_addr *remote_addr, __be16 remote_conn_id);
+		ipx_addr *remote_addr, __be16 remote_conn_id, bool spxii);
 
 bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
 
 void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);
 
+/* check if the connection has been fully established. before this messages
+ * should not be sent or allocated as it is not clear yet if the connection
+ * will be SPX or SPXII */
+bool ipxw_mux_spx_established(struct ipxw_mux_spx_handle h);
+
 /* check if the connection is in a state where transmitting messages is
- * possible */
+ * possible, this includes ipxw_mux_spx_established() */
 bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h);
 
 /* write message to SPX socket, may block if the caller did not check if the *
@@ -162,14 +164,18 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
  */
 bool ipxw_mux_spx_recv_ready(struct ipxw_mux_spx_handle h);
 
-/* get the length of the received message from the header, may block */
+/* get the length of the received message from the header, the actual lenght
+ * assumes that the message is an SPXII message, this is for better
+ * interoperability with ipxw_mux_spx_get_recvd(), may block */
 ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block);
 
 /* get a message from the SPX socket, assumes msg points to a buffer of at
- * least sizeof(ipxw_mux_spx_msg) bytes and that the maximum SPX payload length
- * that can be received is passed in data_len, may block if the caller did not
- * check if data is available and block is true, returns 0 if the received
- * message was a system message */
+ * least sizeof(ipxw_mux_spx_msg) + data_len bytes and that the maximum SPX
+ * payload length that can be received is passed in data_len, may block if the
+ * caller did not check if data is available and block is true, returns 0 if
+ * the received message was a system message, may return less than what
+ * ipxw_mux_spx_peek_recvd_len() reported, if the message is only SPX instead
+ * of SPXII */
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		ipxw_mux_spx_msg *msg, size_t data_len, bool block);
 

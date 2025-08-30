@@ -183,6 +183,10 @@ struct spxhdr {
 	__be16 alloc_no;
 } __attribute__((packed));
 
+struct spxii_negotiate_size_hdr {
+	__be16 negotiation_size;
+} __attribute__((packed));
+
 struct ipxw_mux_spx_msg {
 	union {
 		struct ipxhdr ipxh;
@@ -209,28 +213,60 @@ struct ipxw_mux_spx_msg {
 			};
 		} __attribute__((packed));
 	};
-	__u8 data[0];
+	__u8 spx_data[0];
+	struct spxii_negotiate_size_hdr spxii_negotiate_size_h;
+	__u8 spxii_data[0];
 } __attribute__((packed));
 
 _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
-		sizeof(struct spxhdr), "ipxw_mux_spx_msg too large");
+		sizeof(struct spxhdr) + sizeof(struct
+			spxii_negotiate_size_hdr),
+		"ipxw_mux_spx_msg too large");
 
 #define SPX_MAX_PKT_LEN_WO_SIZNG 576 /* limit without size negotiation */
 #define SPX_MAX_DATA_LEN_WO_SIZNG (SPX_MAX_PKT_LEN_WO_SIZNG - (sizeof(struct \
 				ipxhdr) + sizeof(struct spxhdr)))
 
 #define SPX_MAX_DATA_LEN (IPX_MAX_DATA_LEN - sizeof(struct spxhdr))
+#define SPXII_MAX_DATA_LEN (IPX_MAX_DATA_LEN - (sizeof(struct spxhdr) + \
+			sizeof(struct spxii_negotiate_size_hdr)))
 
-enum ipxw_mux_spx_connection_state {
-	IPXW_MUX_SPX_INVALID = 0,
-	IPXW_MUX_SPX_NEW,
-	IPXW_MUX_SPX_CONN_REQ_SENT,
-	IPXW_MUX_SPX_CONN_ACCEPTED,
-	IPXW_MUX_SPX_CONN_ESTABLISHED,
-	IPXW_MUX_SPX_CONN_MUST_SEND_ACK,
-	IPXW_MUX_SPX_CONN_WAITING_FOR_ACK,
-	IPXW_MUX_SPX_CONN_CLOSED
-};
+#define IPX_WIRE_OVERHEAD (sizeof(struct ipxhdr))
+#define SPX_WIRE_OVERHEAD (IPX_WIRE_OVERHEAD + sizeof(struct spxhdr))
+#define SPXII_WIRE_OVERHEAD (SPX_WIRE_OVERHEAD + sizeof(struct \
+			spxii_negotiate_size_hdr))
+
+_Static_assert(SPXII_WIRE_OVERHEAD == sizeof(struct ipxw_mux_spx_msg),
+		"ipxw_mux_spx_msg size mismatch");
+
+static __always_inline __u8 *ipxw_mux_spx_msg_data(struct ipxw_mux_spx_msg
+		*msg)
+{
+	if (msg->spxii) {
+		return msg->spxii_data;
+	}
+
+	return msg->spx_data;
+}
+
+static __always_inline size_t ipxw_mux_spx_data_len(size_t msg_len, bool spxii)
+{
+	size_t overhead = spxii ? SPXII_WIRE_OVERHEAD : SPX_WIRE_OVERHEAD;
+	if (msg_len < overhead) {
+		return 0;
+	}
+
+	return msg_len - overhead;
+}
+
+static __always_inline size_t ipxw_mux_spx_msg_len(size_t data_len, bool spxii)
+{
+	if (spxii) {
+		return data_len + SPXII_WIRE_OVERHEAD;
+	}
+
+	return data_len + SPX_WIRE_OVERHEAD;
+}
 
 struct spx_conn_key {
 	struct ipx_addr bind_addr;
@@ -256,13 +292,11 @@ static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
 	return res < 0;
 }
 
-#define IPX_WIRE_OVERHEAD (sizeof(struct ipxhdr))
-#define SPX_WIRE_OVERHEAD (sizeof(struct ipxhdr) + sizeof(struct spxhdr))
-
 #define IPX_IN_IPV6UDP_OVERHEAD (sizeof(struct ipv6hdr) + sizeof(struct \
 			udphdr))
 
 #define IPX_WRAP_OVERHEAD (IPX_WIRE_OVERHEAD + IPX_IN_IPV6UDP_OVERHEAD)
 #define SPX_WRAP_OVERHEAD (SPX_WIRE_OVERHEAD + IPX_IN_IPV6UDP_OVERHEAD)
+#define SPXII_WRAP_OVERHEAD (SPXII_WIRE_OVERHEAD + IPX_IN_IPV6UDP_OVERHEAD)
 
 #endif /* __IPX_WRAP_COMMON_PROTO_H__ */

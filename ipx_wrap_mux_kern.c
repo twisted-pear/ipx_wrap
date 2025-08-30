@@ -476,8 +476,9 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	skb->cb[4] = cb_new.cb[4];
 
 	/* cut the ACK packet down to size */
-	size_t ack_len = sizeof(struct ipxhdr) + sizeof(struct
-			spxhdr);
+	size_t ack_len = spx_msg->spxii ? sizeof(struct
+			spxii_negotiate_size_hdr) : 0;
+	ack_len += sizeof(struct ipxhdr) + sizeof(struct spxhdr);
 	mux_msg->recv.data_len = ack_len;
 
 	ack_len += sizeof(struct udphdr);
@@ -532,6 +533,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 		spxh->connection_control = SPX_CC_SYSTEM_PKT;
 		if (cb_info->is_spxii) {
+			// TODO: fill in negotiate size here
 			spxh->connection_control |= SPX_CC_SPXII;
 			if (cb_info->is_negotiate_size) {
 				spxh->connection_control |=
@@ -786,11 +788,17 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 	/* also fill in the spx header */
 	if (spx_state != NULL) {
-		if (cur.pos + sizeof(struct ipxw_mux_spx_msg) > data_end) {
+		if (cur.pos + SPX_WIRE_OVERHEAD > data_end) {
 			return TC_ACT_SHOT;
 		}
 
 		struct ipxw_mux_spx_msg *spx_msg = cur.pos;
+
+		if (spx_msg->spxii) {
+			if (cur.pos + SPXII_WIRE_OVERHEAD > data_end) {
+				return TC_ACT_SHOT;
+			}
+		}
 
 		/* prepare the SPX header */
 		if (!ipx_wrap_spx_egress(spx_state, spx_msg, &cb_info)) {
