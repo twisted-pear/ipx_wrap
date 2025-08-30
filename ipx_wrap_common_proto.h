@@ -1,6 +1,8 @@
 #ifndef __IPX_WRAP_COMMON_PROTO_H__
 #define __IPX_WRAP_COMMON_PROTO_H__
 
+#include <sys/queue.h>
+
 #define MAX_DGRAM_LEN 65535 /* max length of a UDP packet */
 
 #define IPXW_MUX_MSG_LEN (MAX_DGRAM_LEN - sizeof(struct udphdr)) /* more will
@@ -46,24 +48,98 @@ struct ipxw_mux_msg_recv {
 	__u16 reserved2;
 } __attribute__((packed));
 
-struct ipxw_mux_msg_min {
+struct ipxw_mux_msg_bind_ack {
+	__be32 prefix;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_bind_err {
+	__u32 err;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_bind {
+	struct ipx_addr addr;
+	__u8 pkt_type;
+	__u8 recv_bcast:1,
+	     pkt_type_any:1,
+	     reserved:6;
+	__u32 reserved2;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_unbind {
+	// empty
+} __attribute__((packed));
+
+struct ipxw_mux_msg_conf {
+	__u8 reserved[sizeof(struct ipx_addr)];
+	__u8 reserved2;
+	__u8 reserved3;
+	__u16 data_len;
+	__u16 reserved4;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_getsockname {
+	struct ipx_addr addr;
+	__u8 pkt_type;
+	__u8 recv_bcast:1,
+	     pkt_type_any:1,
+	     reserved:6;
+	__u16 reserved2;
+	__u16 reserved3;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_spx_connect {
+	struct ipx_addr addr;
+	union {
+		int spx_sock;
+		__u32 err;
+	};
+	__be16 conn_id;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_spx_accept {
+	struct ipx_addr addr;
+	union {
+		int spx_sock;
+		__u32 err;
+	};
+	__be16 conn_id;
+} __attribute__((packed));
+
+struct ipxw_mux_msg_spx_close {
+	__be16 conn_id;
+} __attribute__((packed));
+
+struct ipxw_mux_msg {
 	union {
 		struct {
 			enum ipxw_mux_msg_type type;
 			union {
+				struct ipxw_mux_msg_bind_ack ack;
+				struct ipxw_mux_msg_bind_err err;
+				struct ipxw_mux_msg_bind bind;
+				struct ipxw_mux_msg_unbind unbind;
+				struct ipxw_mux_msg_conf conf;
+				struct ipxw_mux_msg_getsockname getsockname;
+				struct ipxw_mux_msg_spx_connect spx_connect;
+				struct ipxw_mux_msg_spx_accept spx_accept;
+				struct ipxw_mux_msg_spx_close spx_close;
 				struct ipxw_mux_msg_xmit xmit;
 				struct ipxw_mux_msg_recv recv;
 			};
+			STAILQ_ENTRY(ipxw_mux_msg) q_entry;
 		} __attribute__((packed));
 		struct ipxhdr ipxh;
 	};
 	__u8 data[0];
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct ipxw_mux_msg_min) == sizeof(struct ipxhdr),
-		"ipxw_mux_msg_min too large");
+_Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
+		"ipxw_mux_msg too large");
 
-#define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg_min))
+#define IPX_MAX_DATA_LEN (IPXW_MUX_MSG_LEN - sizeof(struct ipxw_mux_msg))
+
+_Static_assert(IPX_MAX_DATA_LEN == (IPXW_MUX_MSG_LEN - sizeof(struct
+				ipxw_mux_msg)), "ipxw_mux_msg size mismatch");
 
 struct mc_bind_entry_key {
 	__u32 ifidx;
@@ -107,8 +183,11 @@ struct spxhdr {
 	__be16 alloc_no;
 } __attribute__((packed));
 
-struct ipxw_mux_spx_msg_min {
-	struct ipxhdr ipxh;
+struct ipxw_mux_spx_msg {
+	union {
+		struct ipxhdr ipxh;
+		struct ipxw_mux_msg mux_msg;
+	};
 	union {
 		struct spxhdr spxh;
 		struct {
@@ -131,7 +210,7 @@ struct ipxw_mux_spx_msg_min {
 	__u8 data[0];
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct ipxw_mux_spx_msg_min) == sizeof(struct ipxhdr) +
+_Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr), "ipxw_mux_spx_msg_min too large");
 
 #define SPX_MAX_PKT_LEN_WO_SIZNG 576 /* limit without size negotiation */

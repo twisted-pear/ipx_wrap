@@ -7,103 +7,11 @@
 #include <ifaddrs.h>
 #include <linux/ipv6.h>
 #include <linux/udp.h>
-#include <sys/queue.h>
 
 #include "common.h"
 #include "ipx_wrap_common_proto.h"
 
 #define IPXW_MUX_CTRL_SOCK_NAME "ipxw_mux_ctrl"
-
-struct ipxw_mux_msg_bind_ack {
-	__be32 prefix;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_bind_err {
-	__u32 err;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_bind {
-	struct ipx_addr addr;
-	__u8 pkt_type;
-	__u8 recv_bcast:1,
-	     pkt_type_any:1,
-	     reserved:6;
-	__u32 reserved2;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_unbind {
-	// empty
-} __attribute__((packed));
-
-struct ipxw_mux_msg_conf {
-	__u8 reserved[sizeof(struct ipx_addr)];
-	__u8 reserved2;
-	__u8 reserved3;
-	__u16 data_len;
-	__u16 reserved4;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_getsockname {
-	struct ipx_addr addr;
-	__u8 pkt_type;
-	__u8 recv_bcast:1,
-	     pkt_type_any:1,
-	     reserved:6;
-	__u16 reserved2;
-	__u16 reserved3;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_spx_connect {
-	struct ipx_addr addr;
-	union {
-		int spx_sock;
-		__u32 err;
-	};
-	__be16 conn_id;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_spx_accept {
-	struct ipx_addr addr;
-	union {
-		int spx_sock;
-		__u32 err;
-	};
-	__be16 conn_id;
-} __attribute__((packed));
-
-struct ipxw_mux_msg_spx_close {
-	__be16 conn_id;
-} __attribute__((packed));
-
-struct ipxw_mux_msg {
-	union {
-		struct {
-			enum ipxw_mux_msg_type type;
-			union {
-				struct ipxw_mux_msg_bind_ack ack;
-				struct ipxw_mux_msg_bind_err err;
-				struct ipxw_mux_msg_bind bind;
-				struct ipxw_mux_msg_unbind unbind;
-				struct ipxw_mux_msg_conf conf;
-				struct ipxw_mux_msg_getsockname getsockname;
-				struct ipxw_mux_msg_spx_connect spx_connect;
-				struct ipxw_mux_msg_spx_accept spx_accept;
-				struct ipxw_mux_msg_spx_close spx_close;
-				struct ipxw_mux_msg_xmit xmit;
-				struct ipxw_mux_msg_recv recv;
-			};
-			STAILQ_ENTRY(ipxw_mux_msg) q_entry;
-		} __attribute__((packed));
-		struct ipxhdr ipxh;
-	};
-	__u8 data[0];
-} __attribute__((packed));
-
-_Static_assert(sizeof(struct ipxw_mux_msg) == sizeof(struct ipxhdr),
-		"ipxw_mux_msg too large");
-
-_Static_assert(IPX_MAX_DATA_LEN == (IPXW_MUX_MSG_LEN - sizeof(struct
-				ipxw_mux_msg)), "ipxw_mux_msg size mismatch");
 
 struct ipxw_mux_handle {
 	int data_sock;
@@ -210,30 +118,6 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
 #define SPX_VERIFY_TMO_TICKS 108
 #define SPX_KEEP_ALIVE_TMO_TICKS 54
 #define SPX_RETRY_COUNT 10
-
-struct ipxw_mux_spx_msg {
-	struct ipxw_mux_msg mux_msg;
-	union {
-		struct spxhdr spxh;
-		struct {
-			__u8 end_of_msg:1,
-			     attention:1,
-			     system:1,
-			     keep_alive:1,
-			     verify:1,
-			     ack:1,
-			     ack_required:1,
-			     reserved:1;
-			__u8 datastream_type;
-			__u16 remote_alloc_no;
-			__u16 local_alloc_no;
-			__u16 remote_expected_sequence;
-			__u16 local_current_sequence;
-			__u16 seq_no;
-		} __attribute__((packed));
-	};
-	__u8 data[0];
-} __attribute__((packed));
 
 _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr), "ipxw_mux_spx_msg too large");

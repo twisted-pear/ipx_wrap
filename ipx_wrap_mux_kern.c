@@ -101,7 +101,7 @@ static __always_inline bool csum_replace_with_zero_check(struct __sk_buff *skb,
 
 static __always_inline enum ipx_wrap_spx_ingress_verdict
 ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
-		ipxw_mux_spx_msg_min *spx_msg)
+		ipxw_mux_spx_msg *spx_msg)
 {
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
@@ -194,7 +194,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	if (cur.pos + sizeof(struct ipxw_mux_msg_min) > data_end) {
+	if (cur.pos + sizeof(struct ipxw_mux_msg) > data_end) {
 		return TC_ACT_UNSPEC;
 	}
 
@@ -223,8 +223,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	/* packet is destined for the local machine */
 
-	struct ipxw_mux_msg_min *mux_msg = cur.pos;
-	struct ipxw_mux_spx_msg_min *spx_msg = cur.pos;
+	struct ipxw_mux_msg *mux_msg = cur.pos;
+	struct ipxw_mux_spx_msg *spx_msg = cur.pos;
 	struct ipxhdr *ipxh = &(mux_msg->ipxh);
 
 	struct bpf_bind_entry *e = NULL;
@@ -317,7 +317,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			sizeof(struct ethhdr) != skb->len) {
 		return TC_ACT_SHOT;
 	}
-	if (data_len < sizeof(struct ipxw_mux_msg_min)) {
+	if (data_len < sizeof(struct ipxw_mux_msg)) {
 		return TC_ACT_SHOT;
 	}
 	if (data_len > IPXW_MUX_MSG_LEN) {
@@ -343,7 +343,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	/* clear the header so we can rewrite into a recv msg */
-	__builtin_memset(mux_msg, 0, sizeof(struct ipxw_mux_msg_min));
+	__builtin_memset(mux_msg, 0, sizeof(struct ipxw_mux_msg));
 
 	/* rewrite to recv msg */
 	mux_msg->type = IPXW_MUX_RECV;
@@ -489,7 +489,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 }
 
 static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
-		*spx_state, struct ipxw_mux_spx_msg_min *spx_msg, struct
+		*spx_state, struct ipxw_mux_spx_msg *spx_msg, struct
 		bpf_cb_info *cb_info)
 {
 	struct spxhdr *spxh = &(spx_msg->spxh);
@@ -691,11 +691,11 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	if (cur.pos + sizeof(struct ipxw_mux_msg_min) > data_end) {
+	if (cur.pos + sizeof(struct ipxw_mux_msg) > data_end) {
 		return TC_ACT_SHOT;
 	}
 
-	struct ipxw_mux_msg_min *mux_msg = cur.pos;
+	struct ipxw_mux_msg *mux_msg = cur.pos;
 
 	/* if we have an SPX socket, create the xmit message from the SPX state
 	 */
@@ -764,11 +764,11 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 	/* also fill in the spx header */
 	if (spx_state != NULL) {
-		if (cur.pos + sizeof(struct ipxw_mux_spx_msg_min) > data_end) {
+		if (cur.pos + sizeof(struct ipxw_mux_spx_msg) > data_end) {
 			return TC_ACT_SHOT;
 		}
 
-		struct ipxw_mux_spx_msg_min *spx_msg = cur.pos;
+		struct ipxw_mux_spx_msg *spx_msg = cur.pos;
 
 		/* prepare the SPX header */
 		if (!ipx_wrap_spx_egress(spx_state, spx_msg, &cb_info)) {
