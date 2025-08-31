@@ -308,6 +308,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			.local_alloc_no = 0,
 			.remote_expected_sequence = 0,
 			.local_current_sequence = 0,
+			.neg_size_to_local = 0,
 			.prefix = e->iface->prefix
 		};
 		__u64 conn_fd64 = conn_fd;

@@ -211,6 +211,7 @@ struct ipxw_mux_spx_msg {
 				__u16 local_current_sequence;
 				__u16 seq_no;
 			};
+			__u16 negotiation_size;
 		} __attribute__((packed));
 	};
 	__u8 spx_data[0];
@@ -224,6 +225,8 @@ _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
 		"ipxw_mux_spx_msg too large");
 
 #define SPX_MAX_PKT_LEN_WO_SIZNG 576 /* limit without size negotiation */
+#define SPXII_MAX_PKT_LEN IPXW_MUX_MSG_LEN
+
 #define SPX_MAX_DATA_LEN_WO_SIZNG (SPX_MAX_PKT_LEN_WO_SIZNG - (sizeof(struct \
 				ipxhdr) + sizeof(struct spxhdr)))
 
@@ -282,6 +285,7 @@ struct bpf_spx_state {
 	__u16 local_alloc_no;
 	__u16 remote_expected_sequence;
 	__u16 local_current_sequence;
+	__u16 neg_size_to_local;
 	__be32 prefix;
 };
 

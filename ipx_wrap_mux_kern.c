@@ -497,8 +497,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 }
 
 static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
-		*spx_state, struct ipxw_mux_spx_msg *spx_msg, struct
-		bpf_cb_info *cb_info)
+		*spx_state, struct ipxw_mux_spx_msg *spx_msg, bool
+		have_negotiate_size_hdr, struct bpf_cb_info *cb_info)
 {
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
@@ -516,6 +516,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	__u16 msg_ack = spx_msg->remote_expected_sequence;
 	__u16 msg_loc_alloc = spx_msg->local_alloc_no;
 	__u16 msg_rem_alloc = spx_msg->remote_alloc_no;
+	__u16 msg_neg_size = spx_msg->negotiation_size;
 
 	spxh->src_conn_id = spx_state->local_id;
 	spxh->dst_conn_id = spx_state->remote_id;
@@ -525,6 +526,12 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	spxh->alloc_no = bpf_htons(msg_loc_alloc);
 
+	/* fill in the negotiate size header */
+	if (spxii && have_negotiate_size_hdr) {
+		spx_msg->spxii_negotiate_size_h.negotiation_size =
+			bpf_htons(msg_neg_size);
+	}
+
 	/* always allow reflected ACKs to go out, use the last known
 	 * information to fill in the header */
 	if (cb_info->mark == IPX_SPX_REFLECTED_ACK) {
@@ -533,7 +540,13 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 		spxh->connection_control = SPX_CC_SYSTEM_PKT;
 		if (cb_info->is_spxii) {
-			// TODO: fill in negotiate size here
+			/* fill in the negotiate size header */
+			if (have_negotiate_size_hdr) {
+				spx_msg->spxii_negotiate_size_h.negotiation_size
+					=
+					bpf_htons(spx_state->neg_size_to_local);
+			}
+
 			spxh->connection_control |= SPX_CC_SPXII;
 			if (cb_info->is_negotiate_size) {
 				spxh->connection_control |=
@@ -554,6 +567,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	spx_state->remote_expected_sequence = msg_ack;
 	spx_state->local_alloc_no = msg_loc_alloc;
 	spx_state->remote_alloc_no = msg_rem_alloc;
+	spx_state->neg_size_to_local = msg_neg_size;
 
 	/* allow sending connection verification requests */
 	if (verify) {
@@ -794,14 +808,14 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 		struct ipxw_mux_spx_msg *spx_msg = cur.pos;
 
-		if (spx_msg->spxii) {
-			if (cur.pos + SPXII_WIRE_OVERHEAD > data_end) {
-				return TC_ACT_SHOT;
-			}
+		bool have_negotiate_size_hdr = false;
+		if (cur.pos + SPXII_WIRE_OVERHEAD <= data_end) {
+			have_negotiate_size_hdr = true;
 		}
 
 		/* prepare the SPX header */
-		if (!ipx_wrap_spx_egress(spx_state, spx_msg, &cb_info)) {
+		if (!ipx_wrap_spx_egress(spx_state, spx_msg,
+					have_negotiate_size_hdr, &cb_info)) {
 			return TC_ACT_SHOT;
 		}
 	}

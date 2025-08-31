@@ -50,6 +50,7 @@ struct ipxcat_cfg {
 	bool verbose;
 	bool listen;
 	bool use_spx;
+	bool spx_1_only;
 	bool accept_broadcasts;
 	bool pkt_type_any;
 	__u8 pkt_type;
@@ -448,9 +449,9 @@ static bool read_and_queue_out_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 	struct ipxw_mux_msg *msg = NULL;
 	size_t max_data_len = cfg->max_ipx_data_len;
 	if (cfg->use_spx) {
+		max_data_len = ipxw_mux_spx_max_data_len(spxh);
 		msg = calloc(1, sizeof(struct ipxw_mux_spx_msg) +
-				cfg->max_spx_data_len);
-		max_data_len = cfg->max_spx_data_len;
+				max_data_len);
 	} else {
 		msg = calloc(1, sizeof(struct ipxw_mux_msg) +
 				cfg->max_ipx_data_len);
@@ -465,8 +466,11 @@ static bool read_and_queue_out_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 	char *data = (char *) msg->data;
 	int sockfd = ipxw_mux_handle_data(ipxh);
 	if (cfg->use_spx) {
-		data = (char *) ipxw_mux_spx_msg_data((struct ipxw_mux_spx_msg
-					*) msg);
+		struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *)
+			msg;
+		ipxw_mux_spx_prepare_xmit_msg(spxh, spx_msg);
+
+		data = (char *) ipxw_mux_spx_msg_data(spx_msg);
 		sockfd = ipxw_mux_spx_handle_sock(spxh);
 	} else {
 		msg->xmit.pkt_type = cfg->pkt_type;
@@ -657,9 +661,13 @@ static void ipx_recv_loop(int epoll_fd, int tmr_fd, struct ipxcat_cfg *cfg)
 			__be16 remote_conn_id =
 				ipxw_mux_spx_check_for_conn_req(msg, &spxii);
 			if (remote_conn_id != SPX_CONN_ID_UNKNOWN) {
+				int spxii_size_negotiation_hint =
+					(cfg->spx_1_only || !spxii) ? -1 :
+					cfg->max_spx_data_len;
 				spxh = ipxw_mux_spx_accept(ipxh,
 						&(msg->recv.saddr),
-						remote_conn_id, false);
+						remote_conn_id,
+						spxii_size_negotiation_hint);
 				cfg->remote_addr = msg->recv.saddr;
 				free(msg);
 				if (ipxw_mux_spx_handle_is_error(spxh)) {
@@ -840,8 +848,10 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 
 		/* initiate SPX connection */
 		if (cfg->use_spx) {
+			int spxii_size_negotiation_hint = cfg->spx_1_only ? -1
+				: cfg->max_spx_data_len;
 			spxh = ipxw_mux_spx_connect(ipxh, &(cfg->remote_addr),
-					false);
+					spxii_size_negotiation_hint);
 			if (ipxw_mux_spx_handle_is_error(spxh)) {
 				perror("SPX connect");
 				cleanup_and_exit(epoll_fd, tmr_fd, cfg,
@@ -1040,15 +1050,19 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 static _Noreturn void usage(void)
 {
 	printf("Usage: ipxcat [-v] [-d <maximum data bytes>] [-t <packet type>] <local IPX address> <remote IPX address>\n");
-	printf("       ipxcat [-v] -s [-d <maximum data bytes>] <local IPX address> <remote IPX address>\n");
+	printf("       ipxcat [-v] -s [-1] [-d <maximum data bytes>] <local IPX address> <remote IPX address>\n");
 	printf("       ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>\n");
-	printf("       ipxcat [-v] -l -s [-d <maximum data bytes>] <local IPX address>\n");
+	printf("       ipxcat [-v] -l -s [-1] [-d <maximum data bytes>] <local IPX address>\n");
 	exit(IPXCAT_ERR_USAGE);
 }
 
 static bool verify_cfg(struct ipxcat_cfg *cfg)
 {
 	if (!cfg->listen && (cfg->accept_broadcasts || cfg->pkt_type_any)) {
+		return false;
+	}
+
+	if (cfg->spx_1_only && !cfg->use_spx) {
 		return false;
 	}
 
@@ -1062,9 +1076,19 @@ static bool verify_cfg(struct ipxcat_cfg *cfg)
 		return false;
 	}
 
-	if (cfg->use_spx && (cfg->max_spx_data_len < 1 || cfg->max_spx_data_len
-				> SPX_MAX_DATA_LEN_WO_SIZNG)) {
+	if (cfg->use_spx && (cfg->max_spx_data_len < 1)) {
 		return false;
+	}
+
+	if (cfg->use_spx) {
+		if (cfg->spx_1_only && (cfg->max_spx_data_len >
+					SPX_MAX_DATA_LEN_WO_SIZNG)) {
+			return false;
+		}
+
+		if (cfg->max_spx_data_len > SPXII_MAX_DATA_LEN) {
+			return false;
+		}
 	}
 
 	return true;
@@ -1076,6 +1100,7 @@ int main(int argc, char **argv)
 		.verbose = false,
 		.listen = false,
 		.use_spx = false,
+		.spx_1_only = false,
 		.accept_broadcasts = false,
 		.pkt_type_any = true,
 		.tx_queue_pause_threshold =  DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
@@ -1088,8 +1113,11 @@ int main(int argc, char **argv)
 	/* parse and verify command-line arguments */
 
 	int opt;
-	while ((opt = getopt(argc, argv, "bd:lst:v")) != -1) {
+	while ((opt = getopt(argc, argv, "1bd:lst:v")) != -1) {
 		switch (opt) {
+			case '1':
+				cfg.spx_1_only = true;
+				break;
 			case 'b':
 				cfg.accept_broadcasts = true;
 				break;

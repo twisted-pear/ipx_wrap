@@ -135,12 +135,13 @@ bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h);
 int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);
 
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
-		struct ipx_addr *daddr, bool spxii);
+		struct ipx_addr *daddr, int spxii_size_negotiation_hint);
 
 __be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg, bool
 		*is_spxii);
 struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
-		ipx_addr *remote_addr, __be16 remote_conn_id, bool spxii);
+		ipx_addr *remote_addr, __be16 remote_conn_id, int
+		spxii_size_negoriation_hint);
 
 bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
 
@@ -151,9 +152,17 @@ void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);
  * will be SPX or SPXII */
 bool ipxw_mux_spx_established(struct ipxw_mux_spx_handle h);
 
+int ipxw_mux_spx_max_data_len(struct ipxw_mux_spx_handle h);
+
 /* check if the connection is in a state where transmitting messages is
  * possible, this includes ipxw_mux_spx_established() */
 bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h);
+
+/* pre-fills the message with data necessary for the ipxw_mux_spx_msg_data()
+ * helper to work correctly, this should be called on a message before the
+ * actual data is inserted */
+void ipxw_mux_spx_prepare_xmit_msg(struct ipxw_mux_spx_handle h, struct
+		ipxw_mux_spx_msg *msg);
 
 /* write message to SPX socket, may block if the caller did not check if the *
  * data socket is writeable and block is true */
