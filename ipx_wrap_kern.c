@@ -631,8 +631,8 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 			}
 
 			/* reinject the packet on ingress */
-			ctx->cb[0] = IPX_TO_IPV6_REINJECT_MARK;
-			return bpf_redirect(ctx->ifindex, BPF_F_INGRESS);
+			CB_INFO(ctx)->mark = IPX_TO_IPV6_REINJECT_MARK;
+			return bpf_redirect(ifidx, BPF_F_INGRESS);
 		}
 	}
 
