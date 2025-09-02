@@ -31,12 +31,22 @@ destination addresses within the set prefix.
 
 ### Interface Configuration
 
-The node portion of the IPX addresses is expected to be derived from the
-interface MAC address (EUI-64). The network portion is taken from bytes 5-8 of
-the IPv6 address.
+IPX addresses are of the form `<4 byte hex network>.<6 byte hex node number>.<2
+byte hex socket>`. The node number is identical to the interface's MAC address
+(but without the `:`).
+
+Since an interface cannot have an IPX address assigned directly, a specially
+formatted IPv6 address is used instead. To construct this IPv6 address the node
+portion of the IPX address is converted into EUI-64 format and used as the
+second half of the IPv6 address. Bytes 5-8 of the IPv6 address contain the IPX
+network. Bytes 1-4 of the IPv6 address are an arbitrarily chosen prefix that
+signifies that the address is an IPX address.  The IPX socket number is not
+part of the IPv6 address and is instead used to determine which program on the
+host is addressed.
 
 So to put an interface with MAC address `00:11:22:33:44:55` into IPX network
-`0xdeadcafe`, you would assign it an address of the form `<32-bit prefix>:dead:cafe:0011:22ff:fe33:4455`.
+`0xdeadcafe`, you would assign it an address of the form `<32-bit
+prefix>:dead:cafe:0011:22ff:fe33:4455`.
 
 ### Neighbor Discovery
 
