@@ -34,7 +34,9 @@ struct {
 	__type(value, struct if_config);
 	__uint(max_entries, IFINDEX_MAX);
 	__uint(map_flags, BPF_F_RDONLY_PROG);
+#ifndef __IPX_WRAP_NOPIN__
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
+#endif
 } ipx_wrap_if_config SEC(".maps");
 
 struct icmpv6_nd {

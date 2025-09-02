@@ -13,9 +13,18 @@
 #define PIN_SUB "tc/globals"
 #define IPX_WRAP_IF_CONFIG_MAP "ipx_wrap_if_config"
 
+enum ifc_error_codes {
+	IFC_ERR_OK = 0,
+	IFC_ERR_USAGE,
+	IFC_ERR_BPF,
+	IFC_ERR_IFINDEX,
+	IFC_ERR_MAP_PATH,
+	IFC_ERR_MAX
+};
+
 static _Noreturn void usage() {
 	printf("Usage: ipx_wrap_if_config <if> <if ipv6 addr>\n");
-	exit(1);
+	exit(IFC_ERR_USAGE);
 }
 
 int main(int argc, char **argv)
@@ -40,7 +49,7 @@ int main(int argc, char **argv)
 	__u32 ifidx = if_nametoindex(ifname);
 	if (ifidx == 0) {
 		perror("ifindex");
-		exit(2);
+		exit(IFC_ERR_IFINDEX);
 	}
 
 	char map_fn[PATH_MAX];
@@ -48,19 +57,19 @@ int main(int argc, char **argv)
 			IPX_WRAP_IF_CONFIG_MAP);
 	if (len < 0) {
 		fprintf(stderr, "mk map path: failed to create path\n");
-		exit(3);
+		exit(IFC_ERR_MAP_PATH);
 	}
 
 	int map_fd = bpf_obj_get(map_fn);
 	if (map_fd < 0) {
 		perror("get if config map fd");
-		exit(4);
+		exit(IFC_ERR_BPF);
 	}
 
 	if (bpf_map_update_elem(map_fd, &ifidx, &ifcfg, 0) < 0) {
 		perror("update if config map");
-		exit(5);
+		exit(IFC_ERR_BPF);
 	}
 
-	return 0;
+	return IFC_ERR_OK;
 }
