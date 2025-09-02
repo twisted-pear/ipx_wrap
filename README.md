@@ -102,6 +102,15 @@ The `install.sh` script will do all three tasks for you.
 Usage: install.sh <if> <if ipv6 addr>
 ```
 
+As an alternative to using the `tc` system to load the BPF programs, there is
+also `ipx_wrap_ifd`. This program takes the same arguments as the `install.sh`
+script but instead starts a process that installs the BPF programs and
+configures them (doing the jobs of the `tc` commands and `ipx_wrap_if_config`).
+As long as the program is running, the BPF programs remain active. Once the
+program is stopped, the BPF programs are unloaded. Note that when using
+`ipx_wrap_ifd`, the you will have to disable offloading yourself as described
+above.
+
 ## ipx_wrap_if_config
 
 Sets a 4 byte prefix and the IPX network number for the BPF programs on one
@@ -111,6 +120,22 @@ and network number are extracted from the address.
 Usage:
 ```
 Usage: ipx_wrap_if_config <if> <if ipv6 addr>
+```
+
+## ipx_wrap_ifd
+
+Loads and configures the BPF programs for one interface. As long as the program
+is running, the BPF programs remain active. When the program is stopped, the
+BPF programs are unloaded. The parameters and their meanings are the same as
+for `ipx_wrap_if_config`.
+
+It is crucial that this program is started _after_ `ipx_wrap_mux` for all
+participating interfaces. This is necessary to ensure the correct order of BPF
+programs.
+
+Usage:
+```
+Usage: ipx_wrap_ifd <if> <if ipv6 addr>
 ```
 
 ## ipx_wrap_mux
