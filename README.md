@@ -48,6 +48,17 @@ So to put an interface with MAC address `00:11:22:33:44:55` into IPX network
 `0xdeadcafe`, you would assign it an address of the form `<32-bit
 prefix>:dead:cafe:0011:22ff:fe33:4455`.
 
+Conversely to obtain an IPX address for an interface, we can use bytes 5-8 of
+the assigned IPv6 address within the 32-bit prefix as the network number and
+the MAC address as the node number. The socket number is dependent on the
+addressed program and is therefore not part of any interface address.
+
+For example, if the 32-bit prefix is `0xfdaabbbb` and the interface has the MAC
+address `00:11:22:33:44:55` and the IPv6 address
+`fdaa:bbbb:dead:cafe:0011:22ff:fe33:4455`, then any IPX address for the
+interface will be of the form `deadcafe.001122334455.XXXX`, with XXXX being the
+socket number.
+
 ### Neighbor Discovery
 
 Neighbor solicitations sent by the configured interface will be intercepted,
