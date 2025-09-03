@@ -527,7 +527,10 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	size_t oldhdr_size;
 	size_t newhdr_size;
 	struct ipv6_and_udphdr newhdr;
+	__builtin_memset(&newhdr, 0, sizeof(struct ipv6_and_udphdr));
 	struct bpf_cb_info cb_info;
+	__builtin_memset(&cb_info, 0, sizeof(struct bpf_cb_info));
+
 	bool ipv6_in_ipx = is_ipv6_in_ipx(ipxh);
 	if (ipv6_in_ipx) {
 		oldhdr_size = sizeof(struct ipxhdr);
@@ -648,6 +651,8 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	size_t oldhdr_size;
 	size_t newhdr_size;
 	struct ipxhdr newhdr;
+	__builtin_memset(&newhdr, 0, sizeof(struct ipxhdr));
+
 	if (is_ipx_in_ipv6(ip6h, data_end)) {
 		oldhdr_size = sizeof(struct iphdr) + sizeof(struct udphdr);
 		newhdr_size = unpack_ipx_in_ipv6();
