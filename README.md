@@ -236,9 +236,9 @@ This program depends on a running `ipx_wrap_mux`.
 Usage:
 ```
 Usage: ipxcat [-v] [-d <maximum data bytes>] [-t <packet type>] <local IPX address> <remote IPX address>
-       ipxcat [-v] -s [-d <maximum data bytes>] <local IPX address> <remote IPX address>
+       ipxcat [-v] -s [-1] [-d <maximum data bytes>] <local IPX address> <remote IPX address>
        ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>
-       ipxcat [-v] -l -s [-d <maximum data bytes>] <local IPX address>
+       ipxcat [-v] -l -s [-1] [-d <maximum data bytes>] <local IPX address>
 ```
 
 The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
@@ -264,11 +264,19 @@ will accept any packet type while a sending process will use the packet type
 `0x1e`.
 
 The `-d` option specifies the maximum amount of bytes of data transmitted per
-packet. For SPX this value must be between 1 and 534 (inclusive). For IPX this
-value must be between 1 and 65497 (inclusive). There is no MTU measurement.
-This means that it is up to the user to ensure packets are not too large to be
-transmitted. The default for both IPX and SPX is 534 and is used if the option
-is not specified.
+packet. For SPX this value is ignored and is 534. For SPXII this value must bet
+between 1 and 65483 (inclusive). For IPX this value must be between 1 and 65497
+(inclusive). There is no MTU measurement unless SPXII is in use. This means
+that it is up to the user to ensure packets are not too large to be
+transmitted. The default for IPX is 534. SPXII will perform a packet size
+negotiation. It will gradually reduce the packet size from the specified
+maximum down until packets go through. If the `-d` option is not specified it
+will start at 534 bytes of data.
+
+The `-1` flag specifies that only SPX version 1 should be used. This version of
+SPX does not support packet size negotiation and thus the maximum packet size
+when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
+is not specified, SPXII will be used if the connection peer supports it.
 
 The `-v` flag will cause the program to print more detailed information to
 `stderr`.
