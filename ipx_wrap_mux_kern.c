@@ -105,6 +105,7 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 {
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
+	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
 	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
 		0;
 	__u8 datastream_type = spxh->datastream_type;
@@ -125,9 +126,24 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 			ack_required) {
 		return SPX_DROP_AND_ACK;
 	}
-	if (bpf_ntohs(spxh->seq_no) != spx_state->remote_expected_sequence) {
-		return SPX_DROP;
+
+	if (system) {
+		/* allow old system packets in case we get a lost ACK */
+		__u16 cur_seq = bpf_ntohs(spxh->seq_no);
+		__u16 next_seq;
+		__builtin_add_overflow(cur_seq, 1, &next_seq);
+
+		if (cur_seq != spx_state->remote_expected_sequence && next_seq
+				!= spx_state->remote_expected_sequence) {
+			return SPX_DROP;
+		}
+	} else {
+		if (bpf_ntohs(spxh->seq_no) !=
+				spx_state->remote_expected_sequence) {
+			return SPX_DROP;
+		}
 	}
+
 	/* closing the connection is always permitted */
 	if (datastream_type == SPX_DS_END_OF_CONN) {
 		return SPX_PASS;

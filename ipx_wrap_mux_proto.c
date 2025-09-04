@@ -1462,7 +1462,7 @@ static void ipxw_mux_spx_close_internal(struct ipxw_mux_spx_handle *h)
 
 static bool ipxw_mux_spx_resend_last_msg(struct ipxw_mux_spx_handle h)
 {
-	assert(h.last_known_state->state == IPXW_MUX_SPX_CONN_ESTABLISHED);
+	assert(h.last_known_state->state == IPXW_MUX_SPX_CONN_WAITING_FOR_ACK);
 
 	/* retransmit the last message */
 
@@ -1605,11 +1605,9 @@ static bool ipxw_mux_spx_send_conn_req(struct ipxw_mux_spx_handle h)
 	return true;
 }
 
-static bool ipxw_mux_spx_send_ack(struct ipxw_mux_spx_handle h, bool
-		negotiate_size, bool end_of_conn)
+static bool ipxw_mux_spx_send_ack_wo_state_change(struct ipxw_mux_spx_handle h,
+		bool negotiate_size, bool end_of_conn)
 {
-	assert(h.last_known_state->state == IPXW_MUX_SPX_CONN_MUST_SEND_ACK);
-
 	struct ipxw_mux_spx_msg ack_msg;
 	memset(&ack_msg, 0, sizeof(struct ipxw_mux_spx_msg));
 	ipxw_mux_fill_msg_from_state(h, &ack_msg);
@@ -1634,6 +1632,19 @@ static bool ipxw_mux_spx_send_ack(struct ipxw_mux_spx_handle h, bool
 
 	/* reset the counters */
 	h.last_known_state->ticks_since_last_keep_alive = 0;
+
+	return true;
+}
+
+static bool ipxw_mux_spx_send_ack(struct ipxw_mux_spx_handle h, bool
+		negotiate_size, bool end_of_conn)
+{
+	assert(h.last_known_state->state == IPXW_MUX_SPX_CONN_MUST_SEND_ACK);
+
+	if (!ipxw_mux_spx_send_ack_wo_state_change(h, negotiate_size,
+				end_of_conn)) {
+		return false;
+	}
 
 	/* update the state */
 	h.last_known_state->state = IPXW_MUX_SPX_CONN_ESTABLISHED;
@@ -2150,6 +2161,30 @@ ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 	return -1;
 }
 
+static bool ipxw_mux_spx_is_current_ack(struct ipxw_mux_spx_handle h, struct
+		ipxw_mux_spx_msg *msg)
+{
+	/* message must be an ACK */
+	if (msg->end_of_msg || msg->attention ||
+			msg->ack_required || !msg->system) {
+		return false;
+	}
+
+	/* we want an ACK and it has to ACK the last packet we
+	 * sent */
+	__u16 local_next_sequence;
+	__builtin_add_overflow(
+			h.last_known_state->local_current_sequence,
+			1, &local_next_sequence);
+	if (msg->remote_expected_sequence !=
+			local_next_sequence) {
+		fprintf(stderr, "not ack because sequence\n");
+		return false;
+	}
+
+	return true;
+}
+
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		ipxw_mux_spx_msg *msg, size_t data_len, bool block)
 {
@@ -2210,6 +2245,8 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 		return 0;
 	}
 
+	bool is_sizng = msg->spxii && msg->negotiate_size;
+
 	switch (h.last_known_state->state) {
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 			/* need the correct header length for SPX or SPXII */
@@ -2250,7 +2287,7 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 			if (msg->ack_required) {
 				h.last_known_state->state =
 					IPXW_MUX_SPX_CONN_MUST_SEND_ACK;
-				ipxw_mux_spx_send_ack(h, false, false);
+				ipxw_mux_spx_send_ack(h, is_sizng, false);
 			}
 
 			break;
@@ -2301,38 +2338,56 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 				return 0;
 			}
 
-			/* message must be an ACK */
-			if (msg->end_of_msg || msg->attention ||
-					msg->ack_required || !msg->system) {
+			/* message is an ACK */
+			if (ipxw_mux_spx_is_current_ack(h, msg)) {
+				/* increment sequence number after receiving an
+				 * ACK */
+				__builtin_add_overflow(
+						h.last_known_state->local_current_sequence,
+						1,
+						&(h.last_known_state->local_current_sequence));
+
+				/* this acks the last sent msg */
+				h.last_known_state->state =
+					IPXW_MUX_SPX_CONN_ESTABLISHED;
+				h.last_known_state->last_tx_attempts = 0;
+				break;
+
+			}
+
+			/* message is not an ack */
+
+			if (h.last_known_state->local_current_sequence !=
+					msg->remote_expected_sequence) {
 				/* invalid message, no output */
 				memset(msg, 0, msg_buf_len);
 				return 0;
 			}
 
-			/* we want an ACK and it has to ACK the last packet we
-			 * sent */
-			__u16 local_next_sequence;
-			__builtin_add_overflow(
-					h.last_known_state->local_current_sequence,
-					1, &local_next_sequence);
-			if (msg->remote_expected_sequence !=
-					local_next_sequence) {
-				/* invalid message, no output */
-				memset(msg, 0, msg_buf_len);
-				return 0;
+			/* update the state */
+			if (!msg->system) {
+				__builtin_add_overflow(
+						h.last_known_state->remote_expected_sequence,
+						1,
+						&(h.last_known_state->remote_expected_sequence));
+				__builtin_add_overflow(
+						h.last_known_state->local_alloc_no,
+						1,
+						&(h.last_known_state->local_alloc_no));
+
+				/* update the last message to retransmit */
+				ipxw_mux_fill_msg_from_state(h,
+						&(h.last_known_state->last_msg));
+
 			}
 
-			/* increment sequence number after receiving an ACK */
-			__builtin_add_overflow(
-					h.last_known_state->local_current_sequence,
-					1,
-					&(h.last_known_state->local_current_sequence));
+			if (msg->ack_required) {
+				ipxw_mux_spx_send_ack_wo_state_change(h,
+						is_sizng, false);
+			}
 
-			/* this acks the last sent msg */
-			h.last_known_state->state =
-				IPXW_MUX_SPX_CONN_ESTABLISHED;
-			h.last_known_state->last_tx_attempts = 0;
 			break;
+
 		default:
 			assert(0);
 	}
