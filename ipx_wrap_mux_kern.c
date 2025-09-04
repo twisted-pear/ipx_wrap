@@ -405,6 +405,12 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		__u16 remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 		__u16 seq_no = bpf_ntohs(spxh->seq_no);
 		__u16 ack_no = bpf_ntohs(spxh->ack_no);
+		__u16 neg_size = 0;
+		if (spxii && (&(spx_msg->spxii_negotiate_size_h) + 1) <=
+				data_end) {
+			neg_size =
+				bpf_ntohs(spx_msg->spxii_negotiate_size_h.negotiation_size);
+		}
 
 		/* remove SPX header from checksum */
 		csum_diff = bpf_csum_diff((__be32*) spxh, sizeof(struct
@@ -427,6 +433,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		spx_msg->remote_alloc_no = remote_alloc_no;
 		spx_msg->seq_no = seq_no;
 		spx_msg->remote_expected_sequence = ack_no;
+		spx_msg->negotiation_size = neg_size;
 
 		/* add SPX msg to checksum */
 		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
@@ -600,6 +607,10 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		return true;
 	}
 
+	if (spxii && negotiate_size) {
+		spxh->connection_control |= SPX_CC_NEGOTIATE_SIZE;
+	}
+
 	/* allow sending ACK packets */
 	if (ack) {
 		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
@@ -623,9 +634,6 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 	}
 	if (system) {
 		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
-	}
-	if (spxii && negotiate_size) {
-		spxh->connection_control |= SPX_CC_NEGOTIATE_SIZE;
 	}
 
 	return true;

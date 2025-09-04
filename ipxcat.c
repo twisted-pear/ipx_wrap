@@ -447,7 +447,7 @@ static bool read_and_queue_out_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 	}
 
 	struct ipxw_mux_msg *msg = NULL;
-	size_t max_data_len = cfg->max_ipx_data_len;
+	int max_data_len = cfg->max_ipx_data_len;
 	if (cfg->use_spx) {
 		max_data_len = ipxw_mux_spx_max_data_len(spxh);
 		msg = calloc(1, sizeof(struct ipxw_mux_spx_msg) +
