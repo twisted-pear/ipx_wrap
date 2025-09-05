@@ -281,6 +281,37 @@ is not specified, SPXII will be used if the connection peer supports it.
 The `-v` flag will cause the program to print more detailed information to
 `stderr`.
 
+## ipxdiag
+
+This is a program for collecting diagnostic information from IPX machines that
+support diagnostic services. Messages can be sent to a single target or to a
+network's broadcast address. The destination socket to be used is usually
+`0x0456`.
+
+Once the program starts, the request message is sent. Then, the program waits
+for a certain number of seconds for replies and prints their contents to
+`stdout`.
+
+This program depends on a running `ipx_wrap_mux`.
+
+Usage:
+```
+Usage: ipxdiag [-v] [-t <packet type>] [-w <wait seconds>] [-e <excluded target node> ...] <local IPX addr> <target IPX address>
+```
+
+The `-e` option can be used to specify the node address of an IPX machine that
+should not reply to our request. This can be useful when sending to a network's
+broadcast address to suppress replies from machines on that network that we are
+not interested in. The `-e` option can be specified up to 80 times.
+
+The `-t` option can be used to specify a packet type. If no packet type is
+specified, then the process will use the packet type `0x1e`.
+
+The `-w` option can be used to specify (in seconds) how long the program will
+wait for reply messages. The default is 5 seconds.
+
+The `-v` flag will cause the program to print more detailed information.
+
 ## Acknowledgements
 
 ### uthash
