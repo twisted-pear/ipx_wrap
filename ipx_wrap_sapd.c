@@ -12,7 +12,7 @@ enum service_sap_error_codes {
 #define SAP_SOCK 0x0452
 #define SAP_PKT_TYPE 0x04
 #define SAP_SRV_SHUTDOWN_HOPS htons(0x0010)
-#define SAP_SRV_EXPIRY_SECS (60*5)
+#define SAP_SRV_EXPIRY_SECS (60*3)
 #define SAP_MAX_SRV_NAME_LEN 47
 #define SAP_MAX_SRVS_PER_PKT 7 /* max observed */
 #define SAP_BCAST_INTERVAL_SECS 60
