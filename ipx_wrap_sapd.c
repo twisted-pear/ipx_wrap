@@ -580,6 +580,12 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 	struct srv_query *sap_query_pkt = (struct srv_query *) msg->data;
 	do {
 		if (sap_rsp_pkt->rsp_type == SAP_PKT_TYPE_GENERAL_SQ) {
+			/* check packet length */
+			if (msg->recv.data_len != sizeof(struct srv_query)) {
+				fprintf(stderr, "invalid length");
+				return;
+			}
+
 			/* reply with all servers of the correct type */
 			if (sap_query_pkt->srv_type == SAP_SRV_TYPE_WILD) {
 				/* get all server types */
@@ -609,6 +615,12 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 
 			break;
 		} else if (sap_rsp_pkt->rsp_type == SAP_PKT_TYPE_NEAREST_SQ) {
+			/* check packet length */
+			if (msg->recv.data_len != sizeof(struct srv_query)) {
+				fprintf(stderr, "invalid length");
+				return;
+			}
+
 			/* reply with the nearest server of the correct type */
 			if (sap_query_pkt->srv_type == SAP_SRV_TYPE_WILD) {
 				fprintf(stderr, "wildcard server tyoe not"
