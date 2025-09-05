@@ -9,6 +9,7 @@
 /ipx_wrap_sapd
 /ipx_wrap_mux
 /ipxcat
+/ipxdiag
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests

@@ -5,9 +5,9 @@
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
-#include <arpa/inet.h>
 
 #include "ipx_wrap_mux_proto.h"
+#include "ipx_wrap_helpers.h"
 
 #define DEFAULT_PKT_TYPE 0x1E
 #define DEFAULT_IPX_DATA_LEN (SPX_MAX_PKT_LEN_WO_SIZNG - IPX_WIRE_OVERHEAD)
@@ -207,33 +207,6 @@ static int setup_timer(int epoll_fd)
 	}
 
 	return tmr;
-}
-
-static bool parse_ipxaddr(const char *str, struct ipx_addr *addr)
-{
-	__u32 net;
-	__u16 sock;
-	ssize_t res = sscanf(str,
-			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx",
-			&net, &(addr->node[0]), &(addr->node[1]),
-			&(addr->node[2]), &(addr->node[3]), &(addr->node[4]),
-			&(addr->node[5]), &sock);
-	if (res != 8) {
-		return false;
-	}
-
-	addr->net = htonl(net);
-	addr->sock = htons(sock);
-
-	return true;
-}
-
-static void print_ipxaddr(FILE *f, const struct ipx_addr *addr)
-{
-	fprintf(f, "%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04x",
-			ntohl(addr->net), addr->node[0], addr->node[1],
-			addr->node[2], addr->node[3], addr->node[4],
-			addr->node[5], ntohs(addr->sock));
 }
 
 static bool queue_in_msg(int epoll_fd, struct ipxw_mux_msg *msg)
@@ -742,38 +715,6 @@ static void ipx_recv_loop(int epoll_fd, int tmr_fd, struct ipxcat_cfg *cfg)
 	}
 }
 
-static bool get_actual_local_addr(struct ipxw_mux_handle h, struct ipx_addr
-		*addr)
-{
-	/* prepare in message */
-	struct ipxw_mux_msg in_msg;
-	memset(&in_msg, 0, sizeof(in_msg));
-	in_msg.type = IPXW_MUX_GETSOCKNAME;
-
-	/* prepare out message */
-	struct ipxw_mux_msg out_msg;
-	memset(&out_msg, 0, sizeof(out_msg));
-	out_msg.type = IPXW_MUX_CONF;
-
-	ssize_t out_len = ipxw_mux_send_recv_conf_msg(h, &in_msg, &out_msg);
-	if (out_len < 0) {
-		return false;
-	}
-
-	/* verify output message */
-	if (out_len != sizeof(out_msg)) {
-		errno = EINVAL;
-		return false;
-	}
-	if (out_msg.type != IPXW_MUX_GETSOCKNAME) {
-		errno = EINVAL;
-		return false;
-	}
-
-	*addr = out_msg.getsockname.addr;
-	return true;
-}
-
 static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 		tmr_fd)
 {
@@ -792,8 +733,8 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 	}
 
 	if (cfg->verbose) {
-		if (!get_actual_local_addr(ipxh, &(cfg->local_addr))) {
-			perror("IPX getsockname");
+		if (!get_bound_ipx_addr(ipxh, &(cfg->local_addr))) {
+			perror("IPX get bound address");
 			cleanup_and_exit(epoll_fd, tmr_fd, cfg,
 					IPXCAT_ERR_GETSOCKNAME);
 		}
@@ -1196,7 +1137,7 @@ int main(int argc, char **argv)
 	if (!cfg.listen) {
 		cfg.pkt_type_any = false;
 
-		if (optind + 1 >= argc) {
+		if (optind + 2 != argc) {
 			usage();
 		}
 

@@ -9,7 +9,7 @@ VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/
 
 USER_TARGETS = ipx_wrap_if_config
 IFD_TARGETS = ipx_wrap_ifd
-MUX_TARGETS = ipxcat
+MUX_TARGETS = ipxcat ipxdiag
 SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd
 MUXER_TARGETS = ipx_wrap_mux
 BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o
@@ -71,8 +71,8 @@ ipx_wrap_service_lib.o: ipx_wrap_service_lib.c ipx_wrap_service_lib.h ipx_wrap_m
 $(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h ipx_wrap_mux_kern.skel.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o $(MUXER_LIBS)
 
-$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h
-	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o
+$(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
+	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o
 
 $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
