@@ -269,6 +269,11 @@ static void print_diag_msg(struct ipxw_mux_msg *msg, bool verbose)
 
 	printf("response from ");
 	print_ipxaddr(stdout, &(msg->recv.saddr));
+
+	if (verbose) {
+		printf(" (packet type: %02hhx)", msg->recv.pkt_type);
+	}
+
 	printf(":\n");
 
 	struct ipx_diag_rsp *rsp = NULL;
