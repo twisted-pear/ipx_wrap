@@ -27,6 +27,7 @@ enum ipxcat_error_codes {
 	IPXCAT_ERR_SPX_FD,
 	IPXCAT_ERR_SIG_HANDLER,
 	IPXCAT_ERR_BIND,
+	IPXCAT_ERR_GETSOCKNAME,
 	IPXCAT_ERR_GET_OIF_DATA_LEN,
 	IPXCAT_ERR_OIF_DATA_LEN_ZERO,
 	IPXCAT_ERR_EPOLL_WAIT,
@@ -741,6 +742,38 @@ static void ipx_recv_loop(int epoll_fd, int tmr_fd, struct ipxcat_cfg *cfg)
 	}
 }
 
+static bool get_actual_local_addr(struct ipxw_mux_handle h, struct ipx_addr
+		*addr)
+{
+	/* prepare in message */
+	struct ipxw_mux_msg in_msg;
+	memset(&in_msg, 0, sizeof(in_msg));
+	in_msg.type = IPXW_MUX_GETSOCKNAME;
+
+	/* prepare out message */
+	struct ipxw_mux_msg out_msg;
+	memset(&out_msg, 0, sizeof(out_msg));
+	out_msg.type = IPXW_MUX_CONF;
+
+	ssize_t out_len = ipxw_mux_send_recv_conf_msg(h, &in_msg, &out_msg);
+	if (out_len < 0) {
+		return false;
+	}
+
+	/* verify output message */
+	if (out_len != sizeof(out_msg)) {
+		errno = EINVAL;
+		return false;
+	}
+	if (out_msg.type != IPXW_MUX_GETSOCKNAME) {
+		errno = EINVAL;
+		return false;
+	}
+
+	*addr = out_msg.getsockname.addr;
+	return true;
+}
+
 static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 		tmr_fd)
 {
@@ -759,6 +792,12 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 	}
 
 	if (cfg->verbose) {
+		if (!get_actual_local_addr(ipxh, &(cfg->local_addr))) {
+			perror("IPX getsockname");
+			cleanup_and_exit(epoll_fd, tmr_fd, cfg,
+					IPXCAT_ERR_GETSOCKNAME);
+		}
+
 		fprintf(stderr, "bound to ");
 		print_ipxaddr(stderr, &(cfg->local_addr));
 		fprintf(stderr, "\n");
