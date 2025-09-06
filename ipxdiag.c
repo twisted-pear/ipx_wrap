@@ -284,7 +284,7 @@ static void print_diag_msg(struct ipxw_mux_msg *msg, bool verbose)
 
 	printf("\tmajor version: %hhu\n", rsp->major_version);
 	printf("\tminor version: %hhu\n", rsp->minor_version);
-	printf("\tSPX diagnostics socket: %hu\n", ntohs(rsp->spx_diag_sock));
+	printf("\tSPX diagnostics socket: %04hx\n", ntohs(rsp->spx_diag_sock));
 	printf("\t# of components: %hhu\n", rsp->n_components);
 	printf("\tcomponents:\n");
 
