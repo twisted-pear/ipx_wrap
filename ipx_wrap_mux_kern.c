@@ -326,6 +326,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	struct ipx_addr saddr = ipxh->saddr;
 	__u8 pkt_type = ipxh->type;
+	__u8 tc = ipxh->tc;
 
 	/* extract the correct data length */
 	__u16 data_len = bpf_ntohs(ipxh->pktlen);
@@ -368,6 +369,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	mux_msg->recv.is_bcast = cb.is_bcast;
 	mux_msg->recv.is_spx = (spx_state != NULL);
 	mux_msg->recv.data_len = data_len;
+	mux_msg->recv.tc = tc;
 
 	/* add recv msg header to checksum */
 	csum_diff = bpf_csum_diff(NULL, 0, (__be32*) mux_msg,

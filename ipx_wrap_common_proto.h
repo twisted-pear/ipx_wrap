@@ -45,7 +45,8 @@ struct ipxw_mux_msg_recv {
 	     is_spx:1,
 	     reserved:6;
 	__u16 data_len;
-	__u16 reserved2;
+	__u8 tc;
+	__u8 reserved2;
 } __attribute__((packed));
 
 struct ipxw_mux_msg_bind_ack {
