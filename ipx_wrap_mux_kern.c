@@ -230,6 +230,45 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 	return SPX_PASS;
 }
 
+bool __always_inline is_to_managed_sock(struct __sk_buff *skb, struct ipv6hdr
+		*ip6h, struct udphdr *udph)
+{
+	struct bpf_sock_tuple udp_sock_tuple;
+	__builtin_memset(&udp_sock_tuple, 0, sizeof(struct bpf_sock_tuple));
+	udp_sock_tuple.ipv6.sport = udph->source;
+	udp_sock_tuple.ipv6.dport = udph->dest;
+	__builtin_memcpy(udp_sock_tuple.ipv6.saddr, &(ip6h->saddr),
+			sizeof(ip6h->saddr));
+	__builtin_memcpy(udp_sock_tuple.ipv6.daddr, &(ip6h->daddr),
+			sizeof(ip6h->daddr));
+
+	/* get the probable target socket */
+	struct bpf_sock *probable_target_sock = bpf_sk_lookup_udp(skb,
+			&udp_sock_tuple, sizeof(udp_sock_tuple.ipv6), -1, 0);
+	if (probable_target_sock == NULL) {
+		return false;
+	}
+
+	/* check if target socket is one of our managed IPX or SPX sockets */
+	struct ipx_addr *bind_addr =
+		bpf_sk_storage_get(&ipx_wrap_mux_bind_egress,
+				probable_target_sock, NULL, 0);
+	struct bpf_spx_state *spx_state =
+		bpf_sk_storage_get(&ipx_wrap_mux_spx_state,
+				probable_target_sock, NULL, 0);
+
+	bpf_sk_release(probable_target_sock);
+
+	if (bind_addr != NULL) {
+		return true;
+	}
+	if (spx_state != NULL) {
+		return true;
+	}
+
+	return false;
+}
+
 #define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
 
 SEC("tc/ingress")
@@ -261,16 +300,26 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
 		return TC_ACT_UNSPEC;
 	}
-
-	if (!is_ipx_in_ipv6(ip6h, data_end)) {
+	if (ip6h->nexthdr != IPPROTO_UDP) {
 		return TC_ACT_UNSPEC;
 	}
 
-	struct udphdr *udph = cur.pos;
-	cur.pos = udph + 1;
+	struct udphdr *udph;
+	if (parse_udphdr(&cur, data_end, &udph) < 0) {
+		return TC_ACT_UNSPEC;
+	}
+
+	/* see if the packet is directed towards one of the managed IPX or SPX
+	 * sockets, we must drop packets to managed sockets that are not actual
+	 * IPX or SPX traffic */
+	bool to_managed_sock = is_to_managed_sock(skb, ip6h, udph);
+
+	if (!is_ipx_in_ipv6(ip6h, data_end)) {
+		return (to_managed_sock ? TC_ACT_SHOT : TC_ACT_UNSPEC);
+	}
 
 	if (cur.pos + sizeof(struct ipxw_mux_msg) > data_end) {
-		return TC_ACT_UNSPEC;
+		return (to_managed_sock ? TC_ACT_SHOT : TC_ACT_UNSPEC);
 	}
 
 	/* determine if the packet is for the local machine */
@@ -289,11 +338,11 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			BPF_FIB_LOOKUP_SKIP_NEIGH);
 	if (fib_res == 0) {
 		cb.is_for_local = false;
-		return TC_ACT_UNSPEC;
+		return (to_managed_sock ? TC_ACT_SHOT : TC_ACT_UNSPEC);
 	} else if (fib_res == BPF_FIB_LKUP_RET_NOT_FWDED) {
 		cb.is_for_local = true;
 	} else {
-		return TC_ACT_UNSPEC;
+		return (to_managed_sock ? TC_ACT_SHOT : TC_ACT_UNSPEC);
 	}
 
 	/* packet is destined for the local machine */
@@ -492,6 +541,13 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		/* insert the modified checksum */
 		if (!csum_replace_with_zero_check(skb, csum_ofs, csum_diff)) {
 			return TC_ACT_SHOT;
+		}
+
+		/* mark the packet for our SK_SKB_VERDICT program */
+		if (spx_state == NULL) {
+			CB_INFO(skb)->mark = IPX_ACCEPTED_IPX_PKT;
+		} else {
+			CB_INFO(skb)->mark = IPX_ACCEPTED_SPX_PKT;
 		}
 
 		return TC_ACT_OK;

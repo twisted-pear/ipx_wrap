@@ -24,12 +24,7 @@
 #define INTERFACE_RESCAN_SECS 30
 #define MAX_EPOLL_EVENTS 64
 
-// TODO: install an SK_LOOKUP program on the netns to prevent unwanted
-// (non-IPX) traffic from reaching our client sockets
-// TODO: find a way to stop client sockets from sending to arbitrary IPv6 addrs
-// TODO: find a way to close the data sockets in the client process in case of
-// unbind
-// TODO: clean up sk_storage maps somehow too
+// TODO: apply muxer/demuxer bpf programs to all interfaces
 // TODO: add a way to close an SPX connection properly in a multi-process
 // scenario
 

@@ -96,7 +96,7 @@ static __always_inline bool is_ipx_in_ipv6(struct ipv6hdr *ip6h, void
 	struct hdr_cursor cur;
 	cur.pos = ip6h + 1;
 
-	if (cur.pos + len > data_end) {
+	if (cur.pos + min_len > data_end) {
 		return false;
 	}
 
