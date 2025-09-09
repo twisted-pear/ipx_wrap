@@ -850,7 +850,7 @@ ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)
 	} while (0);
 
 	/* clear out invalid message */
-	recv(h.data_sock, &msg, 0, 0);
+	recv(h.data_sock, &msg, rcvd_len, 0);
 
 	return -1;
 }
@@ -1072,7 +1072,7 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock)
 	} while (0);
 
 	/* clear out invalid message */
-	recv(conf_sock, &msg, 0, 0);
+	recv(conf_sock, &msg, rcvd_len, 0);
 
 	return -1;
 }
@@ -2233,7 +2233,7 @@ ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block)
 	} while (0);
 
 	/* clear out invalid message */
-	recv(h.spx_sock, &msg, 0, 0);
+	recv(h.spx_sock, &msg, rcvd_len, 0);
 
 	return -1;
 }
