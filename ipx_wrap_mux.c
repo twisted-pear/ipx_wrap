@@ -30,6 +30,8 @@
 // TODO: find a way to close the data sockets in the client process in case of
 // unbind
 // TODO: clean up sk_storage maps somehow too
+// TODO: add a way to close an SPX connection properly in a multi-process
+// scenario
 
 enum muxer_error_codes {
 	MUX_ERR_OK = 0,

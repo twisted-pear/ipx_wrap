@@ -77,4 +77,45 @@ static __always_inline int parse_udphdr(struct hdr_cursor *cur, void *data_end,
 	return len;
 }
 
+static __always_inline bool is_ipx_in_ipv6(struct ipv6hdr *ip6h, void
+		*data_end)
+{
+	if (ip6h->nexthdr != IPPROTO_UDP) {
+		return false;
+	}
+
+	size_t len = bpf_ntohs(ip6h->payload_len);
+	/* hack so that the verifier knows this value's bounds */
+	asm volatile("%0 &= 0xffff" : "=r"(len) : "0"(len));
+
+	size_t min_len = sizeof(struct udphdr) + sizeof(struct ipxhdr);
+	if (len < min_len) {
+		return false;
+	}
+
+	struct hdr_cursor cur;
+	cur.pos = ip6h + 1;
+
+	if (cur.pos + len > data_end) {
+		return false;
+	}
+
+	struct udphdr *udph;
+	if (parse_udphdr(&cur, data_end, &udph) < 0) {
+		return false;
+	}
+
+	if (bpf_ntohs(udph->len) != len) {
+		return false;
+	}
+
+	if (bpf_ntohs(udph->source) != IPX_IN_IPV6_PORT ||
+			bpf_ntohs(udph->dest) != IPX_IN_IPV6_PORT)
+	{
+		return false;
+	}
+
+	return true;
+}
+
 #endif /* __IPX_WRAP_COMMON_KERN_H__ */

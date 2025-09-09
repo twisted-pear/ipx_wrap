@@ -70,6 +70,74 @@ enum ipx_wrap_spx_ingress_verdict {
 	SPX_DROP_AND_ACK
 };
 
+static __always_inline __s64 csum_del(__be32 *data, __u32 len, __s64 csum_diff)
+{
+	__u32 len_mult_4 = (len / 4) * 4;
+	csum_diff = bpf_csum_diff(data, len_mult_4, NULL, 0, csum_diff);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	__be32 rest = 0;
+	int i;
+	for (i = 0; i < (len - len_mult_4); i++) {
+		rest |= ((__be32) *((__u8 *) (((void*) data) + len_mult_4 +
+						i))) << (i * 8);
+	}
+	csum_diff = bpf_csum_diff(&rest, sizeof(__be32), NULL, 0, csum_diff);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	return csum_diff;
+}
+
+static __always_inline __s64 csum_add(__be32 *data, __u32 len, __s64 csum_diff)
+{
+	__u32 len_mult_4 = (len / 4) * 4;
+	csum_diff = bpf_csum_diff(NULL, 0, data, len_mult_4, csum_diff);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	__be32 rest = 0;
+	int i;
+	for (i = 0; i < (len - len_mult_4); i++) {
+		rest |= ((__be32) *((__u8 *) (((void*) data) + len_mult_4 +
+						i))) << (i * 8);
+	}
+	csum_diff = bpf_csum_diff(NULL, 0, &rest, sizeof(__be32), csum_diff);
+	if (csum_diff < 0) {
+		return -1;
+	}
+
+	return csum_diff;
+}
+
+static __always_inline __s64 csum_del_ipxhdr(struct ipxhdr *ipxh, __s64
+		csum_diff)
+{
+	return csum_del((__be32 *) ipxh, sizeof(struct ipxhdr), csum_diff);
+}
+
+static __always_inline __s64 csum_add_ipxhdr(struct ipxhdr *ipxh, __s64
+		csum_diff)
+{
+	return csum_add((__be32 *) ipxh, sizeof(struct ipxhdr), csum_diff);
+}
+
+static __always_inline __s64 csum_del_spxhdr(struct spxhdr *spxh, __s64
+		csum_diff)
+{
+	return csum_del((__be32 *) spxh, sizeof(struct spxhdr), csum_diff);
+}
+
+static __always_inline __s64 csum_add_spxhdr(struct spxhdr *spxh, __s64
+		csum_diff)
+{
+	return csum_add((__be32 *) spxh, sizeof(struct spxhdr), csum_diff);
+}
+
 static __always_inline bool csum_replace_with_zero_check(struct __sk_buff *skb,
 		__u32 csum_ofs, __s64 csum_diff)
 {
@@ -167,10 +235,6 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 SEC("tc/ingress")
 int ipx_wrap_demux(struct __sk_buff *skb)
 {
-	if (CB_INFO(skb)->mark != IPX_TO_IPV6UDP_REINJECT_MARK) {
-		return TC_ACT_UNSPEC;
-	}
-
 	/* ugly but necessary to sneak it past the verifier */
 	struct bpf_cb_info cb;
 	cb.cb[0] = skb->cb[0];
@@ -197,18 +261,13 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
 		return TC_ACT_UNSPEC;
 	}
-	if (ip6h->nexthdr != IPPROTO_UDP) {
+
+	if (!is_ipx_in_ipv6(ip6h, data_end)) {
 		return TC_ACT_UNSPEC;
 	}
 
-	struct udphdr *udph;
-	if (parse_udphdr(&cur, data_end, &udph) < 0) {
-		return TC_ACT_UNSPEC;
-	}
-	if (bpf_ntohs(udph->len) < sizeof(struct udphdr) + sizeof(struct
-				ipxhdr)) {
-		return TC_ACT_UNSPEC;
-	}
+	struct udphdr *udph = cur.pos;
+	cur.pos = udph + 1;
 
 	if (cur.pos + sizeof(struct ipxw_mux_msg) > data_end) {
 		return TC_ACT_UNSPEC;
@@ -346,15 +405,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	data_len -= sizeof(struct ipxhdr);
 
 	/* remove IPX header from checksum */
-	__u32 ipxhdr_len_mult_4 = (sizeof(struct ipxhdr) / 4) * 4;
-	__s64 csum_diff = bpf_csum_diff((__be32*) ipxh, ipxhdr_len_mult_4,
-			NULL, 0, 0);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	__be32 rest = ((__be32) *((__be16 *) (((void*) ipxh) +
-					ipxhdr_len_mult_4))) << 16;
-	csum_diff = bpf_csum_diff(&rest, sizeof(__be32), NULL, 0, csum_diff);
+	__s64 csum_diff = csum_del_ipxhdr(ipxh, 0);
 	if (csum_diff < 0) {
 		return TC_ACT_SHOT;
 	}
@@ -372,14 +423,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	mux_msg->recv.tc = tc;
 
 	/* add recv msg header to checksum */
-	csum_diff = bpf_csum_diff(NULL, 0, (__be32*) mux_msg,
-			ipxhdr_len_mult_4, csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	rest = ((__be32) *((__be16 *) (((void*) ipxh) + ipxhdr_len_mult_4))) <<
-		16;
-	csum_diff = bpf_csum_diff(NULL, 0, &rest, sizeof(__be32), csum_diff);
+	csum_diff = csum_add_ipxhdr(ipxh, csum_diff);
 	if (csum_diff < 0) {
 		return TC_ACT_SHOT;
 	}
@@ -415,8 +459,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		}
 
 		/* remove SPX header from checksum */
-		csum_diff = bpf_csum_diff((__be32*) spxh, sizeof(struct
-					spxhdr), NULL, 0, csum_diff);
+		csum_diff = csum_del_spxhdr(spxh, csum_diff);
 		if (csum_diff < 0) {
 			return TC_ACT_SHOT;
 		}
@@ -438,8 +481,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		spx_msg->negotiation_size = neg_size;
 
 		/* add SPX msg to checksum */
-		csum_diff = bpf_csum_diff(NULL, 0, (__be32*) spxh,
-				sizeof(struct spxhdr), csum_diff);
+		csum_diff = csum_add_spxhdr(spxh, csum_diff);
 		if (csum_diff < 0) {
 			return TC_ACT_SHOT;
 		}
@@ -503,16 +545,49 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	/* cut the ACK packet down to size */
 	size_t ack_len = spx_msg->spxii ? sizeof(struct
 			spxii_negotiate_size_hdr) : 0;
-	ack_len += sizeof(struct ipxhdr) + sizeof(struct spxhdr);
+	ack_len += sizeof(struct spxhdr);
 	mux_msg->recv.data_len = ack_len;
 
-	ack_len += sizeof(struct udphdr);
+	ack_len += sizeof(struct ipxhdr) + sizeof(struct udphdr);
 	udph->len = bpf_htons(ack_len);
 	ip6h->payload_len = bpf_htons(ack_len);
 
 	ack_len += sizeof(struct ipv6hdr) + sizeof(struct
 			ethhdr);
 
+	/* regenerate the checksum for the reflected ACK */
+
+	/* pseudo header */
+	__s64 diff = bpf_csum_diff(NULL, 0, (__be32*) &ip6h->saddr,
+			sizeof(ip6h->saddr), 0);
+	diff = bpf_csum_diff(NULL, 0, (__be32 *) &ip6h->daddr,
+			sizeof(ip6h->daddr), diff);
+	__be32 pktlen = bpf_htonl(bpf_ntohs(udph->len) & 0x0000FFFF);
+	diff = bpf_csum_diff(NULL, 0, &pktlen, sizeof(pktlen), diff);
+	__be32 nexthdr = bpf_htonl(IPPROTO_UDP & 0x000000FF);
+	diff = bpf_csum_diff(NULL, 0, &nexthdr, sizeof(nexthdr), diff);
+
+	/* UDP header */
+	udph->check = 0;
+	diff = bpf_csum_diff(NULL, 0, (__be32 *) udph, sizeof(udph), diff);
+
+	/* mux message and spx message and, if present, the negotiate size
+	 * header */
+	size_t udp_payload_len = sizeof(struct spxhdr) + sizeof(struct ipxhdr);
+	if (spx_msg->spxii) {
+		udp_payload_len += sizeof(struct spxii_negotiate_size_hdr);
+	}
+	if (((void *) mux_msg) + udp_payload_len > data_end) {
+		return TC_ACT_SHOT;
+	}
+	diff = csum_add((__be32 *) mux_msg, udp_payload_len, diff);
+
+	/* insert the checksum */
+	if (!csum_replace_with_zero_check(skb, csum_ofs, ~diff)) {
+		return TC_ACT_SHOT;
+	}
+
+	/* finally shorten the SKB */
 	if (bpf_skb_change_tail(skb, ack_len, 0) != 0) {
 		return TC_ACT_SHOT;
 	}
@@ -761,6 +836,12 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 
 	struct ipxw_mux_msg *mux_msg = cur.pos;
 
+	/* remove IPX message data from checksum */
+	__s64 csum_diff = csum_del_ipxhdr(&(mux_msg->ipxh), 0);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+
 	/* if we have an SPX socket, create the xmit message from the SPX state
 	 */
 	if (spx_state != NULL) {
@@ -789,6 +870,13 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	/* remove old IPv6 addrs from checksum */
+	csum_diff = csum_del((__be32 *) &(ip6h->saddr), sizeof(struct
+				ipv6_eui64_addr) * 2, csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+
 	/* fill in the IPv6 addresses */
 	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
 		&(ip6h->saddr);
@@ -811,12 +899,20 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 			&(mux_msg->xmit.daddr.node[3]), IPX_ADDR_NODE_BYTES /
 			2);
 
+	/* add new IPv6 addrs to checksum */
+	csum_diff = csum_add((__be32 *) &(ip6h->saddr), sizeof(struct
+				ipv6_eui64_addr) * 2, csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+
 	struct ipx_addr daddr = mux_msg->xmit.daddr;
 	__u8 pkt_type = mux_msg->xmit.pkt_type;
 	__u16 msg_len = mux_msg->xmit.data_len + sizeof(struct ipxhdr);
 
 	/* build the IPX header */
 	struct ipxhdr *ipx_msg = &(mux_msg->ipxh);
+
 	ipx_msg->csum = IPX_CSUM_NONE;
 	ipx_msg->pktlen = bpf_htons(msg_len);
 	ipx_msg->tc = 0;
@@ -824,7 +920,25 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	ipx_msg->daddr = daddr;
 	ipx_msg->saddr = e->addr;
 
+	/* add IPX header data to checksum */
+	csum_diff = csum_add_ipxhdr(ipx_msg, csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
+
+	/* update UDP source and destination port and fix checksum */
+	csum_diff = csum_del((__be32 *) &(udph->source), sizeof(__be32),
+			csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
 	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
+	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
+	csum_diff = csum_add((__be32 *) &(udph->source), sizeof(__be32),
+			csum_diff);
+	if (csum_diff < 0) {
+		return TC_ACT_SHOT;
+	}
 
 	/* also fill in the spx header */
 	if (spx_state != NULL) {
@@ -839,11 +953,51 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 			have_negotiate_size_hdr = true;
 		}
 
+		/* remove SPX message data from checksum */
+		csum_diff = csum_del_spxhdr(&(spx_msg->spxh), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+
+		if (have_negotiate_size_hdr) {
+			csum_diff = csum_del((__be32 *)
+					&(spx_msg->spxii_negotiate_size_h),
+					sizeof(struct
+						spxii_negotiate_size_hdr),
+					csum_diff);
+			if (csum_diff < 0) {
+				return TC_ACT_SHOT;
+			}
+		}
+
 		/* prepare the SPX header */
 		if (!ipx_wrap_spx_egress(spx_state, spx_msg,
 					have_negotiate_size_hdr, &cb_info)) {
 			return TC_ACT_SHOT;
 		}
+
+		/* add SPX header data to checksum */
+		if (have_negotiate_size_hdr) {
+			csum_diff = csum_add((__be32 *)
+					&(spx_msg->spxii_negotiate_size_h),
+					sizeof(struct
+						spxii_negotiate_size_hdr),
+					csum_diff);
+			if (csum_diff < 0) {
+				return TC_ACT_SHOT;
+			}
+		}
+
+		csum_diff = csum_add_spxhdr(&(spx_msg->spxh), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+	}
+
+	/* update the UDP checksum */
+	if (!csum_replace_with_zero_check(skb, ((void *) &(udph->check)) -
+				data, csum_diff)) {
+		return TC_ACT_SHOT;
 	}
 
 	return TC_ACT_UNSPEC;
