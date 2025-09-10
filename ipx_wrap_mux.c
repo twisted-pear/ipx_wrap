@@ -24,9 +24,6 @@
 #define INTERFACE_RESCAN_SECS 10
 #define MAX_EPOLL_EVENTS 64
 
-// TODO: add a way to close an SPX connection properly in a multi-process
-// scenario
-
 enum muxer_error_codes {
 	MUX_ERR_OK = 0,
 	MUX_ERR_USAGE,

@@ -133,6 +133,7 @@ struct ipxw_mux_spx_handle {
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
 bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h);
 int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);
+void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h);
 
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr, int spxii_size_negotiation_hint);
@@ -145,7 +146,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 
 bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
 
-void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h);
+void ipxw_mux_spx_conn_close(struct ipxw_mux_spx_handle *h);
 
 /* check if the connection has been fully established. before this messages
  * should not be sent or allocated as it is not clear yet if the connection

@@ -496,7 +496,7 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 		free(msg);
 	}
 
-	ipxw_mux_spx_close(spxh);
+	ipxw_mux_spx_conn_close(&spxh);
 	ipxw_mux_unbind(ipxh);
 
 	exit(code);

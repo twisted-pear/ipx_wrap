@@ -1287,6 +1287,22 @@ int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h)
 	return h.spx_sock;
 }
 
+void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h)
+{
+	if (h->spx_sock >= 0) {
+		close(h->spx_sock);
+	}
+
+	h->spx_sock = -1;
+	h->conf_sock = -1; /* do not close config socket as it is used
+			      elsewhere too */
+
+	if (h->last_known_state != NULL) {
+		free(h->last_known_state);
+		h->last_known_state = NULL;
+	}
+}
+
 static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 		h)
 {
@@ -1405,7 +1421,7 @@ static void ipxw_mux_fill_msg_from_state(struct ipxw_mux_spx_handle h, struct
 	}
 }
 
-static void ipxw_mux_spx_close_internal(struct ipxw_mux_spx_handle *h)
+void ipxw_mux_spx_conn_close(struct ipxw_mux_spx_handle *h)
 {
 	if (!ipxw_mux_spx_handle_is_error(*h)) {
 		/* send a close packet if possible */
@@ -1447,18 +1463,7 @@ static void ipxw_mux_spx_close_internal(struct ipxw_mux_spx_handle *h)
 				MSG_DONTWAIT);
 	}
 
-	if (h->spx_sock >= 0) {
-		close(h->spx_sock);
-	}
-
-	h->spx_sock = -1;
-	h->conf_sock = -1; /* do not close config socket as it is used elsewhere
-			     too */
-
-	if (h->last_known_state != NULL) {
-		free(h->last_known_state);
-		h->last_known_state = NULL;
-	}
+	ipxw_mux_spx_handle_close(h);
 }
 
 static bool ipxw_mux_spx_resend_last_msg(struct ipxw_mux_spx_handle h)
@@ -1790,7 +1795,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		return ret;
 	} while (0);
 
-	ipxw_mux_spx_close_internal(&ret);
+	ipxw_mux_spx_conn_close(&ret);
 
 	return ret;
 }
@@ -1886,7 +1891,7 @@ struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
 		return ret;
 	} while (0);
 
-	ipxw_mux_spx_close_internal(&ret);
+	ipxw_mux_spx_conn_close(&ret);
 
 	return ret;
 }
@@ -1987,11 +1992,6 @@ bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h)
 	}
 
 	return send_success;
-}
-
-void ipxw_mux_spx_close(struct ipxw_mux_spx_handle h)
-{
-	ipxw_mux_spx_close_internal(&h);
 }
 
 static bool ipxw_mux_spx_established_pre_sizng(struct ipxw_mux_spx_handle h)
