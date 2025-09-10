@@ -21,10 +21,9 @@
 
 #include "ipx_wrap_mux_kern.skel.h"
 
-#define INTERFACE_RESCAN_SECS 30
+#define INTERFACE_RESCAN_SECS 10
 #define MAX_EPOLL_EVENTS 64
 
-// TODO: apply muxer/demuxer bpf programs to all interfaces
 // TODO: add a way to close an SPX connection properly in a multi-process
 // scenario
 
@@ -92,9 +91,6 @@ struct sub_process {
 	bool keep;
 	/* ifindex */
 	__u32 ifidx;
-	/* BPF links for the programs attached to the interface */
-	struct bpf_link *ingress_link;
-	struct bpf_link *egress_link;
 };
 
 struct if_entry {
@@ -108,6 +104,18 @@ struct if_entry {
 	__u32 ifidx;
 };
 
+struct if_prog_entry {
+	/* ifindex */
+	__u32 ifidx;
+	/* hash entry */
+	UT_hash_handle hh; /* by ifidx */
+	/* whether to keep the interface after the if-scan */
+	bool keep;
+	/* BPF links for the programs attached to the interface */
+	struct bpf_link *ingress_link;
+	struct bpf_link *egress_link;
+};
+
 struct do_ctx {
 	struct bind_entry *be;
 	int epoll_fd;
@@ -116,6 +124,7 @@ struct do_ctx {
 static struct bind_entry *ht_conf_sock_to_bind = NULL;
 static struct sub_process *ht_ipx_addr_to_sub = NULL;
 static struct sub_process *ht_sock_to_sub = NULL;
+static struct if_prog_entry *ht_ifidx_to_if_prog = NULL;
 
 static int tmr_fd = -1;
 static struct ipx_wrap_mux_kern *bpf_kern = NULL;
@@ -834,6 +843,119 @@ static void cleanup_sub_process_bpf_bindings(struct sub_process *sub)
 	}
 }
 
+static void remove_bpf_on_interface(struct if_prog_entry *pe)
+{
+	HASH_DEL(ht_ifidx_to_if_prog, pe);
+
+	/* interface might already be gone, but still try this */
+	bpf_link__detach(pe->ingress_link);
+	bpf_link__destroy(pe->ingress_link);
+	bpf_link__detach(pe->egress_link);
+	bpf_link__destroy(pe->egress_link);
+
+	printf("removed muxer/demuxer from interface %u\n", pe->ifidx);
+
+	free(pe);
+}
+
+static struct if_prog_entry *install_bpf_on_interface(__u32 ifidx)
+{
+	struct if_prog_entry *pe;
+	HASH_FIND_INT(ht_ifidx_to_if_prog, &ifidx, pe);
+
+	/* already have this interface, keep it */
+	if (pe != NULL) {
+		return pe;
+	}
+
+	/* new interface */
+	pe = calloc(1, sizeof(struct if_prog_entry));
+	if (pe == NULL) {
+		return NULL;
+	}
+
+	do {
+		pe->ifidx = ifidx;
+
+		pe->ingress_link =
+			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_demux,
+					ifidx, NULL);
+		if (pe->ingress_link == NULL) {
+			break;
+		}
+
+		pe->egress_link =
+			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_mux,
+					ifidx, NULL);
+		if (pe->egress_link == NULL) {
+			break;
+		}
+
+		HASH_ADD_INT(ht_ifidx_to_if_prog, ifidx, pe);
+
+		printf("installed muxer/demuxer on interface %u\n", pe->ifidx);
+
+		return pe;
+	} while (0);
+
+	if (pe->ingress_link != NULL) {
+		bpf_link__detach(pe->ingress_link);
+		bpf_link__destroy(pe->ingress_link);
+	}
+	if (pe->egress_link != NULL) {
+		bpf_link__detach(pe->egress_link);
+		bpf_link__destroy(pe->egress_link);
+	}
+	free(pe);
+
+	return NULL;
+}
+
+/* FIXME: this breaks horribly if if-indices are reused, which does not seem to
+ * be the case on linux */
+static bool install_bpf_on_all_interfaces(void)
+{
+	/* iterate over all interfaces and make sure every interface has our
+	 * BPF programs installed */
+	struct if_nameindex *ifaces = NULL;
+
+	do {
+		ifaces = if_nameindex();
+	} while (ifaces == NULL && errno == EINTR);
+	if (ifaces == NULL) {
+		return false;
+	}
+
+	struct if_nameindex *iter;
+	for (iter = ifaces; !(iter->if_index == 0 && iter->if_name == NULL);
+			iter++) {
+		struct if_prog_entry *pe = install_bpf_on_interface(iter->if_index);
+
+		/* error while adding a new interface, die */
+		if (pe == NULL) {
+			if_freenameindex(ifaces);
+			return false;
+		}
+
+		pe->keep = true;
+	}
+
+	if_freenameindex(ifaces);
+
+	/* clean up all programs for interfaces that no longer exist */
+	struct if_prog_entry *pe;
+	struct if_prog_entry *ptmp;
+	HASH_ITER(hh, ht_ifidx_to_if_prog, pe, ptmp) {
+		if (!pe->keep) {
+			remove_bpf_on_interface(pe);
+		} else {
+			pe->keep = false;
+		}
+	}
+
+	return true;
+}
+
 static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 {
 	assert(sub != NULL);
@@ -849,10 +971,6 @@ static void cleanup_sub_process(struct sub_process *sub, bool sub_setup)
 				sub->addr.node[5]);
 
 		cleanup_sub_process_bpf_bindings(sub);
-		bpf_link__detach(sub->ingress_link);
-		bpf_link__detach(sub->egress_link);
-		bpf_link__destroy(sub->ingress_link);
-		bpf_link__destroy(sub->egress_link);
 	}
 
 	int cpid = sub->sub_pid;
@@ -905,6 +1023,13 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 		cleanup_iface(iface);
 	/* main process exiting */
 	} else {
+		/* remove the BPF progs from all interfaces */
+		struct if_prog_entry *pe;
+		struct if_prog_entry *ptmp;
+		HASH_ITER(hh, ht_ifidx_to_if_prog, pe, ptmp) {
+			remove_bpf_on_interface(pe);
+		}
+
 		/* close and remove all BPF objects */
 		if (bpf_kern != NULL) {
 			ipx_wrap_mux_kern__destroy(bpf_kern);
@@ -1349,22 +1474,6 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 			break;
 		}
 
-		/* attach the ingress demuxer to the interface */
-		sub->ingress_link =
-			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_demux,
-					sub->ifidx, NULL);
-		if (sub->ingress_link == NULL) {
-			break;
-		}
-
-		/* attach the egress muxer to the interface */
-		sub->egress_link =
-			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_mux,
-					sub->ifidx, NULL);
-		if (sub->egress_link == NULL) {
-			break;
-		}
-
 		int child_pid = fork();
 		if (child_pid < 0) {
 			break;
@@ -1435,14 +1544,6 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 	if (sv[1] >= 0) {
 		close(sv[1]);
 	}
-	if (sub->ingress_link != NULL) {
-		bpf_link__detach(sub->ingress_link);
-		bpf_link__destroy(sub->ingress_link);
-	}
-	if (sub->egress_link != NULL) {
-		bpf_link__detach(sub->egress_link);
-		bpf_link__destroy(sub->egress_link);
-	}
 	if (iface != NULL) {
 		cleanup_iface(iface);
 	}
@@ -1458,7 +1559,12 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
  * but this should not happen with IPX anyway */
 static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
 {
-	/* iterate over all addresses to find the interface to our IPv6 addr */
+	if (!install_bpf_on_all_interfaces()) {
+		return false;
+	}
+
+	/* iterate over all addresses to find the interfaces within our prefix,
+	 * these will get a sub-process managing bindings */
 	struct ifaddrs *addrs;
 	struct ifaddrs *iter;
 
@@ -1470,7 +1576,6 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
 		return false;
 	}
 
-	/* if the loop exits normally, we were unable to find the IPv6 addr */
 	for (iter = addrs; iter != NULL; iter = iter->ifa_next) {
 		if (iter->ifa_addr == NULL) {
 			continue;
@@ -1506,6 +1611,7 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
 
 	freeifaddrs(addrs);
 
+	/* clean up all sub-processes with interfaces that no longer exist */
 	struct sub_process *se;
 	struct sub_process *stmp;
 	HASH_ITER(h_ipx_addr, ht_ipx_addr_to_sub, se, stmp) {
