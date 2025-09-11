@@ -1,3 +1,5 @@
+#include <assert.h>
+
 #include "ipx_wrap_helpers.h"
 
 void print_ipx_if_addr(FILE *f, const struct ipx_if_addr *addr)
@@ -74,4 +76,46 @@ bool get_bound_ipx_addr(struct ipxw_mux_handle h, struct ipx_addr *addr)
 
 	*addr = out_msg.getsockname.addr;
 	return true;
+}
+
+bool counted_msg_queue_empty(struct counted_msg_queue *q)
+{
+	bool ret = STAILQ_EMPTY(&(q->q));
+
+	if (ret) {
+		assert(q->n == 0);
+	}
+
+	return ret;
+}
+
+struct ipxw_mux_msg *counted_msg_queue_peek(struct counted_msg_queue *q)
+{
+	return STAILQ_FIRST(&(q->q));
+}
+
+struct ipxw_mux_msg *counted_msg_queue_pop(struct counted_msg_queue *q)
+{
+	struct ipxw_mux_msg *ret = STAILQ_FIRST(&(q->q));
+	if (ret == NULL) {
+		assert(q->n == 0);
+		return NULL;
+	}
+
+	STAILQ_REMOVE_HEAD(&(q->q), q_entry);
+	q->n--;
+
+	return ret;
+}
+
+void counted_msg_queue_push(struct counted_msg_queue *q, struct ipxw_mux_msg
+		*msg)
+{
+	STAILQ_INSERT_TAIL(&(q->q), msg, q_entry);
+	q->n++;
+}
+
+size_t counted_msg_queue_nitems(struct counted_msg_queue *q)
+{
+	return q->n;
 }

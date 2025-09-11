@@ -45,8 +45,6 @@ enum ipxcat_error_codes {
 
 #define MAX_EPOLL_EVENTS 64
 
-STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
-
 struct ipxcat_cfg {
 	bool verbose;
 	bool listen;
@@ -68,65 +66,9 @@ static bool stdin_closed = false;
 static bool stdin_is_file = false;
 static bool stdout_is_file = false;
 
-struct counted_msg_queue {
-	struct ipxw_msg_queue q;
-	size_t n;
-};
-
-static bool counted_msg_queue_empty(struct counted_msg_queue *q)
-{
-	bool ret = STAILQ_EMPTY(&(q->q));
-
-	if (ret) {
-		assert(q->n == 0);
-	}
-
-	return ret;
-}
-
-static struct ipxw_mux_msg *counted_msg_queue_peek(struct counted_msg_queue *q)
-{
-	return STAILQ_FIRST(&(q->q));
-}
-
-static struct ipxw_mux_msg *counted_msg_queue_pop(struct counted_msg_queue *q)
-{
-	struct ipxw_mux_msg *ret = STAILQ_FIRST(&(q->q));
-	if (ret == NULL) {
-		assert(q->n == 0);
-		return NULL;
-	}
-
-	STAILQ_REMOVE_HEAD(&(q->q), q_entry);
-	q->n--;
-
-	return ret;
-}
-
-static void counted_msg_queue_push(struct counted_msg_queue *q, struct
-		ipxw_mux_msg *msg)
-{
-	STAILQ_INSERT_TAIL(&(q->q), msg, q_entry);
-	q->n++;
-}
-
-static size_t counted_msg_queue_nitems(struct counted_msg_queue *q)
-{
-	return q->n;
-}
-
-static struct counted_msg_queue ipx_out_queue = {
-	.q = STAILQ_HEAD_INITIALIZER(ipx_out_queue.q),
-	.n = 0
-};
-static struct counted_msg_queue spx_out_queue = {
-	.q = STAILQ_HEAD_INITIALIZER(spx_out_queue.q),
-	.n = 0
-};
-static struct counted_msg_queue in_queue = {
-	.q = STAILQ_HEAD_INITIALIZER(in_queue.q),
-	.n = 0
-};
+static struct counted_msg_queue ipx_out_queue = counted_msg_queue_init(ipx_out_queue);
+static struct counted_msg_queue spx_out_queue = counted_msg_queue_init(spx_out_queue);
+static struct counted_msg_queue in_queue = counted_msg_queue_init(in_queue);
 
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
 static struct ipxw_mux_spx_handle spxh = ipxw_mux_spx_handle_init;
@@ -1083,8 +1025,8 @@ int main(int argc, char **argv)
 		.spx_1_only = false,
 		.accept_broadcasts = false,
 		.pkt_type_any = true,
-		.tx_queue_pause_threshold =  DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
-		.rx_queue_pause_threshold =  DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
+		.tx_queue_pause_threshold = DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
+		.rx_queue_pause_threshold = DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
 		.pkt_type = DEFAULT_PKT_TYPE,
 		.max_ipx_data_len = DEFAULT_IPX_DATA_LEN,
 		.max_spx_data_len = SPX_MAX_DATA_LEN_WO_SIZNG

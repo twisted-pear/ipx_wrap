@@ -10,6 +10,7 @@
 /ipx_wrap_mux
 /ipxcat
 /ipxdiag
+/spxinetd
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests

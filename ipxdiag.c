@@ -37,8 +37,6 @@ enum ipxdiag_error_codes {
 
 #define MAX_EPOLL_EVENTS 64
 
-STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
-
 struct ipxdiag_cfg {
 	bool verbose;
 	time_t wait_secs;
