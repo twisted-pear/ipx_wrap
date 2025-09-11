@@ -10,37 +10,33 @@
 #include "ipx_wrap_mux_proto.h"
 #include "ipx_wrap_helpers.h"
 
-#define DEFAULT_IPX_DATA_LEN (SPX_MAX_PKT_LEN_WO_SIZNG - IPX_WIRE_OVERHEAD)
-
-#define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (128)
-#define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (128)
+#define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (64)
+#define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (64)
 
 enum spxinetd_error_codes {
 	SPXINETD_ERR_OK = 0,
 	SPXINETD_ERR_USAGE,
 	SPXINETD_ERR_EPOLL_FD,
 	SPXINETD_ERR_TMR_FD,
-	SPXINETD_ERR_STDOUT_FD,
-	SPXINETD_ERR_STDIN_FD,
 	SPXINETD_ERR_CONF_FD,
 	SPXINETD_ERR_IPX_FD,
 	SPXINETD_ERR_SPX_FD,
+	SPXINETD_ERR_EXEC_FD,
+	SPXINETD_ERR_EXEC_IN_FAILURE,
 	SPXINETD_ERR_SIG_HANDLER,
 	SPXINETD_ERR_BIND,
 	SPXINETD_ERR_GETSOCKNAME,
-	SPXINETD_ERR_GET_OIF_DATA_LEN,
-	SPXINETD_ERR_OIF_DATA_LEN_ZERO,
 	SPXINETD_ERR_EPOLL_WAIT,
-	SPXINETD_ERR_FORK,
 	SPXINETD_ERR_TMR_FAILURE,
 	SPXINETD_ERR_CONF_FAILURE,
 	SPXINETD_ERR_IPX_FAILURE,
 	SPXINETD_ERR_SPX_FAILURE,
 	SPXINETD_ERR_SPX_MAINT,
-	SPXINETD_ERR_SPX_CONNECT,
-	SPXINETD_ERR_SPX_ACCEPT,
 	SPXINETD_ERR_MSG_ALLOC,
 	SPXINETD_ERR_MSG_QUEUE,
+	SPXINETD_ERR_DUP,
+	SPXINETD_ERR_EXEC,
+	SPXINETD_ERR_PROG_EXEC,
 	SPXINETD_ERR_MAX
 };
 
@@ -49,12 +45,12 @@ enum spxinetd_error_codes {
 struct spxinetd_cfg {
 	bool verbose;
 	bool spx_1_only;
+	bool redir_stderr;
 	__u16 max_spx_data_len;
 	size_t tx_queue_pause_threshold;
 	size_t rx_queue_pause_threshold;
 	struct ipx_addr local_addr;
 	char **sub_argv;
-	int sub_argc;
 };
 
 static bool keep_going = true;
@@ -64,6 +60,10 @@ static struct counted_msg_queue out_queue = counted_msg_queue_init(out_queue);
 static struct counted_msg_queue in_queue = counted_msg_queue_init(in_queue);
 
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
+
+static FILE *fd_exec_in = NULL;
+static FILE *fd_exec_out = NULL;
+static pid_t pid_exec_child = -1;
 
 static void signal_handler(int signal)
 {
@@ -111,20 +111,44 @@ static int setup_timer(int epoll_fd)
 	return tmr;
 }
 
+static void print_child_status(pid_t child_pid, int wstatus)
+{
+	if (WIFEXITED(wstatus)) {
+		fprintf(stderr, "%d exited, status=%d\n",
+				child_pid,
+				WEXITSTATUS(wstatus));
+	} else if (WIFSIGNALED(wstatus)) {
+		fprintf(stderr, "%d killed by signal %d\n",
+				child_pid, WTERMSIG(wstatus));
+	} else if (WIFSTOPPED(wstatus)) {
+		fprintf(stderr, "%d stopped by signal %d\n",
+				child_pid, WSTOPSIG(wstatus));
+	}
+}
+
+static bool write_to_exec_proc(int epoll_fd, struct spxinetd_cfg *cfg);
+
 static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 		ipxw_mux_spx_handle *spxh, struct spxinetd_cfg *cfg, enum
 		spxinetd_error_codes code)
 {
+	/* close timer and epoll FDs */
 	if (tmr_fd >= 0) {
 		close(tmr_fd);
 	}
-
 	if (epoll_fd >= 0) {
 		close(epoll_fd);
 	}
 
 	/* remove all undelivered messages */
-	// TODO: delete everything from in and out queue where applicable
+	while (!counted_msg_queue_empty(&in_queue)) {
+		struct ipxw_mux_msg *msg = counted_msg_queue_pop(&in_queue);
+		free(msg);
+	}
+	while (!counted_msg_queue_empty(&out_queue)) {
+		struct ipxw_mux_msg *msg = counted_msg_queue_pop(&out_queue);
+		free(msg);
+	}
 
 	if (spxh != NULL) {
 		/* sub-process */
@@ -132,8 +156,29 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 	} else {
 		/* main process */
 		ipxw_mux_unbind(ipxh);
+	}
 
-		// TODO: kill and collect all children
+	/* close FDs to the execed process (if any) */
+	if (fd_exec_in != NULL) {
+		fclose(fd_exec_in);
+	}
+	if (fd_exec_out != NULL) {
+		fclose(fd_exec_out);
+	}
+
+	/* kill and collect the exec-child process */
+	if (pid_exec_child != -1) {
+		/* sub-process */
+		kill(pid_exec_child, SIGTERM);
+
+		int err = -1;
+		int wstatus;
+		do {
+			err = waitpid(pid_exec_child, &wstatus, 0);
+		} while (err < 0 && errno == EINTR);
+		if (cfg->verbose) {
+			print_child_status(pid_exec_child, wstatus);
+		}
 	}
 
 	exit(code);
@@ -182,8 +227,15 @@ static bool send_out_spx_msg(int epoll_fd, struct ipxw_mux_spx_handle h)
 
 static bool queue_in_msg(int epoll_fd, struct ipxw_mux_msg *msg)
 {
-	// TODO: re-register for ready-to-write events on the exec-process, now
-	// that messages are available
+	/* re-register for ready-to-write events on the exec-process, now that
+	 * messages are available */
+	struct epoll_event ev = {
+		.events = EPOLLOUT | EPOLLERR | EPOLLHUP,
+		.data.fd = fileno(fd_exec_in)
+	};
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fileno(fd_exec_in), &ev) < 0) {
+		return false;
+	}
 
 	/* queue the input message */
 	counted_msg_queue_push(&in_queue, msg);
@@ -271,30 +323,188 @@ static void spx_recv_loop(int epoll_fd, int tmr_fd, struct ipxw_mux_spx_handle
 	}
 }
 
-static void loop_back_msgs(int epoll_fd, struct ipxw_mux_spx_handle h, struct spxinetd_cfg
-		*cfg)
+static bool do_exec(int epoll_fd, int tmr_fd, struct ipxw_mux_spx_handle spxh,
+		struct spxinetd_cfg *cfg)
 {
-	// TODO: for now looping back the message, this needs to be changed
+	int in_pipe[2] = { -1, -1 };
+	int out_pipe[2] = { -1, -1 };
+
+	do {
+		if (pipe(in_pipe) != 0) {
+			break;
+		}
+
+		if (pipe(out_pipe) != 0) {
+			break;
+		}
+
+		FILE *exec_in = fdopen(in_pipe[1], "w");
+		if (exec_in == NULL) {
+			break;
+		}
+		if (setvbuf(exec_in, NULL, _IOLBF, 0) != 0) {
+			break;
+		}
+		FILE *exec_out = fdopen(out_pipe[0], "r");
+		if (exec_out == NULL) {
+			break;
+		}
+		if (setvbuf(exec_out, NULL, _IONBF, 0) != 0) {
+			break;
+		}
+
+		/* fork off a new process to exec the target process */
+		pid_t child_pid = fork();
+		if (child_pid < 0) {
+			break;
+		}
+
+		if (child_pid == 0) {
+			/* child */
+
+			/* close unused pipe ends */
+			close(in_pipe[1]);
+			close(out_pipe[0]);
+
+			/* close the SPX handle */
+			ipxw_mux_spx_handle_close(&spxh);
+
+			/* close old epoll and timer fd */
+			close(epoll_fd);
+			close(tmr_fd);
+
+			if (dup2(in_pipe[0], STDIN_FILENO) == -1) {
+				exit(SPXINETD_ERR_DUP);
+			}
+			if (dup2(out_pipe[1], STDOUT_FILENO) == -1) {
+				exit(SPXINETD_ERR_DUP);
+			}
+			if (cfg->redir_stderr) {
+				if (dup2(out_pipe[1], STDERR_FILENO) == -1) {
+					exit(SPXINETD_ERR_DUP);
+				}
+			}
+
+			/* close remaining pipe ends */
+			close(in_pipe[0]);
+			close(out_pipe[1]);
+
+			/* exec the program */
+			execve(cfg->sub_argv[0], cfg->sub_argv, NULL);
+			exit(SPXINETD_ERR_EXEC);
+		}
+
+		/* parent */
+
+		/* close unused pipe ends */
+		close(in_pipe[0]);
+		close(out_pipe[1]);
+
+		/* set the parameter for communicating with the exec-process */
+		fd_exec_in = exec_in;
+		fd_exec_out = exec_out;
+		pid_exec_child = child_pid;
+
+		return true;
+	} while (0);
+
+	if (in_pipe[0] != -1) {
+		close(in_pipe[0]);
+	}
+	if (in_pipe[1] != -1) {
+		close(in_pipe[1]);
+	}
+	if (out_pipe[0] != -1) {
+		close(out_pipe[0]);
+	}
+	if (out_pipe[1] != -1) {
+		close(out_pipe[1]);
+	}
+
+	return false;
+}
+
+static bool write_to_exec_proc(int epoll_fd, struct spxinetd_cfg *cfg)
+{
+	/* no msgs to write */
+	if (counted_msg_queue_empty(&in_queue)) {
+		/* unregister from ready-to-write events to avoid busy polling
+		 */
+		struct epoll_event ev = {
+			.events = EPOLLERR | EPOLLHUP,
+			.data.fd = fileno(fd_exec_in)
+		};
+		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fileno(fd_exec_in), &ev);
+
+		return false;
+	}
+
+	struct ipxw_mux_msg *msg = counted_msg_queue_peek(&in_queue);
+
+	struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *) msg;
+	size_t data_len = msg->recv.data_len;
+
+	if (fwrite(ipxw_mux_spx_msg_data(spx_msg), data_len, 1, fd_exec_in) !=
+			1) {
+		/* could not write out message, retry later */
+		return true;
+	}
+
+	/* could write the message, get rid of it */
+	counted_msg_queue_pop(&in_queue);
+	free(msg);
+
+	return true;
+}
+
+static bool read_from_exec_proc(int epoll_fd, struct ipxw_mux_spx_handle spxh,
+		struct spxinetd_cfg *cfg)
+{
+	/* queue is full, try again later */
+	if (counted_msg_queue_nitems(&out_queue) > cfg->tx_queue_pause_threshold) {
+		return true;
+	}
+
+	int max_data_len = ipxw_mux_spx_max_data_len(spxh);
+	struct ipxw_mux_msg *msg = calloc(1, sizeof(struct ipxw_mux_spx_msg) +
+			max_data_len);
+	if (msg == NULL) {
+		return false;
+	}
+
+	msg->type = IPXW_MUX_XMIT;
+	struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *) msg;
+	ipxw_mux_spx_prepare_xmit_msg(spxh, spx_msg);
+	__u8 *data = ipxw_mux_spx_msg_data(spx_msg);
+
+	ssize_t data_len = read(fileno(fd_exec_out), data, max_data_len);
+	if (data_len < 0) {
+		free(msg);
+		return false;
+	}
+	if (data_len == 0) {
+		/* nothing to send */
+		free(msg);
+		return true;
+	}
+
+	/* record the message data length */
+	msg->xmit.data_len = data_len;
 
 	/* re-register for ready-to-send events */
 	struct epoll_event ev = {
 		.events = EPOLLOUT | EPOLLIN | EPOLLERR | EPOLLHUP,
-		.data.fd = ipxw_mux_spx_handle_sock(h)
+		.data.fd = ipxw_mux_spx_handle_sock(spxh)
 	};
-	epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_spx_handle_sock(h), &ev);
-
-	while (!counted_msg_queue_empty(&in_queue)) {
-		if (counted_msg_queue_nitems(&out_queue) >
-				cfg->tx_queue_pause_threshold) {
-			return;
-		}
-
-		struct ipxw_mux_msg *msg = counted_msg_queue_pop(&in_queue);
-		msg->type = IPXW_MUX_XMIT;
-		struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *) msg;
-		ipxw_mux_spx_prepare_xmit_msg(h, spx_msg);
-		counted_msg_queue_push(&out_queue, msg);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, ipxw_mux_spx_handle_sock(spxh),
+				&ev) < 0) {
+		free(msg);
+		return false;
 	}
+
+	counted_msg_queue_push(&out_queue, msg);
+
+	return true;
 }
 
 static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
@@ -330,6 +540,13 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 				SPXINETD_ERR_SIG_HANDLER);
 	}
 
+	/* start the process with the actual exec target */
+	if (!do_exec(epoll_fd, tmr_fd, spxh, cfg)) {
+		perror("executing program");
+		cleanup_and_exit(epoll_fd, tmr_fd, &spxh, cfg,
+				SPXINETD_ERR_PROG_EXEC);
+	}
+
 	/* register SPX socket for reception */
 	struct epoll_event ev = {
 		.events = EPOLLIN | EPOLLERR | EPOLLHUP,
@@ -342,8 +559,29 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 				SPXINETD_ERR_SPX_FD);
 	}
 
+	/* register the exec-process' output for reading */
+	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	ev.data.fd = fileno(fd_exec_out);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(fd_exec_out), &ev) < 0) {
+		perror("registering exec-process for event polling");
+		cleanup_and_exit(epoll_fd, tmr_fd, &spxh, cfg,
+				SPXINETD_ERR_EXEC_FD);
+	}
+
+	/* register the exec-process* input, once messages arrive we will
+	 * register it for writing events */
+	ev.events = EPOLLERR | EPOLLHUP;
+	ev.data.fd = fileno(fd_exec_in);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(fd_exec_in), &ev) < 0) {
+		perror("registering exec-process for event polling");
+		cleanup_and_exit(epoll_fd, tmr_fd, &spxh, cfg,
+				SPXINETD_ERR_EXEC_FD);
+	}
+
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
-	while (keep_going) {
+	/* keep going as long as there are queued messages */
+	while (keep_going || !counted_msg_queue_empty(&in_queue) ||
+			!counted_msg_queue_empty(&out_queue)) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS,
 				TICKS_MS);
 		if (n_fds < 0) {
@@ -356,7 +594,10 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 					SPXINETD_ERR_EPOLL_WAIT);
 		}
 
-		loop_back_msgs(epoll_fd, spxh, cfg);
+		/* exit if our child (the exec-process) terminated */
+		if (reap_children) {
+			keep_going = false;
+		}
 
 		int i;
 		for (i = 0; i < n_fds; i++) {
@@ -381,6 +622,45 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 				/* consume all expirations */
 				__u64 dummy;
 				read(tmr_fd, &dummy, sizeof(dummy));
+
+				continue;
+			}
+
+			/* exec-process input */
+			if (evs[i].data.fd == fileno(fd_exec_in)) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					continue;
+					fprintf(stderr, "exec input error\n");
+					cleanup_and_exit(epoll_fd, tmr_fd, &spxh, cfg,
+							SPXINETD_ERR_EXEC_IN_FAILURE);
+				}
+
+				/* can't write to exec-process */
+				if ((evs[i].events & EPOLLOUT) == 0) {
+					continue;
+				}
+
+				/* write to exec process */
+				write_to_exec_proc(epoll_fd, cfg);
+
+				continue;
+			}
+
+			/* exec-process output */
+			if (evs[i].data.fd == fileno(fd_exec_out)) {
+				/* can't read from exec-process */
+				if ((evs[i].events & EPOLLIN) == 0) {
+					continue;
+				}
+
+				/* read from exec process */
+				if (!read_from_exec_proc(epoll_fd, spxh, cfg)) {
+					perror("queueing message");
+					cleanup_and_exit(epoll_fd, tmr_fd,
+							&spxh, cfg,
+							SPXINETD_ERR_MSG_QUEUE);
+				}
 
 				continue;
 			}
@@ -417,8 +697,6 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 		}
 	}
 
-
-	printf("child started\n");
 	cleanup_and_exit(epoll_fd, tmr_fd, &spxh, cfg, SPXINETD_ERR_OK);
 }
 
@@ -489,7 +767,7 @@ static void spx_accept_and_fork(int epoll_fd, struct spxinetd_cfg *cfg)
 		}
 
 		/* fork off a new process to handle the connection */
-		int child_pid = fork();
+		pid_t child_pid = fork();
 		if (child_pid < 0) {
 			perror("forking child");
 		}
@@ -528,17 +806,7 @@ static void do_reap_children(struct spxinetd_cfg *cfg)
 	pid_t child_pid;
 	while ((child_pid  = waitpid(-1, &wstatus, WNOHANG)) > 0) {
 		if (cfg->verbose) {
-			if (WIFEXITED(wstatus)) {
-				fprintf(stderr, "%d exited, status=%d\n",
-						child_pid,
-						WEXITSTATUS(wstatus));
-			} else if (WIFSIGNALED(wstatus)) {
-				fprintf(stderr, "%d killed by signal %d\n",
-						child_pid, WTERMSIG(wstatus));
-			} else if (WIFSTOPPED(wstatus)) {
-				fprintf(stderr, "%d stopped by signal %d\n",
-						child_pid, WSTOPSIG(wstatus));
-			}
+			print_child_status(child_pid, wstatus);
 		}
 	}
 }
@@ -652,7 +920,7 @@ static _Noreturn void do_main(struct spxinetd_cfg *cfg, int epoll_fd)
 
 static _Noreturn void usage(void)
 {
-	printf("Usage: spxinetd [-v] [-1] [-d <maximum data bytes>] <local IPX address> -- <command>\n");
+	printf("Usage: spxinetd [-v] [-1] [-d <maximum data bytes>] [-e] <local IPX address> -- <command>\n");
 	exit(SPXINETD_ERR_USAGE);
 }
 
@@ -679,6 +947,7 @@ int main(int argc, char **argv)
 	struct spxinetd_cfg cfg = {
 		.verbose = false,
 		.spx_1_only = false,
+		.redir_stderr = false,
 		.tx_queue_pause_threshold = DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
 		.rx_queue_pause_threshold = DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
 		.max_spx_data_len = SPX_MAX_DATA_LEN_WO_SIZNG
@@ -687,7 +956,7 @@ int main(int argc, char **argv)
 	/* parse and verify command-line arguments */
 
 	int opt;
-	while ((opt = getopt(argc, argv, "1d:v")) != -1) {
+	while ((opt = getopt(argc, argv, "1d:ev")) != -1) {
 		switch (opt) {
 			case '1':
 				cfg.spx_1_only = true;
@@ -695,6 +964,9 @@ int main(int argc, char **argv)
 			case 'd':
 				__u16 max_data_len = strtoul(optarg, NULL, 0);
 				cfg.max_spx_data_len = max_data_len;
+				break;
+			case 'e':
+				cfg.redir_stderr = true;
 				break;
 			case 'v':
 				cfg.verbose = true;
@@ -722,7 +994,6 @@ int main(int argc, char **argv)
 	}
 
 	cfg.sub_argv = &(argv[optind]);
-	cfg.sub_argc = argc - optind;
 
 	if (!verify_cfg(&cfg)) {
 		usage();
