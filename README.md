@@ -237,7 +237,7 @@ Usage:
 ```
 Usage: ipxcat [-v] [-d <maximum data bytes>] [-t <packet type>] <local IPX address> <remote IPX address>
        ipxcat [-v] -s [-1] [-d <maximum data bytes>] <local IPX address> <remote IPX address>
-       ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>
+       ipxcat [-v] -l [-t <packet type>] [-b] [-r] <local IPX address>
        ipxcat [-v] -l -s [-1] [-d <maximum data bytes>] <local IPX address>
 ```
 
@@ -277,6 +277,10 @@ The `-1` flag specifies that only SPX version 1 should be used. This version of
 SPX does not support packet size negotiation and thus the maximum packet size
 when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
 is not specified, SPXII will be used if the connection peer supports it.
+
+The `-r` flag causes the program to collect receive timestamps for received IPX
+packets. This flag is only allowed in IPX listening mode. Timestamps are
+displayed on reception only if the `-v` flag is also present.
 
 The `-v` flag will cause the program to print more detailed information to
 `stderr`.

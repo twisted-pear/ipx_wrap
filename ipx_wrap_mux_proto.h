@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <ifaddrs.h>
 #include <linux/ipv6.h>
+#include <linux/time_types.h>
 #include <linux/udp.h>
 
 #include "common.h"
@@ -87,6 +88,13 @@ ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block);
  * available and block is true */
 ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 		bool block);
+
+ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
+		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len);
+
+bool ipxw_mux_enable_timestamps(struct ipxw_mux_handle h, bool rx, bool tx);
+bool ipxw_mux_get_rx_timestamp(void *ctrl, size_t ctrl_len, struct
+		__kernel_timespec *ts);
 
 /* muxer functions */
 

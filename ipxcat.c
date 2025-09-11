@@ -27,6 +27,7 @@ enum ipxcat_error_codes {
 	IPXCAT_ERR_SPX_FD,
 	IPXCAT_ERR_SIG_HANDLER,
 	IPXCAT_ERR_BIND,
+	IPXCAT_ERR_RX_TSTAMPS,
 	IPXCAT_ERR_GETSOCKNAME,
 	IPXCAT_ERR_GET_OIF_DATA_LEN,
 	IPXCAT_ERR_OIF_DATA_LEN_ZERO,
@@ -45,12 +46,15 @@ enum ipxcat_error_codes {
 
 #define MAX_EPOLL_EVENTS 64
 
+#define CTRL_DATA_LEN 1024
+
 struct ipxcat_cfg {
 	bool verbose;
 	bool listen;
 	bool use_spx;
 	bool spx_1_only;
 	bool accept_broadcasts;
+	bool rx_timestamps;
 	bool pkt_type_any;
 	__u8 pkt_type;
 	__u16 max_ipx_data_len;
@@ -60,6 +64,17 @@ struct ipxcat_cfg {
 	struct ipx_addr local_addr;
 	struct ipx_addr remote_addr;
 };
+
+struct pkt_tstamp {
+	bool present;
+	struct __kernel_timespec ts;
+	struct ipxw_mux_msg *msg;
+	STAILQ_ENTRY(pkt_tstamp) q_entry;
+};
+
+STAILQ_HEAD(ipxw_tstamp_queue, pkt_tstamp);
+
+struct ipxw_tstamp_queue tstamp_in_queue = STAILQ_HEAD_INITIALIZER(tstamp_in_queue);
 
 static bool keep_going = true;
 static bool stdin_closed = false;
@@ -193,6 +208,18 @@ static bool print_in_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 	struct ipxw_mux_msg *msg = counted_msg_queue_pop(&in_queue);
 	size_t data_len = msg->recv.data_len;
 
+	/* if we collect time stamps then dequeue them here */
+	struct pkt_tstamp *pts = NULL;
+	if (cfg->rx_timestamps) {
+		assert(!STAILQ_EMPTY(&tstamp_in_queue));
+
+		pts = STAILQ_FIRST(&tstamp_in_queue);
+		STAILQ_REMOVE_HEAD(&tstamp_in_queue, q_entry);
+
+		/* there must be a tstamp msg for each message */
+		assert(pts->msg == msg);
+	}
+
 	if (msg->recv.is_spx) {
 		/* should never get SPX messages without an SPX connection */
 		if (ipxw_mux_spx_handle_is_error(spxh)) {
@@ -222,8 +249,16 @@ static bool print_in_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 			if (cfg->verbose) {
 				fflush(stdout);
 				fprintf(stderr, "message from ");
-				print_ipxaddr(stderr,
-						&(msg->recv.saddr));
+				print_ipxaddr(stderr, &(msg->recv.saddr));
+				if (pts != NULL) {
+					if (pts->present) {
+						fprintf(stderr, " (%llu.%llu)",
+								pts->ts.tv_sec,
+								pts->ts.tv_nsec);
+					} else {
+						fprintf(stderr, " (no timestamp)");
+					}
+				}
 				fprintf(stderr, ": ");
 				fflush(stderr);
 			}
@@ -237,6 +272,9 @@ static bool print_in_msg(int epoll_fd, struct ipxcat_cfg *cfg)
 
 	}
 
+	if (pts != NULL) {
+		free(pts);
+	}
 	free(msg);
 
 	return true;
@@ -437,6 +475,11 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 			counted_msg_queue_pop(&spx_out_queue);
 		free(msg);
 	}
+	while (!STAILQ_EMPTY(&tstamp_in_queue)) {
+		struct pkt_tstamp *pts = STAILQ_FIRST(&tstamp_in_queue);
+		STAILQ_REMOVE_HEAD(&tstamp_in_queue, q_entry);
+		free(pts);
+	}
 
 	ipxw_mux_spx_conn_close(&spxh);
 	ipxw_mux_unbind(ipxh);
@@ -555,10 +598,12 @@ static void ipx_recv_loop(int epoll_fd, int tmr_fd, struct ipxcat_cfg *cfg)
 					IPXCAT_ERR_MSG_ALLOC);
 		}
 
+		__u8 cmsg_data[CTRL_DATA_LEN];
 		msg->type = IPXW_MUX_RECV;
 		msg->recv.data_len = expected_msg_len - sizeof(struct
 				ipxw_mux_msg);
-		ssize_t rcvd_len = ipxw_mux_get_recvd(ipxh, msg, false);
+		ssize_t rcvd_len = ipxw_mux_get_recvd_with_ctrl(ipxh, msg,
+				false, cmsg_data, CTRL_DATA_LEN);
 		if (rcvd_len < 0) {
 			free(msg);
 			if (errno == EINTR) {
@@ -646,13 +691,45 @@ static void ipx_recv_loop(int epoll_fd, int tmr_fd, struct ipxcat_cfg *cfg)
 		}
 		msg->data[data_len] = '\0';
 
+		/* if we collect timestamps then create a timestamp message */
+		struct pkt_tstamp *pts = NULL;
+		if (cfg->rx_timestamps) {
+			pts = calloc(1, sizeof(struct pkt_tstamp));
+			if (pts == NULL) {
+				free(msg);
+				perror("allocating timestamp message");
+				cleanup_and_exit(epoll_fd, tmr_fd, cfg,
+						IPXCAT_ERR_MSG_ALLOC);
+			}
+
+			pts->msg = msg;
+			if (!ipxw_mux_get_rx_timestamp(cmsg_data,
+						CTRL_DATA_LEN, &(pts->ts))) {
+				pts->present = false;
+				if (cfg->verbose) {
+					fprintf(stderr, "failed to get "
+							"timestamp\n");
+				}
+			} else {
+				pts->present = true;
+			}
+		}
+
 		/* queue received message */
 		msg->recv.is_spx = 0;
 		if (!queue_in_msg(epoll_fd, msg)) {
+			if (pts != NULL) {
+				free(pts);
+			}
 			free(msg);
 			perror("queueing message");
 			cleanup_and_exit(epoll_fd, tmr_fd, cfg,
 					IPXCAT_ERR_MSG_QUEUE);
+		}
+
+		/* if we collect timestamps then queue them as well */
+		if (pts != NULL) {
+			STAILQ_INSERT_TAIL(&tstamp_in_queue, pts, q_entry);
 		}
 	}
 }
@@ -672,6 +749,14 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 	if (ipxw_mux_handle_is_error(ipxh)) {
 		perror("IPX bind");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXCAT_ERR_BIND);
+	}
+
+	if (cfg->rx_timestamps) {
+		if (!ipxw_mux_enable_timestamps(ipxh, true, false)) {
+			perror("RX timestamps");
+			cleanup_and_exit(epoll_fd, tmr_fd, cfg,
+					IPXCAT_ERR_RX_TSTAMPS);
+		}
 	}
 
 	if (cfg->verbose) {
@@ -973,7 +1058,7 @@ static _Noreturn void usage(void)
 {
 	printf("Usage: ipxcat [-v] [-d <maximum data bytes>] [-t <packet type>] <local IPX address> <remote IPX address>\n");
 	printf("       ipxcat [-v] -s [-1] [-d <maximum data bytes>] <local IPX address> <remote IPX address>\n");
-	printf("       ipxcat [-v] -l [-t <packet type>] [-b] <local IPX address>\n");
+	printf("       ipxcat [-v] -l [-t <packet type>] [-b] [-r] <local IPX address>\n");
 	printf("       ipxcat [-v] -l -s [-1] [-d <maximum data bytes>] <local IPX address>\n");
 	exit(IPXCAT_ERR_USAGE);
 }
@@ -1013,6 +1098,12 @@ static bool verify_cfg(struct ipxcat_cfg *cfg)
 		}
 	}
 
+	if (!cfg->listen || cfg->use_spx) {
+		if (cfg->rx_timestamps) {
+			return false;
+		}
+	}
+
 	return true;
 }
 
@@ -1024,6 +1115,7 @@ int main(int argc, char **argv)
 		.use_spx = false,
 		.spx_1_only = false,
 		.accept_broadcasts = false,
+		.rx_timestamps = false,
 		.pkt_type_any = true,
 		.tx_queue_pause_threshold = DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
 		.rx_queue_pause_threshold = DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
@@ -1035,7 +1127,7 @@ int main(int argc, char **argv)
 	/* parse and verify command-line arguments */
 
 	int opt;
-	while ((opt = getopt(argc, argv, "1bd:lst:v")) != -1) {
+	while ((opt = getopt(argc, argv, "1bd:lrst:v")) != -1) {
 		switch (opt) {
 			case '1':
 				cfg.spx_1_only = true;
@@ -1050,6 +1142,9 @@ int main(int argc, char **argv)
 				break;
 			case 'l':
 				cfg.listen = true;
+				break;
+			case 'r':
+				cfg.rx_timestamps = true;
 				break;
 			case 's':
 				cfg.use_spx = true;

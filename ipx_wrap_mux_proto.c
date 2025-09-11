@@ -2,7 +2,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/errqueue.h>
 #include <linux/limits.h>
+#include <linux/net_tstamp.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
@@ -874,7 +876,7 @@ ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)
 	return -1;
 }
 
-static ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
+ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
 		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len)
 {
 	/* check if the msg buffer is ok */
@@ -890,6 +892,7 @@ static ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
 
 	size_t max_msg_len = msg->recv.data_len + sizeof(struct ipxw_mux_msg);
 
+	memset(ctrl, 0, ctrl_len);
 	struct iovec iov = {
 		.iov_base = msg,
 		.iov_len = max_msg_len
@@ -903,6 +906,7 @@ static ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
 		.msg_controllen = ctrl_len,
 		.msg_flags = 0
 	};
+
 	/* receive a msg, may block */
 	int flags = (block ? 0 : MSG_DONTWAIT);
 	ssize_t rcvd_len = recvmsg(h.data_sock, &msgh, flags);
@@ -936,6 +940,78 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 		bool block)
 {
 	return ipxw_mux_get_recvd_with_ctrl(h, msg, block, NULL, 0);
+}
+
+bool ipxw_mux_enable_timestamps(struct ipxw_mux_handle h, bool rx, bool tx)
+{
+	if (!rx && !tx) {
+		errno = EINVAL;
+		return false;
+	}
+
+	int val = SOF_TIMESTAMPING_SOFTWARE | SOF_TIMESTAMPING_RAW_HARDWARE;
+
+	if (rx) {
+		val |= SOF_TIMESTAMPING_RX_HARDWARE;
+		val |= SOF_TIMESTAMPING_RX_SOFTWARE;
+		val |= SOF_TIMESTAMPING_OPT_RX_FILTER;
+	}
+
+	if (tx) {
+		val |= SOF_TIMESTAMPING_TX_HARDWARE;
+		val |= SOF_TIMESTAMPING_TX_SOFTWARE;
+		val |= SOF_TIMESTAMPING_OPT_ID;
+		val |= SOF_TIMESTAMPING_OPT_TSONLY;
+		val |= SOF_TIMESTAMPING_OPT_TX_SWHW;
+	}
+
+	if (setsockopt(h.data_sock, SOL_SOCKET, SO_TIMESTAMPING_NEW, &val,
+				sizeof(val)) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
+bool ipxw_mux_get_rx_timestamp(void *ctrl, size_t ctrl_len, struct
+		__kernel_timespec *ts)
+{
+	struct msghdr msgh = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_iov = NULL,
+		.msg_iovlen = 0,
+		.msg_control = ctrl,
+		.msg_controllen = ctrl_len,
+		.msg_flags = 0
+	};
+
+	struct scm_timestamping64 tsmsg;
+
+	struct cmsghdr *cmsgh;
+	for (cmsgh = CMSG_FIRSTHDR(&msgh); cmsgh != NULL; cmsgh =
+			CMSG_NXTHDR(&msgh, cmsgh)) {
+		if (cmsgh->cmsg_level == SOL_SOCKET && cmsgh->cmsg_type ==
+				SO_TIMESTAMPING_NEW) {
+			memcpy(&tsmsg, CMSG_DATA(cmsgh), sizeof(tsmsg));
+			/* have hardware timestamp */
+			if (tsmsg.ts[2].tv_sec != 0 || tsmsg.ts[2].tv_nsec !=
+					0) {
+				memcpy(ts, &(tsmsg.ts[2]), sizeof(struct
+							__kernel_timespec));
+				return true;
+			}
+			/* have software timestamp */
+			if (tsmsg.ts[0].tv_sec != 0 || tsmsg.ts[0].tv_nsec !=
+					0) {
+				memcpy(ts, &(tsmsg.ts[0]), sizeof(struct
+							__kernel_timespec));
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 /* muxer functions */
