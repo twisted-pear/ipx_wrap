@@ -775,8 +775,8 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	return rcvd_len;
 }
 
-ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
-		bool block)
+static ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
+		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len)
 {
 	/* check message type */
 	if (msg->type != IPXW_MUX_XMIT) {
@@ -799,11 +799,24 @@ ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 	};
 	ipx_to_ipv6_addr(&(dummy_dst.sin6_addr), &(msg->xmit.daddr), h.prefix);
 
+	struct iovec iov = {
+		.iov_base = (struct ipxw_mux_msg *) msg,
+		.iov_len = msg_len
+	};
+	struct msghdr msgh = {
+		.msg_name = &dummy_dst,
+		.msg_namelen = sizeof(dummy_dst),
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+		.msg_control = ctrl,
+		.msg_controllen = ctrl_len,
+		.msg_flags = 0
+	};
+
 	/* send message, may block */
 	/* rewriting to IPX happens in the BPF program */
 	int flags = (block ? 0 : MSG_DONTWAIT);
-	ssize_t sent_len = sendto(h.data_sock, msg, msg_len, flags, (struct
-				sockaddr *) &dummy_dst, sizeof(dummy_dst));
+	ssize_t sent_len = sendmsg(h.data_sock, &msgh, flags);
 	if (sent_len < 0) {
 		return -1;
 	}
@@ -814,6 +827,12 @@ ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 	}
 
 	return sent_len;
+}
+
+ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
+		bool block)
+{
+	return ipxw_mux_xmit_with_ctrl(h, msg, block, NULL, 0);
 }
 
 ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)
@@ -855,8 +874,8 @@ ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)
 	return -1;
 }
 
-ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
-		bool block)
+static ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
+		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len)
 {
 	/* check if the msg buffer is ok */
 	if (msg->type != IPXW_MUX_RECV) {
@@ -871,9 +890,22 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 
 	size_t max_msg_len = msg->recv.data_len + sizeof(struct ipxw_mux_msg);
 
+	struct iovec iov = {
+		.iov_base = msg,
+		.iov_len = max_msg_len
+	};
+	struct msghdr msgh = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+		.msg_control = ctrl,
+		.msg_controllen = ctrl_len,
+		.msg_flags = 0
+	};
 	/* receive a msg, may block */
 	int flags = (block ? 0 : MSG_DONTWAIT);
-	ssize_t rcvd_len = recv(h.data_sock, msg, max_msg_len, flags);
+	ssize_t rcvd_len = recvmsg(h.data_sock, &msgh, flags);
 	if (rcvd_len < 0) {
 		return -1;
 	}
@@ -898,6 +930,12 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	}
 
 	return rcvd_len;
+}
+
+ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
+		bool block)
+{
+	return ipxw_mux_get_recvd_with_ctrl(h, msg, block, NULL, 0);
 }
 
 /* muxer functions */
