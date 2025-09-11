@@ -264,7 +264,7 @@ will accept any packet type while a sending process will use the packet type
 `0x1e`.
 
 The `-d` option specifies the maximum amount of bytes of data transmitted per
-packet. For SPX this value is ignored and is 534. For SPXII this value must bet
+packet. For SPX this value is ignored and is 534. For SPXII this value must be
 between 1 and 65483 (inclusive). For IPX this value must be between 1 and 65497
 (inclusive). There is no MTU measurement unless SPXII is in use. This means
 that it is up to the user to ensure packets are not too large to be
@@ -299,6 +299,11 @@ Usage:
 Usage: ipxdiag [-v] [-t <packet type>] [-w <wait seconds>] [-e <excluded target node> ...] <local IPX addr> <target IPX address>
 ```
 
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
 The `-e` option can be used to specify the node address of an IPX machine that
 should not reply to our request. This can be useful when sending to a network's
 broadcast address to suppress replies from machines on that network that we are
@@ -309,6 +314,44 @@ specified, then the process will use the packet type `0x1e`.
 
 The `-w` option can be used to specify (in seconds) how long the program will
 wait for reply messages. The default is 5 seconds.
+
+The `-v` flag will cause the program to print more detailed information.
+
+## spxinetd
+
+This program allows exposing an executable via SPX. For each incoming SPX
+connection, the specified executable will be executed. Its input will be read
+from the SPX connection and its output will be written to the SPX connection.
+
+Note that the path to the executable must be an absolute path. Options can be
+specified after the path.
+
+This program depends on a running `ipx_wrap_mux`.
+
+Usage:
+```
+Usage: spxinetd [-v] [-1] [-d <maximum data bytes>] [-e] <local IPX address> -- <command>
+```
+
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
+The `-d` option specifies the maximum amount of bytes of data transmitted per
+packet. For SPX this value is ignored and is 534. For SPXII this value must be
+between 1 and 65483 (inclusive). SPXII will perform a packet size negotiation.
+It will gradually reduce the packet size from the specified maximum down until
+packets go through. If the `-d` option is not specified it will start at 534
+bytes of data.
+
+The `-1` flag specifies that only SPX version 1 should be used. This version of
+SPX does not support packet size negotiation and thus the maximum packet size
+when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
+is not specified, SPXII will be used if the connection peer supports it.
+
+The `-e` flag will cause the `stderr` of the executed program to also be
+redirected via the SPX connection.
 
 The `-v` flag will cause the program to print more detailed information.
 
