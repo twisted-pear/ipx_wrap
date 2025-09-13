@@ -226,6 +226,20 @@ Config File Format:
 ...
 ```
 
+## ipx_wrap_pongd
+
+Replies to IPX Ping messages sent to socket `0x9086`
+
+This program depends on a running `ipx_wrap_mux`.
+
+Sending `SIGHUP` to the process will cause it to scan again for network
+interfaces within the specified prefix.
+
+Usage:
+```
+Usage: ipx_wrap_pongd <32-bit hex prefix>
+```
+
 ## ipxcat
 
 This is a netcat-like program for sending and receiving IPX packets. Both plain
