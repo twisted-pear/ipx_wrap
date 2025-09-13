@@ -112,7 +112,7 @@ static struct ipxw_mux_msg *mk_rip_request_for_iface(struct if_entry *iface,
 	struct ipxw_mux_msg *req = calloc(1, sizeof(struct ipxw_mux_msg) +
 			sizeof(struct rip_req_pkt));
 	if (req == NULL) {
-		return false;
+		return NULL;
 	}
 	struct rip_req_pkt *rip = (struct rip_req_pkt *) req->data;
 
@@ -136,7 +136,7 @@ static struct ipxw_mux_msg *mk_rip_response_to_addr(struct ipx_addr *addr)
 			sizeof(struct rip_rsp_pkt) + (sizeof(struct rip_entry)
 				* RIP_MAX_ROUTES_PER_PKT));
 	if (rsp == NULL) {
-		return false;
+		return NULL;
 	}
 	struct rip_rsp_pkt *rip = (struct rip_rsp_pkt *) rsp->data;
 

@@ -281,7 +281,7 @@ static struct ipxw_mux_msg *mk_sap_request_for_iface(struct if_entry *iface,
 	struct ipxw_mux_msg *req = calloc(1, sizeof(struct ipxw_mux_msg) +
 			sizeof(struct srv_query));
 	if (req == NULL) {
-		return false;
+		return NULL;
 	}
 	struct srv_query *sap = (struct srv_query *) req->data;
 
@@ -305,7 +305,7 @@ static struct ipxw_mux_msg *mk_sap_response_to_addr(struct ipx_addr *daddr,
 			sizeof(struct srv_id_pkt) + (sizeof(struct srv_data) *
 				SAP_MAX_SRVS_PER_PKT));
 	if (rsp == NULL) {
-		return false;
+		return NULL;
 	}
 	struct srv_id_pkt *sap = (struct srv_id_pkt *) rsp->data;
 
