@@ -654,6 +654,24 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
+	/* if the packet did not originate on this host... */
+	if (ctx->ingress_ifindex != 0) {
+		struct ipxhdr *ipxh = newhdr_start;
+		if (ipxh + 1 > data_end) {
+			return TC_ACT_SHOT;
+		}
+
+		/* ... and the packet is destined towards the broadcast address
+		 * of this interface */
+		if (ipxh->daddr.net == ifcfg->network &&
+				__builtin_memcmp(ipxh->daddr.node,
+					IPX_BCAST_NODE,
+					sizeof(ipxh->daddr.node)) == 0) {
+			/* then also loop it back into this interface */
+			bpf_clone_redirect(ctx, ifidx, BPF_F_INGRESS);
+		}
+	}
+
 	return TC_ACT_OK;
 }
 
