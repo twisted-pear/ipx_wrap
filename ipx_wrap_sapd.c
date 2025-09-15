@@ -167,6 +167,8 @@ static bool insert_srv_entry(struct srv_entry *e)
 {
 	/* service must not exist already */
 
+	/* in a production build (without asserts) these two variables will be
+	 * unused, that is ok, the compiler can optimize them away */
 	struct srv_entry *found_addr = get_srv_entry_by_ipx_addr(&e->data.srv_addr);
 	assert(found_addr == NULL);
 
@@ -767,7 +769,13 @@ static int parse_next_line_from_cfg(FILE *cfg, struct srv_entry *e)
 	e->data.srv_addr.sock = htons(srv_sock);
 	e->data.hops = htons(srv_hops);
 	e->data.srv_type = htons(srv_type);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
+	/* despite GCC's warnings, this is correct, if we cut off the
+	 * terminating zero for some reason, we still have one byte in
+	 * e->data.srv_name left that is zero. */
 	strncpy(e->data.srv_name, srv_name, SAP_MAX_SRV_NAME_LEN);
+#pragma GCC diagnostic pop
 
 	/* fill in the meta data */
 	e->last_seen = 0;

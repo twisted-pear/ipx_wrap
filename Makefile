@@ -14,7 +14,12 @@ SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd ipx_wrap_pongd
 MUXER_TARGETS = ipx_wrap_mux
 BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o
 
-CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/
+ifdef NDEBUG
+CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -DNDEBUG
+else
+CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -fsanitize=address -fsanitize=leak -g
+endif
+BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wno-address-of-packed-member -Werror -O2
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap -lbpf
 
@@ -32,14 +37,8 @@ vmlinux.btf:
 $(BPF_OBJ): %.o: %.c vmlinux.h common.h ipx_wrap_common_kern.h ipx_wrap_common_proto.h
 	$(CLANG) -S \
 	    -target bpf \
-	    -D __BPF_TRACING__ \
-	    -I $(LIBBPF_PREFIX)/include/ \
-	    -Wall \
-	    -Wno-pointer-sign \
-	    -Wno-compare-distinct-pointer-types \
-	    -Wno-address-of-packed-member \
-	    -Werror \
-	    -O2 -emit-llvm -c -g -o ${@:.o=.ll} $<
+	    $(BPF_CFLAGS) \
+	    -emit-llvm -c -g -o ${@:.o=.ll} $<
 	$(LLC) -march=bpf -filetype=obj -o $@ ${@:.o=.ll}
 
 $(USER_TARGETS): %: %.c common.h
@@ -48,15 +47,9 @@ $(USER_TARGETS): %: %.c common.h
 ipx_wrap_kern_nopin.o: ipx_wrap_kern.c vmlinux.h common.h ipx_wrap_common_kern.h
 	$(CLANG) -S \
 	    -target bpf \
-	    -D __BPF_TRACING__ \
+	    $(BPF_CFLAGS) \
 	    -D __IPX_WRAP_NOPIN__ \
-	    -I $(LIBBPF_PREFIX)/include/ \
-	    -Wall \
-	    -Wno-pointer-sign \
-	    -Wno-compare-distinct-pointer-types \
-	    -Wno-address-of-packed-member \
-	    -Werror \
-	    -O2 -emit-llvm -c -g -o ${@:.o=.ll} $<
+	    -emit-llvm -c -g -o ${@:.o=.ll} $<
 	$(LLC) -march=bpf -filetype=obj -o $@ ${@:.o=.ll}
 
 $(IFD_TARGETS): %: %.c common.h ipx_wrap_kern_nopin.skel.h
