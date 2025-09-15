@@ -78,6 +78,9 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 		bool block);
 
+ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
+		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len);
+
 /* get the length of the received message from the header, may block */
 ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block);
 
@@ -93,6 +96,9 @@ ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
 		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len);
 
 bool ipxw_mux_enable_timestamps(struct ipxw_mux_handle h, bool rx, bool tx);
+ssize_t ipxw_mux_set_tx_timestamp_id(void *ctrl, size_t ctrl_len, __u32 ts_id);
+bool ipxw_mux_get_tx_timestamp(struct ipxw_mux_handle h, struct
+		__kernel_timespec *ts, __u32 *ts_id, bool block);
 bool ipxw_mux_get_rx_timestamp(void *ctrl, size_t ctrl_len, struct
 		__kernel_timespec *ts);
 

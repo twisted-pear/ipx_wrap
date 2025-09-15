@@ -777,7 +777,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	return rcvd_len;
 }
 
-static ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
+ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
 		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len)
 {
 	/* check message type */
@@ -942,6 +942,10 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 	return ipxw_mux_get_recvd_with_ctrl(h, msg, block, NULL, 0);
 }
 
+/* timestamping helpers */
+
+#define TX_TS_RECV_CTRL_BUF_SIZE 1024
+
 bool ipxw_mux_enable_timestamps(struct ipxw_mux_handle h, bool rx, bool tx)
 {
 	if (!rx && !tx) {
@@ -962,11 +966,122 @@ bool ipxw_mux_enable_timestamps(struct ipxw_mux_handle h, bool rx, bool tx)
 		val |= SOF_TIMESTAMPING_TX_SOFTWARE;
 		val |= SOF_TIMESTAMPING_OPT_ID;
 		val |= SOF_TIMESTAMPING_OPT_TSONLY;
-		val |= SOF_TIMESTAMPING_OPT_TX_SWHW;
 	}
 
 	if (setsockopt(h.data_sock, SOL_SOCKET, SO_TIMESTAMPING_NEW, &val,
 				sizeof(val)) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
+ssize_t ipxw_mux_set_tx_timestamp_id(void *ctrl, size_t ctrl_len, __u32 ts_id)
+{
+	if (CMSG_SPACE(sizeof(__u32)) > ctrl_len) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct msghdr msgh = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_iov = NULL,
+		.msg_iovlen = 0,
+		.msg_control = ctrl,
+		.msg_controllen = ctrl_len,
+		.msg_flags = 0
+	};
+
+	memset(ctrl, 0, ctrl_len);
+
+	struct cmsghdr *cmsgh = CMSG_FIRSTHDR(&msgh);
+	cmsgh->cmsg_level = SOL_SOCKET;
+	cmsgh->cmsg_type = SCM_TS_OPT_ID;
+	cmsgh->cmsg_len = CMSG_LEN(sizeof(__u32));
+	*((__u32 *) CMSG_DATA(cmsgh)) = ts_id;
+
+	return CMSG_SPACE(sizeof(__u32));
+}
+
+bool ipxw_mux_get_tx_timestamp(struct ipxw_mux_handle h, struct
+		__kernel_timespec *ts, __u32 *ts_id, bool block)
+{
+	__u8 ctrl_buf[TX_TS_RECV_CTRL_BUF_SIZE];
+	memset(ctrl_buf, 0, TX_TS_RECV_CTRL_BUF_SIZE);
+
+	struct msghdr msgh = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_iov = NULL,
+		.msg_iovlen = 0,
+		.msg_control = ctrl_buf,
+		.msg_controllen = TX_TS_RECV_CTRL_BUF_SIZE,
+		.msg_flags = 0
+	};
+
+	/* receive a msg, may block */
+	int flags = (block ? MSG_ERRQUEUE : (MSG_ERRQUEUE | MSG_DONTWAIT));
+	ssize_t rcvd_len = recvmsg(h.data_sock, &msgh, flags);
+	if (rcvd_len < 0) {
+		return false;
+	}
+
+	if (rcvd_len != 0) {
+		errno = EREMOTEIO;
+		return false;
+	}
+
+	bool have_tstamp = false;
+	bool have_tstamp_id = false;
+	struct scm_timestamping64 tsmsg;
+	struct sock_extended_err *ext_err;
+
+	struct cmsghdr *cmsgh;
+	for (cmsgh = CMSG_FIRSTHDR(&msgh); cmsgh != NULL; cmsgh =
+			CMSG_NXTHDR(&msgh, cmsgh)) {
+		/* error msg with timestamp ID */
+		if (cmsgh->cmsg_level == SOL_IPV6 && cmsgh->cmsg_type ==
+				IPV6_RECVERR) {
+			ext_err = (struct sock_extended_err *)
+				CMSG_DATA(cmsgh);
+			if (ext_err->ee_errno != ENOMSG) {
+				continue;
+			}
+			if (ext_err->ee_info != SCM_TSTAMP_SND) {
+				continue;
+			}
+			*ts_id = ext_err->ee_data;
+			have_tstamp_id = true;
+			continue;
+		}
+
+		/* timestamping message with the actual timestamps */
+		if (cmsgh->cmsg_level == SOL_SOCKET && cmsgh->cmsg_type ==
+				SO_TIMESTAMPING_NEW) {
+			memcpy(&tsmsg, CMSG_DATA(cmsgh), sizeof(tsmsg));
+			/* have hardware timestamp */
+			if (tsmsg.ts[2].tv_sec != 0 || tsmsg.ts[2].tv_nsec !=
+					0) {
+				memcpy(ts, &(tsmsg.ts[2]), sizeof(struct
+							__kernel_timespec));
+				have_tstamp = true;
+				continue;
+			}
+			/* have software timestamp */
+			if (tsmsg.ts[0].tv_sec != 0 || tsmsg.ts[0].tv_nsec !=
+					0) {
+				memcpy(ts, &(tsmsg.ts[0]), sizeof(struct
+							__kernel_timespec));
+				have_tstamp = true;
+				continue;
+			}
+			continue;
+		}
+	}
+
+	if (!have_tstamp || !have_tstamp_id) {
+		errno = ENOENT;
 		return false;
 	}
 
