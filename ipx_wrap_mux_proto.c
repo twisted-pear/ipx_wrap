@@ -944,6 +944,11 @@ ssize_t ipxw_mux_get_recvd(struct ipxw_mux_handle h, struct ipxw_mux_msg *msg,
 
 /* timestamping helpers */
 
+/* define this ourselves in case the 6.13 kernel headers are not available */
+#ifndef SCM_TS_OPT_ID
+#define SCM_TS_OPT_ID 81
+#endif /* SCM_TS_OPT_ID */
+
 #define TX_TS_RECV_CTRL_BUF_SIZE 1024
 
 bool ipxw_mux_enable_timestamps(struct ipxw_mux_handle h, bool rx, bool tx)
