@@ -12,6 +12,7 @@
 /ipxcat
 /ipxdiag
 /spxinetd
+/ipxping
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests
