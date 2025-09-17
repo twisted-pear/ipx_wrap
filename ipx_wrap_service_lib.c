@@ -320,8 +320,7 @@ static int setup_timer(int epoll_fd, time_t secs)
 
 bool is_timeout_expired(time_t now_secs, time_t timeout_secs, time_t last)
 {
-	time_t diff;
-	__builtin_sub_overflow(now_secs, last, &diff);
+	double diff = difftime(now_secs, last);
 	if (diff > timeout_secs) {
 		return true;
 	}
