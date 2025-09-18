@@ -14,7 +14,6 @@
 #include "ipx_wrap_mux_proto.h"
 #include "ipx_wrap_helpers.h"
 
-#define DEFAULT_PKT_TYPE 0x1E
 #define DEFAULT_DATA_LEN 12
 #define MIN_PING_INTERVAL 0.002
 
@@ -659,7 +658,7 @@ int main(int argc, char **argv)
 	struct ipxping_cfg cfg = {
 		.verbose = false,
 		.rx_pkt_type_any = false,
-		.tx_pkt_type = DEFAULT_PKT_TYPE,
+		.tx_pkt_type = PING_PKT_TYPE,
 		.interval = 1.0,
 		.data_len = DEFAULT_DATA_LEN,
 		.max_pings = 0,

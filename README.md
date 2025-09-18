@@ -373,6 +373,39 @@ redirected via the SPX connection.
 
 The `-v` flag will cause the program to print more detailed information.
 
+## ipxping
+
+This program is the IPX version of `ping` utility. It sends Ping messages in
+Novell's Ping format and collects replies and statistical information.
+
+This program depends on a running `ipx_wrap_mux`.
+
+Usage:
+```
+Usage: ipxping [-v] [-i <interval seconds>] [-c <count>] [-d <maximum data bytes>] [-t <packet type>] [-a] <local IPX address> <remote IPX address>
+```
+
+The `-i` option specifies the interval between Ping packets sent in seconds.
+The minimum allowed value is 2 ms (0.002).
+
+The `-c` option specifies how many Ping packets the program will send before
+terminating. If this option is missing, the program will transmit Ping messages
+until it is interrupted by the user or a signal.
+
+The `-t` option can be used to specify the packet type to use for sending
+Pings. If no packet type is specified, then the process will use the packet
+type `0x04`.
+
+The `-a` flag will cause the program to accept any packet type in reply
+packets. Otherwise all replies with a packet type other than the one specified
+with `-t` (or `0x04` if `-t` was not specified) will be ignored.
+
+The `-d` option specifies how many bytes of data will be sent along with each
+Ping packet. This value may be automatically reduced to what is permissible
+given the output interface's MTU.
+
+The `-v` flag will cause the program to print more detailed information.
+
 ## Acknowledgements
 
 ### uthash
