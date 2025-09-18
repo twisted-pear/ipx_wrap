@@ -1,4 +1,6 @@
 #include <assert.h>
+#include <float.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,8 +13,6 @@
 #include "ipx_wrap_ping.h"
 #include "ipx_wrap_mux_proto.h"
 #include "ipx_wrap_helpers.h"
-
-// TODO: collect and print out stats on termination
 
 #define DEFAULT_PKT_TYPE 0x1E
 #define DEFAULT_DATA_LEN 12
@@ -32,6 +32,7 @@ enum ipxping_error_codes {
 	IPXPING_ERR_GETSOCKNAME,
 	IPXPING_ERR_GET_OIF_DATA_LEN,
 	IPXPING_ERR_OIF_DATA_LEN_ZERO,
+	IPXPING_ERR_GETTIME,
 	IPXPING_ERR_EPOLL_WAIT,
 	IPXPING_ERR_TMR_FAILURE,
 	IPXPING_ERR_CONF_FAILURE,
@@ -49,6 +50,8 @@ struct ping_wait {
 	bool have_tx_ts;
 	/* TX timestamp of the Ping message */
 	struct __kernel_timespec tx_ts;
+	/* whether we have already seen a reply to this Ping */
+	bool have_reply;
 	/* data length of the Ping message */
 	__u16 data_len;
 };
@@ -58,6 +61,18 @@ struct ping_wait *ht_id_to_ping_wait = NULL;
 #define MAX_EPOLL_EVENTS 64
 
 #define CTRL_DATA_LEN 1024
+
+struct ipxping_stats {
+	struct timespec time_start;
+	struct timespec time_end;
+	double rtt_min;
+	double rtt_max;
+	double rtt_sum;
+	double rtt_sq_sum;
+	__u32 n_pings;
+	__u32 n_pongs;
+	__u32 n_pings_with_replies;
+};
 
 struct ipxping_cfg {
 	bool verbose;
@@ -144,7 +159,7 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 	exit(code);
 }
 
-static bool send_ping(struct ipxping_cfg *cfg)
+static bool send_ping(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 {
 	struct ping_wait *ping_wait = NULL;
 	HASH_FIND(hh, ht_id_to_ping_wait, &(cfg->cur_msg_id), sizeof(__u16),
@@ -213,6 +228,9 @@ static bool send_ping(struct ipxping_cfg *cfg)
 		/* increase the number of sent Pings */
 		cfg->n_pings++;
 
+		/* update stats */
+		stats->n_pings++;
+
 		free(ping_msg);
 		return true;
 	} while (0);
@@ -276,7 +294,7 @@ static bool recv_ping_tx_ts(struct ipxping_cfg *cfg)
 	return true;
 }
 
-static bool recv_pong(struct ipxping_cfg *cfg)
+static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 {
 	ssize_t expected_msg_len = ipxw_mux_peek_recvd_len(ipxh, false);
 	if (expected_msg_len < 0) {
@@ -364,19 +382,61 @@ static bool recv_pong(struct ipxping_cfg *cfg)
 		return true;
 	}
 
+	/* update stats */
+	if (!ping_wait->have_reply) {
+		ping_wait->have_reply = true;
+		stats->n_pings_with_replies++;
+	}
+
 	printf("%lu bytes from ", pong_data_len + sizeof(struct ping_pkt));
 	print_ipxaddr(stdout, &pong_saddr);
 	printf(": id=%hu tc=%hhu time=", pong_id, pong_tc);
 	if (!ping_wait->have_tx_ts) {
 		printf("unknown\n");
 	} else {
-		double s_diff = (pong_rx_ts.tv_sec - ping_wait->tx_ts.tv_sec) +
+		double rtt = (pong_rx_ts.tv_sec - ping_wait->tx_ts.tv_sec) +
 			1.0e-9 * (pong_rx_ts.tv_nsec -
 					ping_wait->tx_ts.tv_nsec);
-		printf("%f ms\n", s_diff * 1000);
+
+		/* update stats */
+		stats->n_pongs++;
+		stats->rtt_sum += rtt;
+		stats->rtt_sq_sum += rtt * rtt;
+		if (rtt < stats->rtt_min) {
+			stats->rtt_min = rtt;
+		}
+		if (rtt > stats->rtt_max) {
+			stats->rtt_max = rtt;
+		}
+
+		printf("%.3f ms\n", rtt * 1000);
 	}
 
 	return true;
+}
+
+static void print_stats(struct ipxping_stats *stats, struct ipx_addr
+		*remote_addr)
+{
+	printf("\n--- ");
+	print_ipxaddr(stdout, remote_addr);
+	printf(" ping statistics ---\n");
+
+	double loss = ((stats->n_pings - stats->n_pings_with_replies) /
+			stats->n_pings) * 100;
+	double runtime_s = (stats->time_end.tv_sec - stats->time_start.tv_sec)
+		+ 1.0e-9 * (stats->time_end.tv_nsec -
+				stats->time_start.tv_nsec);
+	double avg = stats->rtt_sum / stats->n_pongs;
+	double mdev = sqrtl((stats->rtt_sq_sum / stats->n_pongs) - (avg *
+				avg));
+
+	printf("%u packets transmitted, %u received, %.0f%% packet loss, time "
+			"%.0fms\n", stats->n_pings, stats->n_pongs, loss,
+			runtime_s * 1000);
+	printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
+			stats->rtt_min * 1000, avg * 1000, stats->rtt_max *
+			1000, mdev * 1000);
 }
 
 static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
@@ -459,6 +519,25 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_IPX_FD);
 	}
 
+	struct ipxping_stats stats = {
+		.rtt_min = DBL_MAX,
+		.rtt_max = 0,
+		.rtt_sum = 0,
+		.rtt_sq_sum = 0,
+		.n_pings = 0,
+		.n_pongs = 0,
+		.n_pings_with_replies = 0
+	};
+
+	if (clock_gettime(CLOCK_MONOTONIC, &(stats.time_start)) != 0) {
+		perror("getting start time");
+		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_GETTIME);
+	}
+
+	printf("PING ");
+	print_ipxaddr(stdout, &(cfg->remote_addr));
+	printf(" %hu data bytes\n", cfg->data_len);
+
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
 	while (keep_going) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
@@ -492,7 +571,7 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 				}
 
 				/* send a ping */
-				if (!send_ping(cfg)) {
+				if (!send_ping(cfg, &stats)) {
 					perror("sending Ping");
 				}
 
@@ -542,13 +621,20 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 			}
 
 			/* receive and match incoming pongs to pings */
-			if (!recv_pong(cfg)) {
+			if (!recv_pong(cfg, &stats)) {
 				perror("receiving Pong");
 			}
 
 			continue;
 		}
 	}
+
+	if (clock_gettime(CLOCK_MONOTONIC, &(stats.time_end)) != 0) {
+		perror("getting start time");
+		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_GETTIME);
+	}
+
+	print_stats(&stats, &(cfg->remote_addr));
 
 	cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_OK);
 }
