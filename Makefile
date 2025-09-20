@@ -1,5 +1,5 @@
-LLC ?= llc-17
-CLANG ?= clang-17
+LLC ?= llc-19
+CLANG ?= clang-19
 CC ?= gcc
 BPFT ?= bpftool
 PAHOLE ?= pahole
