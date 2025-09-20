@@ -1,0 +1,73 @@
+x-ipx-host: &service-ipx-host
+  image: ipx-host
+  pull_policy: never
+  build:
+    context: .
+  cap_add:
+    - BPF
+    - NET_ADMIN
+    - NET_RAW
+    - PERFMON
+  sysctls:
+    - net.ipv4.ip_forward=0
+    - net.ipv4.conf.all.forwarding=0
+    - net.ipv4.conf.default.forwarding=0
+    - net.ipv6.conf.all.forwarding=1
+    - net.ipv6.conf.default.forwarding=1
+  environment:
+    - IPX_PREFIX=${IPX_PREFIX:-fdaabbbb}
+    - SAPD_CFG=${SAPD_CFG:-samples/empty.cfg}
+
+x-ipx-net: &network-ipx-net
+  enable_ipv4: false
+  enable_ipv6: true
+  internal: true
+  driver: bridge
+  driver_opts:
+    com.docker.network.bridge.gateway_mode_ipv4: isolated
+    com.docker.network.bridge.gateway_mode_ipv6: isolated
+
+services:
+  ipxhost001:
+    <<: *service-ipx-host
+    container_name: ipxhost001
+    command: /bin/sh -c "./setup_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1 && sleep infinity"
+    networks:
+      ipxnet_001_to_002:
+        mac_address: 00:ad:de:ad:01:01
+        ipv6_address: fdaa:bbbb:0000:0001:00ad:deff:fead:0101
+  ipxhost002:
+    <<: *service-ipx-host
+    container_name: ipxhost002
+    command: /bin/sh -c "./setup_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1 && sleep infinity"
+    networks:
+      ipxnet_001_to_002:
+        mac_address: 00:ad:de:ad:01:02
+        ipv6_address: fdaa:bbbb:0000:0001:00ad:deff:fead:0102
+      ipxnet_002_to_003:
+        mac_address: 00:ad:de:ad:02:01
+        ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0201
+  ipxhost003:
+    <<: *service-ipx-host
+    container_name: ipxhost003
+    command: /bin/sh -c "./setup_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1 && sleep infinity"
+    networks:
+      ipxnet_002_to_003:
+        mac_address: 00:ad:de:ad:02:02
+        ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0202
+
+networks:
+  ipxnet_001_to_002:
+    <<: *network-ipx-net
+    ipam:
+      driver: default
+      config:
+        - subnet: fdaa:bbbb:0000:0001::/64
+          ip_range: fdaa:bbbb:0000:0001::/64
+  ipxnet_002_to_003:
+    <<: *network-ipx-net
+    ipam:
+      driver: default
+      config:
+        - subnet: fdaa:bbbb:0000:0002::/64
+          ip_range: fdaa:bbbb:0000:0002::/64
