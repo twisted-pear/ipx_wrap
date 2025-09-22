@@ -1,5 +1,6 @@
 x-ipx-host: &service-ipx-host
   image: ipx-host
+  tty: true
   pull_policy: never
   build:
     context: .
