@@ -215,9 +215,13 @@ struct ipxw_mux_spx_msg {
 			__u16 negotiation_size;
 		} __attribute__((packed));
 	};
-	__u8 spx_data[0];
-	struct spxii_negotiate_size_hdr spxii_negotiate_size_h;
-	__u8 spxii_data[0];
+	union {
+		__u8 spx_data[0];
+		struct {
+			struct spxii_negotiate_size_hdr spxii_negotiate_size_h;
+			__u8 spxii_data[0];
+		};
+	};
 } __attribute__((packed));
 
 _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +

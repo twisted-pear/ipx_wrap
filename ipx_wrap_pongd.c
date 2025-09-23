@@ -73,7 +73,6 @@ static void handle_ping(struct ipxw_mux_msg *ping, struct if_entry *in_if, int e
 
 	fprintf(stderr, "\n");
 	perror("sending Pong");
-	fprintf(stderr, ".\n");
 }
 
 void service_cleanup_and_exit(void *ctx)

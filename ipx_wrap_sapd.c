@@ -598,6 +598,7 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 					fprintf(stderr, "\n");
 					perror("sending wild GSQ SAP "
 							"response");
+					return;
 				} else {
 					fprintf(stderr, "sending wild GSQ "
 							"response");
@@ -611,6 +612,7 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 						epoll_fd)) {
 				fprintf(stderr, "\n");
 				perror("sending GSQ SAP response");
+				return;
 			} else {
 				fprintf(stderr, "sending GSQ response");
 			}
@@ -625,7 +627,7 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 
 			/* reply with the nearest server of the correct type */
 			if (sap_query_pkt->srv_type == SAP_SRV_TYPE_WILD) {
-				fprintf(stderr, "wildcard server tyoe not"
+				fprintf(stderr, "wildcard server type not"
 						" supported for nearest service"
 						" query");
 				break;
@@ -637,6 +639,7 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 						epoll_fd)) {
 				fprintf(stderr, "\n");
 				perror("sending NSQ SAP response");
+				return;
 			} else {
 				fprintf(stderr, "sending NSQ response");
 			}
@@ -664,7 +667,7 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 						srv_id_pkt)) / sizeof(struct
 						srv_data);
 
-			size_t ninserted = insert_srv_entries_from_sap_rsp(
+			ssize_t ninserted = insert_srv_entries_from_sap_rsp(
 					sap_rsp_pkt, nentries,
 					in_if->addr.net);
 
@@ -673,7 +676,7 @@ static void handle_sap_msg(struct ipxw_mux_msg *msg, struct if_entry *in_if,
 				break;
 			}
 
-			fprintf(stderr, "added %lu of %lu servers", ninserted,
+			fprintf(stderr, "added %ld of %lu servers", ninserted,
 					nentries);
 			break;
 		} else {

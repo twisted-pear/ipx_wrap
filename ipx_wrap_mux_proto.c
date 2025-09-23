@@ -108,7 +108,7 @@ int ipxw_mux_sk_socket(int domain, int type, int protocol)
 		}
 
 		if ((type & SOCK_CLOEXEC) != 0) {
-			if (fcntl(data_sock, F_SETFL, FD_CLOEXEC) < 0) {
+			if (fcntl(data_sock, F_SETFD, FD_CLOEXEC) < 0) {
 				break;
 			}
 		}
@@ -196,7 +196,7 @@ int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 		if (sk->cloexec) {
 			/* propagate the CLOEXEC flag to the config socket too
 			 */
-			if (fcntl(h.conf_sock, F_SETFL, FD_CLOEXEC) < 0) {
+			if (fcntl(h.conf_sock, F_SETFD, FD_CLOEXEC) < 0) {
 				ipxw_mux_unbind(h);
 				break;
 			}

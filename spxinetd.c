@@ -630,7 +630,6 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 			if (evs[i].data.fd == fileno(fd_exec_in)) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
-					continue;
 					fprintf(stderr, "exec input error\n");
 					cleanup_and_exit(epoll_fd, tmr_fd, &spxh, cfg,
 							SPXINETD_ERR_EXEC_IN_FAILURE);

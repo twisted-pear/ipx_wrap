@@ -18,7 +18,7 @@ void print_ipxaddr(FILE *f, const struct ipx_addr *addr)
 
 bool parse_ipx_node_addr(const char *str, __u8 addr[IPX_ADDR_NODE_BYTES])
 {
-	ssize_t res = sscanf(str, "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
+	int res = sscanf(str, "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
 			&(addr[0]), &(addr[1]), &(addr[2]), &(addr[3]),
 			&(addr[4]), &(addr[5]));
 	if (res != 6) {
@@ -32,7 +32,7 @@ bool parse_ipxaddr(const char *str, struct ipx_addr *addr)
 {
 	__u32 net;
 	__u16 sock;
-	ssize_t res = sscanf(str,
+	int res = sscanf(str,
 			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx",
 			&net, &(addr->node[0]), &(addr->node[1]),
 			&(addr->node[2]), &(addr->node[3]), &(addr->node[4]),

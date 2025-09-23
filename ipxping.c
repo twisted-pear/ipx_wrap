@@ -421,14 +421,23 @@ static void print_stats(struct ipxping_stats *stats, struct ipx_addr
 	print_ipxaddr(stdout, remote_addr);
 	printf(" ping statistics ---\n");
 
-	double loss = ((stats->n_pings - stats->n_pings_with_replies) /
-			stats->n_pings) * 100;
+	double loss = 0.0;
+	if (stats->n_pings > 0) {
+		loss = ((stats->n_pings - stats->n_pings_with_replies) /
+				stats->n_pings) * 100;
+	}
+
 	double runtime_s = (stats->time_end.tv_sec - stats->time_start.tv_sec)
 		+ 1.0e-9 * (stats->time_end.tv_nsec -
 				stats->time_start.tv_nsec);
-	double avg = stats->rtt_sum / stats->n_pongs;
-	double mdev = sqrtl((stats->rtt_sq_sum / stats->n_pongs) - (avg *
-				avg));
+
+	double avg = 0.0;
+	double mdev = 0.0;
+	if (stats->n_pongs > 0) {
+		avg = stats->rtt_sum / stats->n_pongs;
+		mdev = sqrtl((stats->rtt_sq_sum / stats->n_pongs) - (avg *
+					avg));
+	}
 
 	printf("%u packets transmitted, %u received, %.0f%% packet loss, time "
 			"%.0fms\n", stats->n_pings, stats->n_pongs, loss,
@@ -629,7 +638,7 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 	}
 
 	if (clock_gettime(CLOCK_MONOTONIC, &(stats.time_end)) != 0) {
-		perror("getting start time");
+		perror("getting end time");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_GETTIME);
 	}
 
