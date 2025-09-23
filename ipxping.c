@@ -87,7 +87,7 @@ struct ipxping_cfg {
 	__u32 n_pings;
 };
 
-static bool keep_going = true;
+static volatile sig_atomic_t keep_going = true;
 
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
 

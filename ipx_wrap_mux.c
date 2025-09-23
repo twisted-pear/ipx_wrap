@@ -126,8 +126,8 @@ static struct if_prog_entry *ht_ifidx_to_if_prog = NULL;
 static int tmr_fd = -1;
 static struct ipx_wrap_mux_kern *bpf_kern = NULL;
 
-static bool rescan_now = false;
-static bool keep_going = true;
+static volatile sig_atomic_t rescan_now = false;
+static volatile sig_atomic_t keep_going = true;
 
 static int sort_bind_entry_by_ipx_sock(struct bind_entry *a, struct bind_entry
 		*b)

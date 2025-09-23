@@ -119,7 +119,7 @@ struct diag_rsp_cursor {
 	void *pos;
 };
 
-static bool keep_going = true;
+static volatile sig_atomic_t keep_going = true;
 static bool stdout_is_file = false;
 struct ipxw_msg_queue in_queue = STAILQ_HEAD_INITIALIZER(in_queue);
 

@@ -3,8 +3,8 @@
 static struct if_entry *ht_sock_to_if = NULL;
 static struct if_entry *ht_ipx_addr_to_if = NULL;
 
-static bool reload_now = false;
-static bool keep_going = true;
+static volatile sig_atomic_t reload_now = false;
+static volatile sig_atomic_t keep_going = true;
 
 bool get_now_secs(time_t *now_secs)
 {

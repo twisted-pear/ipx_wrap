@@ -76,7 +76,7 @@ STAILQ_HEAD(ipxw_tstamp_queue, pkt_tstamp);
 
 struct ipxw_tstamp_queue tstamp_in_queue = STAILQ_HEAD_INITIALIZER(tstamp_in_queue);
 
-static bool keep_going = true;
+static volatile sig_atomic_t keep_going = true;
 static bool stdin_closed = false;
 static bool stdin_is_file = false;
 static bool stdout_is_file = false;

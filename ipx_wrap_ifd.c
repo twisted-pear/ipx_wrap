@@ -28,7 +28,7 @@ static struct ipx_wrap_kern_nopin *bpf_kern = NULL;
 static struct bpf_link *ingress_link = NULL;
 static struct bpf_link *egress_link = NULL;
 
-static bool keep_going = true;
+static volatile sig_atomic_t keep_going = true;
 
 static void signal_handler(int signal)
 {

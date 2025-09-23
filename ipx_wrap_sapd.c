@@ -78,7 +78,7 @@ struct srv_type_list {
 static struct srv_entry *ht_ipx_addr_to_srv = NULL;
 static struct srv_entry *ht_srv_type_and_name_to_srv = NULL;
 static struct srv_type_list *ht_srv_type_to_srv_list = NULL;
-static bool print_database = false;
+static volatile sig_atomic_t print_database = false;
 
 static struct srv_type_list *get_srv_type_list(__be16 srv_type)
 {

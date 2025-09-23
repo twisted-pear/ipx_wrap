@@ -53,8 +53,8 @@ struct spxinetd_cfg {
 	char **sub_argv;
 };
 
-static bool keep_going = true;
-static bool reap_children = false;
+static volatile sig_atomic_t keep_going = true;
+static volatile sig_atomic_t reap_children = false;
 
 static struct counted_msg_queue out_queue = counted_msg_queue_init(out_queue);
 static struct counted_msg_queue in_queue = counted_msg_queue_init(in_queue);
