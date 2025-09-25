@@ -1527,9 +1527,12 @@ void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h)
 		close(h->spx_sock);
 	}
 
+	if (h->conf_sock >= 0) {
+		close(h->conf_sock);
+	}
+
 	h->spx_sock = -1;
-	h->conf_sock = -1; /* do not close config socket as it is used
-			      elsewhere too */
+	h->conf_sock = -1;
 
 	if (h->last_known_state != NULL) {
 		free(h->last_known_state);
@@ -1549,22 +1552,31 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 		return ret;
 	}
 
-	ret.last_known_state = calloc(1, sizeof(struct
+	struct ipxw_mux_spx_handle_state *state = calloc(1, sizeof(struct
 				ipxw_mux_spx_handle_state));
-	if (ret.last_known_state == NULL) {
+	if (state == NULL) {
 		return ret;
 	}
 
-	ret.last_known_state->conn_id = SPX_CONN_ID_UNKNOWN;
-	ret.last_known_state->state = IPXW_MUX_SPX_INVALID;
+	state->conn_id = SPX_CONN_ID_UNKNOWN;
+	state->state = IPXW_MUX_SPX_INVALID;
 
 	int spx_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (spx_sock < 0) {
+		free(state);
+		return ret;
+	}
+
+	int conf_sock = dup(h.conf_sock);
+	if (conf_sock == -1) {
+		free(state);
+		close(spx_sock);
 		return ret;
 	}
 
 	ret.spx_sock = spx_sock;
-	ret.conf_sock = h.conf_sock;
+	ret.conf_sock = conf_sock;
+	ret.last_known_state = state;
 
 	return ret;
 }
