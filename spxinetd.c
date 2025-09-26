@@ -460,6 +460,11 @@ static bool write_to_exec_proc(int epoll_fd, struct spxinetd_cfg *cfg)
 static bool read_from_exec_proc(int epoll_fd, struct ipxw_mux_spx_handle spxh,
 		struct spxinetd_cfg *cfg)
 {
+	/* do not attempt to send unless the connection is fully established */
+	if (!ipxw_mux_spx_established(spxh)) {
+		return true;
+	}
+
 	/* queue is full, try again later */
 	if (counted_msg_queue_nitems(&out_queue) > cfg->tx_queue_pause_threshold) {
 		return true;
