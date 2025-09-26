@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "ipx_wrap_mux_proto.h"
@@ -65,6 +66,7 @@ struct spxtcp_cfg {
 };
 
 static volatile sig_atomic_t keep_going = true;
+static volatile sig_atomic_t reap_children = false;
 
 static struct counted_msg_queue spx_to_tcp_queue = counted_msg_queue_init(spx_to_tcp_queue);
 static struct counted_msg_queue tcp_to_spx_queue = counted_msg_queue_init(tcp_to_spx_queue);
@@ -83,6 +85,9 @@ static int tmr_fd = -1;
 static void signal_handler(int signal)
 {
 	switch (signal) {
+		case SIGCHLD:
+			reap_children = true;
+			break;
 		case SIGINT:
 		case SIGQUIT:
 		case SIGTERM:
@@ -291,7 +296,6 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, struct spxtcp_cfg *cfg,
 		close(tcps);
 	}
 
-	// TODO: handle this in the fork case!
 	if (!ipxw_mux_handle_is_error(ipxh)) {
 		ipxw_mux_unbind(ipxh);
 	}
@@ -710,9 +714,7 @@ static bool tcp_print_peer_addr(int sock)
 		return false;
 	}
 
-	char addr_str_buf[INET6_ADDRSTRLEN + 2 + 1] = { 0 }; /* +2 for
-								brackets, +1
-								for \0 */
+	char addr_str_buf[INET6_ADDRSTRLEN + 1] = { 0 }; /* +1 for \0 */
 	__be16 port = 0;
 	if (!sockaddr_to_str_and_port((struct sockaddr *) &sin, sin_len,
 				addr_str_buf, &port)) {
@@ -725,6 +727,30 @@ static bool tcp_print_peer_addr(int sock)
 
 static struct ipxw_mux_spx_handle spxh_candidate = ipxw_mux_spx_handle_init;
 static int tcps_candidate = -1;
+
+static void do_fork(int epoll_fd, struct spxtcp_cfg *cfg)
+{
+	assert(!ipxw_mux_spx_handle_is_error(spxh_candidate));
+	assert(tcps_candidate != -1);
+
+	pid_t child_pid = fork();
+	if (child_pid == 0) {
+		/* child */
+		do_spx_to_tcp(epoll_fd, cfg, spxh_candidate, tcps_candidate);
+		assert(0);
+	}
+
+	if (child_pid < 0) {
+		perror("fork");
+	}
+
+	/* reset candidates in case of fork */
+	ipxw_mux_spx_handle_close(&spxh_candidate);
+	struct ipxw_mux_spx_handle spxh_reset = ipxw_mux_spx_handle_init;
+	spxh_candidate = spxh_reset;
+	close(tcps_candidate);
+	tcps_candidate = -1;
+}
 
 static void handle_new_incoming_spx_connection(int epoll_fd, struct spxtcp_cfg
 		*cfg, struct ipxw_mux_spx_handle spxh_new)
@@ -779,12 +805,7 @@ static void handle_new_incoming_spx_connection(int epoll_fd, struct spxtcp_cfg
 		spxh_candidate = spxh_new;
 	}
 
-	assert(!ipxw_mux_spx_handle_is_error(spxh_candidate));
-	assert(tcps_candidate != -1);
-
-	do_spx_to_tcp(epoll_fd, cfg, spxh_candidate, tcps_candidate);
-	// TODO: reset candidates in case of fork
-	assert(0);
+	do_fork(epoll_fd, cfg);
 }
 
 static void handle_new_incoming_tcp_connection(int epoll_fd, struct spxtcp_cfg
@@ -831,12 +852,7 @@ static void handle_new_incoming_tcp_connection(int epoll_fd, struct spxtcp_cfg
 		tcps_candidate = tcps_new;
 	}
 
-	assert(!ipxw_mux_spx_handle_is_error(spxh_candidate));
-	assert(tcps_candidate != -1);
-
-	do_spx_to_tcp(epoll_fd, cfg, spxh_candidate, tcps_candidate);
-	// TODO: reset candidates in case of fork
-	assert(0);
+	do_fork(epoll_fd, cfg);
 }
 
 static void originate_tcp_and_spx_connection(int epoll_fd, struct spxtcp_cfg
@@ -897,6 +913,34 @@ static void originate_tcp_and_spx_connection(int epoll_fd, struct spxtcp_cfg
 	if (!ipxw_mux_spx_handle_is_error(spxh_new)) {
 		ipxw_mux_spx_conn_close(&spxh_new);
 	}
+}
+
+static int tcp_accept(struct spxtcp_cfg *cfg)
+{
+	union {
+		struct sockaddr_in sin4;
+		struct sockaddr_in6 sin6;
+	} sin;
+	socklen_t sin_len = sizeof(sin);
+
+	int ret = accept(tcpa, (struct sockaddr *) &sin, &sin_len);
+	if (ret < 0) {
+		return -1;
+	}
+
+	if (cfg->verbose) {
+		char addr_str_buf[INET6_ADDRSTRLEN + 1] = { 0 }; /* +1 for \0 */
+		__be16 port = 0;
+		if (!sockaddr_to_str_and_port((struct sockaddr *) &sin,
+					sin_len, addr_str_buf, &port)) {
+			return ret;
+		}
+
+		fprintf(stderr, "accepted TCP connection from %s:%hu\n",
+				addr_str_buf, ntohs(port));
+	}
+
+	return ret;
 }
 
 static struct ipxw_mux_spx_handle spx_accept(struct spxtcp_cfg *cfg)
@@ -965,6 +1009,32 @@ static struct ipxw_mux_spx_handle spx_accept(struct spxtcp_cfg *cfg)
 	return ret;
 }
 
+static void print_child_status(pid_t child_pid, int wstatus)
+{
+	if (WIFEXITED(wstatus)) {
+		fprintf(stderr, "%d exited, status=%d\n",
+				child_pid,
+				WEXITSTATUS(wstatus));
+	} else if (WIFSIGNALED(wstatus)) {
+		fprintf(stderr, "%d killed by signal %d\n",
+				child_pid, WTERMSIG(wstatus));
+	} else if (WIFSTOPPED(wstatus)) {
+		fprintf(stderr, "%d stopped by signal %d\n",
+				child_pid, WSTOPSIG(wstatus));
+	}
+}
+
+static void do_reap_children(struct spxtcp_cfg *cfg)
+{
+	int wstatus;
+	pid_t child_pid;
+	while ((child_pid  = waitpid(-1, &wstatus, WNOHANG)) > 0) {
+		if (cfg->verbose) {
+			print_child_status(child_pid, wstatus);
+		}
+	}
+}
+
 // TODO: if listening on both SPX and TCP, the SPX connection is not maintained
 // while waiting for the TCP connection, this causes the size negotiation to
 // fail
@@ -988,7 +1058,8 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 	sig_act.sa_handler = signal_handler;
 	if (sigaction(SIGINT, &sig_act, NULL) < 0
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
-			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
+			|| sigaction(SIGTERM, &sig_act, NULL) < 0
+			|| sigaction(SIGCHLD, &sig_act, NULL) < 0) {
 		perror("setting up signal handler");
 		cleanup_and_exit(epoll_fd, cfg, SPXTCP_ERR_SIG_HANDLER);
 	}
@@ -1081,6 +1152,10 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 	/* wait for necessary incoming connections */
 	struct epoll_event evs[MAX_EPOLL_EVENTS];
 	while (keep_going) {
+		if (reap_children) {
+			do_reap_children(cfg);
+			reap_children = false;
+		}
 
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
@@ -1122,12 +1197,11 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 				}
 
 				/* accept TCP connection */
-				int tcps_new = accept(tcpa, NULL, NULL);
+				int tcps_new = tcp_accept(cfg);
 				if (tcps_new < 0) {
 					perror("TCP accept");
 					continue;
 				}
-				// TODO: print connection peer
 				handle_new_incoming_tcp_connection(epoll_fd,
 						cfg, tcps_new);
 
