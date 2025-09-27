@@ -444,9 +444,11 @@ static _Noreturn void do_spx_to_tcp(int epoll_fd, struct spxtcp_cfg *cfg,
 	close(tcpa);
 	tcpa = -1;
 
-	/* close old epoll_fd handle */
+	/* close old epoll_fd and tmr_fd handles */
 	close(epoll_fd);
 	epoll_fd = -1;
+	close(tmr_fd);
+	tmr_fd = -1;
 
 	/* connected handles must be ready */
 	assert(!ipxw_mux_spx_handle_is_error(spxh_new));
@@ -494,7 +496,9 @@ static _Noreturn void do_spx_to_tcp(int epoll_fd, struct spxtcp_cfg *cfg,
 	}
 
 	/* register TCP socket for reception */
-	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	/* there may already be preexisting messages from the candidate SPX
+	 * connection, hence we need to be ready to send them immediately */
+	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
 	ev.data.fd = tcps;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, tcps, &ev) < 0) {
 		perror("registering TCP socket for event polling");
@@ -725,6 +729,20 @@ static bool tcp_print_peer_addr(int sock)
 static struct ipxw_mux_spx_handle spxh_candidate = ipxw_mux_spx_handle_init;
 static int tcps_candidate = -1;
 
+static void close_spx_candidate(void)
+{
+	ipxw_mux_spx_handle_close(&spxh_candidate);
+	struct ipxw_mux_spx_handle spxh_reset = ipxw_mux_spx_handle_init;
+	spxh_candidate = spxh_reset;
+
+	/* remove whatever messages the candidate SPX connection received */
+	while (!counted_msg_queue_empty(&spx_to_tcp_queue)) {
+		struct ipxw_mux_msg *msg =
+			counted_msg_queue_pop(&spx_to_tcp_queue);
+		free(msg);
+	}
+}
+
 static void do_fork(int epoll_fd, struct spxtcp_cfg *cfg)
 {
 	assert(!ipxw_mux_spx_handle_is_error(spxh_candidate));
@@ -737,14 +755,14 @@ static void do_fork(int epoll_fd, struct spxtcp_cfg *cfg)
 		assert(0);
 	}
 
+	/* parent */
+
 	if (child_pid < 0) {
 		perror("fork");
 	}
 
 	/* reset candidates in case of fork */
-	ipxw_mux_spx_handle_close(&spxh_candidate);
-	struct ipxw_mux_spx_handle spxh_reset = ipxw_mux_spx_handle_init;
-	spxh_candidate = spxh_reset;
+	close_spx_candidate();
 	close(tcps_candidate);
 	tcps_candidate = -1;
 }
@@ -1006,6 +1024,79 @@ static struct ipxw_mux_spx_handle spx_accept(struct spxtcp_cfg *cfg)
 	return ret;
 }
 
+static bool spx_candidate_recv_loop(struct spxtcp_cfg *cfg)
+{
+	while (true) {
+		/* cannot receive right now */
+		if (!ipxw_mux_spx_recv_ready(spxh_candidate)) {
+			return true;
+		}
+
+		/* SPX message received */
+		ssize_t expected_msg_len =
+			ipxw_mux_spx_peek_recvd_len(spxh_candidate, false);
+		if (expected_msg_len < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				return true;
+			}
+
+			return false;
+		}
+
+		if (counted_msg_queue_nitems(&spx_to_tcp_queue) >
+				cfg->spx_to_tcp_queue_pause_threshold) {
+			return true;
+		}
+
+		struct ipxw_mux_spx_msg *msg = calloc(1, expected_msg_len);
+		if (msg == NULL) {
+			return false;
+		}
+
+		size_t expected_data_len =
+			ipxw_mux_spx_data_len(expected_msg_len,
+					ipxw_mux_spx_handle_is_spxii(spxh_candidate));
+		ssize_t rcvd_len = ipxw_mux_spx_get_recvd(spxh_candidate, msg,
+				expected_data_len, false);
+		if (rcvd_len < 0) {
+			free(msg);
+			if (errno == EINTR) {
+				continue;
+			}
+
+			return false;
+		}
+
+		/* system msg */
+		if (rcvd_len == 0) {
+			free(msg);
+			continue;
+		}
+
+		size_t data_len = ipxw_mux_spx_data_len(rcvd_len,
+				ipxw_mux_spx_handle_is_spxii(spxh_candidate));
+		if (data_len == 0) {
+			free(msg);
+			continue;
+		}
+
+		/* queue the SPX message */
+		msg->mux_msg.recv.data_len = data_len;
+		msg->remote_alloc_no = 0; /* we reuse the remote_alloc_no field as a
+					     data pointer into our message to track how
+					     much we managed to actually send via TCP
+					     */
+		msg->mux_msg.recv.is_spx = 1;
+		counted_msg_queue_push(&spx_to_tcp_queue, &(msg->mux_msg));
+
+		return true;
+	}
+}
+
 static void print_child_status(pid_t child_pid, int wstatus)
 {
 	if (WIFEXITED(wstatus)) {
@@ -1032,9 +1123,6 @@ static void do_reap_children(struct spxtcp_cfg *cfg)
 	}
 }
 
-// TODO: if listening on both SPX and TCP, the SPX connection is not maintained
-// while waiting for the TCP connection, this causes the size negotiation to
-// fail
 static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 {
 	/* connected handles must be unused */
@@ -1047,6 +1135,13 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, cfg, SPXTCP_ERR_EPOLL_FD);
+	}
+
+	/* create connection maintenance timer */
+	tmr_fd = setup_timer(epoll_fd);
+	if (tmr_fd < 0) {
+		perror("creating maintenance timer");
+		cleanup_and_exit(epoll_fd, cfg, SPXTCP_ERR_TMR_FD);
 	}
 
 	/* register signal handlers */
@@ -1166,6 +1261,39 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 
 		int i;
 		for (i = 0; i < n_fds; i++) {
+			/* timer fd */
+			if (evs[i].data.fd == tmr_fd) {
+				/* something went wrong */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "timer fd error\n");
+					cleanup_and_exit(epoll_fd, cfg,
+							SPXTCP_ERR_TMR_FAILURE);
+				}
+
+				/* consume all expirations */
+				__u64 dummy;
+				read(tmr_fd, &dummy, sizeof(dummy));
+
+				/* no candidate connection to maintain */
+				if (ipxw_mux_spx_handle_is_error(spxh_candidate)) {
+					continue;
+				}
+
+				/* maintain the candidate SPX connection */
+				if (!ipxw_mux_spx_maintain(spxh_candidate)) {
+					perror("maintaining connection");
+					close_spx_candidate();
+					continue;
+				}
+				if (!spx_candidate_recv_loop(cfg)) {
+					perror("maintaining connection");
+					close_spx_candidate();
+					continue;
+				}
+
+				continue;
+			}
+
 			/* IPX conf socket */
 			if (evs[i].data.fd == ipxw_mux_handle_conf(ipxh)) {
 				/* something went wrong */
