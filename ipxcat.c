@@ -932,6 +932,10 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 							IPXCAT_ERR_TMR_FAILURE);
 				}
 
+				/* consume all expirations */
+				__u64 dummy;
+				read(tmr_fd, &dummy, sizeof(dummy));
+
 				/* no SPX connection, do nothing */
 				if (ipxw_mux_spx_handle_is_error(spxh)) {
 					continue;
@@ -943,10 +947,6 @@ static _Noreturn void do_ipxcat(struct ipxcat_cfg *cfg, int epoll_fd, int
 					cleanup_and_exit(epoll_fd, tmr_fd, cfg,
 							IPXCAT_ERR_SPX_MAINT);
 				}
-
-				/* consume all expirations */
-				__u64 dummy;
-				read(tmr_fd, &dummy, sizeof(dummy));
 
 				continue;
 			}
