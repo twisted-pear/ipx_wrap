@@ -3,6 +3,7 @@
 *.ll
 *.o
 *.skel.h
+*.h~
 /ipx_wrap_if_config
 /ipx_wrap_ifd
 /ipx_wrap_ripd

@@ -27,13 +27,15 @@ MUX_LIBS = -lm
 all: $(MUX_TARGETS) $(USER_TARGETS) $(IFD_TARGETS) $(BPF_OBJ) $(MUXER_TARGETS) $(SERVICE_TARGETS)
 
 vmlinux.h: $(VMLINUX_H_PREREQ)
-	$(BPFT) btf dump file $< format c > $@
+	$(BPFT) btf dump file $< format c > $@~
+	mv --force $@~ $@
 
 vmlinux.btf:
 	$(PAHOLE) --btf_encode_detached=$@
 
 %.skel.h: %.o vmlinux.h common.h
-	$(BPFT) gen skeleton $< > $@
+	$(BPFT) gen skeleton $< > $@~
+	mv --force $@~ $@
 
 $(BPF_OBJ): %.o: %.c vmlinux.h common.h ipx_wrap_common_kern.h ipx_wrap_common_proto.h
 	$(CLANG) -S \
@@ -72,6 +74,6 @@ $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ip
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
 
 clean:
-	rm -f *.o *.ll *.skel.h $(USER_TARGETS) $(IFD_TARGETS) $(MUX_TARGETS) $(MUXER_TARGETS) $(SERVICE_TARGETS) vmlinux.h vmlinux.btf
+	rm -f *.o *.ll *.skel.h *.h~ $(USER_TARGETS) $(IFD_TARGETS) $(MUX_TARGETS) $(MUXER_TARGETS) $(SERVICE_TARGETS) vmlinux.h vmlinux.btf
 
 .PHONY: all clean
