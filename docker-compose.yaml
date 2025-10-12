@@ -1,6 +1,7 @@
 x-ipx-host: &service-ipx-host
   image: ipx-host
   tty: true
+  init: true
   pull_policy: build
   build:
     context: .
@@ -32,7 +33,7 @@ services:
   ipxhost001:
     <<: *service-ipx-host
     container_name: ipxhost001
-    command: /bin/sh -c "./setup_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1 && sleep infinity"
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
     networks:
       ipxnet_001_to_002:
         mac_address: 00:ad:de:ad:01:01
@@ -43,7 +44,7 @@ services:
   ipxhost002:
     <<: *service-ipx-host
     container_name: ipxhost002
-    command: /bin/sh -c "./setup_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1 && sleep infinity"
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
     networks:
       ipxnet_001_to_002:
         mac_address: 00:ad:de:ad:01:02
@@ -54,7 +55,7 @@ services:
   ipxhost003:
     <<: *service-ipx-host
     container_name: ipxhost003
-    command: /bin/sh -c "./setup_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1 && sleep infinity"
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
     networks:
       ipxnet_002_to_003:
         mac_address: 00:ad:de:ad:02:02
@@ -62,6 +63,14 @@ services:
       ipxnet_right:
         mac_address: 00:ad:de:ad:05:01
         ipv6_address: fdaa:bbbb:0000:0005:00ad:deff:fead:0501
+  ipxhost004:
+    <<: *service-ipx-host
+    container_name: ipxhost004
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    networks:
+      ipxnet_001_to_002:
+        mac_address: 00:ad:de:ad:01:04
+        ipv6_address: fdaa:bbbb:0000:0001:00ad:deff:fead:0104
 
 networks:
   ipxnet_001_to_002:
