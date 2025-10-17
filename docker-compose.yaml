@@ -50,19 +50,19 @@ services:
         mac_address: 00:ad:de:ad:01:02
         ipv6_address: fdaa:bbbb:0000:0001:00ad:deff:fead:0102
       ipxnet_002_to_003:
-        mac_address: 00:ad:de:ad:02:01
-        ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0201
+        mac_address: 00:ad:de:ad:02:02
+        ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0202
   ipxhost003:
     <<: *service-ipx-host
     container_name: ipxhost003
     command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
     networks:
       ipxnet_002_to_003:
-        mac_address: 00:ad:de:ad:02:02
-        ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0202
+        mac_address: 00:ad:de:ad:02:03
+        ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0203
       ipxnet_right:
-        mac_address: 00:ad:de:ad:05:01
-        ipv6_address: fdaa:bbbb:0000:0005:00ad:deff:fead:0501
+        mac_address: 00:ad:de:ad:05:03
+        ipv6_address: fdaa:bbbb:0000:0005:00ad:deff:fead:0503
   ipxhost004:
     <<: *service-ipx-host
     container_name: ipxhost004
