@@ -543,13 +543,6 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			return TC_ACT_SHOT;
 		}
 
-		/* mark the packet for our SK_SKB_VERDICT program */
-		if (spx_state == NULL) {
-			CB_INFO(skb)->mark = IPX_ACCEPTED_IPX_PKT;
-		} else {
-			CB_INFO(skb)->mark = IPX_ACCEPTED_SPX_PKT;
-		}
-
 		return TC_ACT_OK;
 	}
 
@@ -864,6 +857,10 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	struct ethhdr *eth;
 	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
 		return TC_ACT_SHOT;
+	}
+	/* packet already is a proper IPX packet, just allow it through */
+	if (bpf_ntohs(eth->h_proto) == ETH_P_IPX) {
+		return TC_ACT_UNSPEC;
 	}
 	if (bpf_ntohs(eth->h_proto) != ETH_P_IPV6) {
 		return TC_ACT_SHOT;

@@ -92,7 +92,5 @@ _Static_assert(sizeof(struct bpf_cb_info) == (sizeof(__u32) * 5),
 #define IPX_TO_IPV6_REINJECT_MARK 0x47744701
 #define IPX_TO_IPV6UDP_REINJECT_MARK 0x47744702
 #define IPX_SPX_REFLECTED_ACK 0x47744703
-#define IPX_ACCEPTED_IPX_PKT 0x47744704
-#define IPX_ACCEPTED_SPX_PKT 0x47744705
 
 #endif /* __COMMON_H__ */
