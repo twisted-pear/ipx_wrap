@@ -37,7 +37,7 @@ trap 'cleanup_subprocesses' EXIT INT QUIT TERM
 
 "${IPX_WRAP_DIR}/ipx_wrap_mux" "0x${IPX_PREFIX}" &
 MUX_PID="$!"
-sleep 2
+sleep 5
 
 ip -6 -o addr | grep "inet6 ${IPV6_PREFIX}:" | while read IFLINE; do
 	IFACE=`echo "${IFLINE}" | cut -d ' ' -f 2`
