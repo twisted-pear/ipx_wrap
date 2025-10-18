@@ -345,10 +345,12 @@ static void tcp_recv_loop(int epoll_fd, struct spxtcp_cfg *cfg)
 					SPXTCP_ERR_TCP_FAILURE);
 		}
 
-		/* nothing to read */
+		/* connection closed */
 		if (data_len == 0) {
 			free(msg);
-			return;
+			fprintf(stderr, "TCP connection closed\n");
+			cleanup_and_exit(epoll_fd, cfg,
+					SPXTCP_ERR_TCP_FAILURE);
 		}
 
 		/* queue received message */
