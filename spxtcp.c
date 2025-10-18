@@ -71,6 +71,7 @@ static struct counted_msg_queue tcp_to_spx_queue = counted_msg_queue_init(tcp_to
 /* connected handles */
 static struct ipxw_mux_spx_handle spxh = ipxw_mux_spx_handle_init;
 static int tcps = -1;
+static bool tcps_disconnected = false;
 
 /* unconnected handles */
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
@@ -131,7 +132,7 @@ static bool queue_spx_msg(int epoll_fd, struct ipxw_mux_spx_msg *msg, size_t
 	/* reregister for ready-to-write events on the TCP socket, now that
 	 * messages are available */
 	struct epoll_event ev = {
-		.events = EPOLLOUT | EPOLLIN | EPOLLERR | EPOLLHUP,
+		.events = EPOLLOUT | EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP,
 		.data.fd = tcps
 	};
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, tcps, &ev) < 0) {
@@ -221,7 +222,7 @@ static bool send_out_tcp_msg(int epoll_fd)
 		/* unregister TCP socket from ready-to-write events to avoid
 		 * busy polling */
 		struct epoll_event ev = {
-			.events = EPOLLIN | EPOLLERR | EPOLLHUP,
+			.events = EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP,
 			.data.fd = tcps
 		};
 		epoll_ctl(epoll_fd, EPOLL_CTL_MOD, tcps, &ev);
@@ -336,8 +337,10 @@ static void tcp_recv_loop(int epoll_fd, struct spxtcp_cfg *cfg)
 				continue;
 			}
 
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				return;
+			if (!tcps_disconnected) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					return;
+				}
 			}
 
 			perror("TCP receive");
@@ -348,6 +351,13 @@ static void tcp_recv_loop(int epoll_fd, struct spxtcp_cfg *cfg)
 		/* nothing to read */
 		if (data_len == 0) {
 			free(msg);
+
+			if (tcps_disconnected) {
+				fprintf(stderr, "TCP connection closed\n");
+				cleanup_and_exit(epoll_fd, cfg,
+						SPXTCP_ERR_TCP_FAILURE);
+			}
+
 			return;
 		}
 
@@ -498,7 +508,7 @@ static _Noreturn void do_spx_to_tcp(int epoll_fd, struct spxtcp_cfg *cfg,
 	/* register TCP socket for reception */
 	/* there may already be preexisting messages from the candidate SPX
 	 * connection, hence we need to be ready to send them immediately */
-	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
+	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
 	ev.data.fd = tcps;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, tcps, &ev) < 0) {
 		perror("registering TCP socket for event polling");
@@ -552,6 +562,10 @@ static _Noreturn void do_spx_to_tcp(int epoll_fd, struct spxtcp_cfg *cfg,
 					fprintf(stderr, "TCP socket error\n");
 					cleanup_and_exit(epoll_fd, cfg,
 							SPXTCP_ERR_TCP_FAILURE);
+				}
+
+				if (evs[i].events & EPOLLRDHUP) {
+					tcps_disconnected = true;
 				}
 
 				/* can write to TCP socket */
