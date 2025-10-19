@@ -548,14 +548,6 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 			break;
 		}
 
-		// TODO: remove
-		printf("Nonce: ");
-		int i;
-		for (i = 0; i < ntohs(rep->data_len); i++) {
-			printf("%hhx ", rep->data[i]);
-		}
-		printf("\n");
-
 		/* calculate response to server's challenge */
 		__u8 pw_hash[MD5_DIGEST_LENGTH + RCON_NONCE_LEN];
 		MD5((const unsigned char *) password, strlen(password),
@@ -641,7 +633,13 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 
 		/* message received */
 		if ((ev & RCONCL_EVENT_MSG) != 0) {
-			fprintf(stderr, "message received\n");
+			struct ipxw_mux_spx_msg *msg = rcon_reply_pop();
+			if (msg == NULL) {
+				fprintf(stderr, "invalid message received\n");
+			} else {
+				// TODO: actually handle the message
+				free(msg);
+			}
 		}
 
 		/* stdin */
@@ -755,6 +753,8 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg, char *password)
 		fprintf(stderr, "Authentication failed!\n");
 		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_AUTH);
 	}
+
+	printf("Authenticated!\n");
 
 	// TODO: handle screen list
 
