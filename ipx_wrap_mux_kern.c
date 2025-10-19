@@ -176,6 +176,7 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
 	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
 		0;
+	bool spxii = (spxh->connection_control & SPX_CC_SPXII) != 0;
 	__u8 datastream_type = spxh->datastream_type;
 
 	/* check if the packet fits with our connection state */
@@ -201,8 +202,11 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 		__u16 next_seq;
 		__builtin_add_overflow(cur_seq, 1, &next_seq);
 
-		if (cur_seq != spx_state->remote_expected_sequence && next_seq
-				!= spx_state->remote_expected_sequence) {
+		if (spxii && cur_seq == 0) {
+			/* special case for SPXII acks, do nothing */
+		} else if (cur_seq != spx_state->remote_expected_sequence &&
+				next_seq !=
+				spx_state->remote_expected_sequence) {
 			return SPX_DROP;
 		}
 	} else {
@@ -689,6 +693,9 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 		spxh->connection_control = SPX_CC_SYSTEM_PKT;
 		if (cb_info->is_spxii) {
+			/* special case for SPXII acks */
+			spxh->seq_no = bpf_htons(0);
+
 			/* fill in the negotiate size header */
 			if (have_negotiate_size_hdr) {
 				spx_msg->spxii_negotiate_size_h.negotiation_size
@@ -739,6 +746,11 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 
 	/* allow sending ACK packets */
 	if (ack) {
+		/* special case for SPXII acks */
+		if (spxii) {
+			spxh->seq_no = bpf_htons(0);
+		}
+
 		spxh->connection_control |= SPX_CC_SYSTEM_PKT;
 		spxh->datastream_type = SPX_DS_NONE;
 		if (datastream_type == SPX_DS_END_OF_CONN_ACK) {
