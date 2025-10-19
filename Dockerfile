@@ -1,6 +1,6 @@
 FROM debian:trixie
 RUN apt update && apt upgrade -y
-RUN apt install -y build-essential libcap-dev bpftool libbpf-dev clang llvm libc6-dev-i386 iproute2 ethtool
+RUN apt install -y build-essential libcap-dev bpftool libbpf-dev clang llvm libc6-dev-i386 libssl-dev iproute2 ethtool
 RUN apt install -y iputils-ping tcpdump procps netcat-openbsd
 RUN apt install -y openssh-server openssh-client
 RUN useradd -u 1000 -m -s /bin/bash ipxuser

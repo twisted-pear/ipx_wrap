@@ -15,6 +15,7 @@
 /spxinetd
 /ipxping
 /spxtcp
+/rconcl
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests

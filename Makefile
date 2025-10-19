@@ -10,6 +10,7 @@ VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/
 USER_TARGETS = ipx_wrap_if_config
 IFD_TARGETS = ipx_wrap_ifd
 MUX_TARGETS = ipxcat ipxdiag spxinetd ipxping spxtcp
+RCON_TARGETS = rconcl
 SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd ipx_wrap_pongd
 MUXER_TARGETS = ipx_wrap_mux
 BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o
@@ -23,8 +24,9 @@ BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap -lbpf
 MUX_LIBS = -lm
+RCON_LIBS = -lcrypto
 
-all: $(MUX_TARGETS) $(USER_TARGETS) $(IFD_TARGETS) $(BPF_OBJ) $(MUXER_TARGETS) $(SERVICE_TARGETS)
+all: $(MUX_TARGETS) $(RCON_TARGETS) $(USER_TARGETS) $(IFD_TARGETS) $(BPF_OBJ) $(MUXER_TARGETS) $(SERVICE_TARGETS)
 
 vmlinux.h: $(VMLINUX_H_PREREQ)
 	$(BPFT) btf dump file $< format c > $@~
@@ -69,6 +71,9 @@ $(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_
 
 $(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(MUX_LIBS)
+
+$(RCON_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
+	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(RCON_LIBS)
 
 $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
