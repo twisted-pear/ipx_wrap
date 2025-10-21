@@ -421,6 +421,39 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 	return RCONCL_EVENT_EXIT;
 }
 
+static int rcon_data_next_int(__u8 *data, __u16 len, __u16 start, __s32 *out) {
+	if (start >= len) {
+		return -1;
+	}
+	if (len - start < 4) {
+		return -1;
+	}
+
+	*out = (__s32)((data[start] << 24) | (data[start+1] << 16) |
+			(data[start+2] << 8) | data[start+3]);
+	return start + 4;
+}
+
+static int rcon_data_next_str(__u8 *data, __u16 len, __u16 start, char **out) {
+	if (start >= len) {
+		return -1;
+	}
+
+	int nstr_len = strnlen((char *) (data + start), len - start);
+	char *nstr = malloc(nstr_len + 1);
+	if (nstr == NULL) {
+		return -1;
+	}
+	memcpy(nstr, data + start, nstr_len);
+	nstr[nstr_len] = '\0';
+
+	*out = nstr;
+
+	/* +1 for the \0, if that doesn't exist, the next call to
+	 * rcon_data_next_* will just fail */
+	return start + nstr_len + 1;
+}
+
 static struct ipxw_mux_spx_msg *rcon_prepare_request(__u16 data_len, __u16
 		code, __u32 screen_id)
 {
@@ -502,23 +535,28 @@ static struct ipxw_mux_spx_msg *rcon_reply_pop(void)
 	struct ipxw_mux_msg *msg = counted_msg_queue_pop(&rx_queue);
 	struct ipxw_mux_spx_msg *spx_msg = (struct ipxw_mux_spx_msg *) msg;
 
-	if (msg->recv.data_len < sizeof(struct rcon_reply)) {
-		return NULL;
-	}
+	do {
+		if (msg->recv.data_len < sizeof(struct rcon_reply)) {
+			break;
+		}
 
-	struct rcon_reply *rep = (struct rcon_reply *)
-		ipxw_mux_spx_msg_data(spx_msg);
+		struct rcon_reply *rep = (struct rcon_reply *)
+			ipxw_mux_spx_msg_data(spx_msg);
 
-	if (ntohs(rep->code) <= RCON_REPLY_MIN || ntohs(rep->code) >=
-			RCON_REPLY_MAX) {
-		return NULL;
-	}
-	if (ntohs(rep->data_len) != msg->recv.data_len - sizeof(struct
-				rcon_reply)) {
-		return NULL;
-	}
+		if (ntohs(rep->code) <= RCON_REPLY_MIN || ntohs(rep->code) >=
+				RCON_REPLY_MAX) {
+			break;
+		}
+		if (ntohs(rep->data_len) != msg->recv.data_len - sizeof(struct
+					rcon_reply)) {
+			break;
+		}
 
-	return spx_msg;
+		return spx_msg;
+	} while (0);
+
+	free(msg);
+	return NULL;
 }
 
 static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password)
@@ -623,6 +661,57 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 		free(msg);
 	}
 
+	return false;
+}
+
+static bool rcon_print_screenlist(int epoll_fd, struct rconcl_cfg *cfg)
+{
+	/* wait for screen list and print it */
+
+	if ((wait_for_event(epoll_fd, cfg) & RCONCL_EVENT_MSG) == 0) {
+		return false;
+	}
+
+	struct ipxw_mux_spx_msg *msg = rcon_reply_pop();
+	if (msg == NULL) {
+		return false;
+	}
+
+	struct rcon_reply *rep = (struct rcon_reply *)
+		ipxw_mux_spx_msg_data(msg);
+	if (ntohs(rep->code) != RCON_REPLY_SCREENLIST) {
+		free(msg);
+		return false;
+	}
+
+	printf("Screen List:\n");
+
+	int pos = 0;
+	while (true) {
+		__s32 screen_id;
+		char *screen_name;
+
+		pos = rcon_data_next_int(rep->data,
+				ntohs(rep->data_len), pos, &screen_id);
+		/* no more screens, exit */
+		if (pos < 0) {
+			free(msg);
+			return true;
+		}
+
+		pos = rcon_data_next_str(rep->data,
+				ntohs(rep->data_len), pos,
+				&screen_name);
+		/* screen ID but no screen name, error */
+		if (pos < 0) {
+			break;
+		}
+
+		printf("%08x: %s\n", screen_id, screen_name);
+		free(screen_name);
+	}
+
+	free(msg);
 	return false;
 }
 
@@ -745,6 +834,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg, char *password)
 		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_SPX_FD);
 	}
 
+	/* authenticate */
 	bool auth_succeeded = rcon_auth(epoll_fd, cfg, password);
 	/* destroy password, as it is no longer needed */
 	memset(password, 0, strlen(password));
@@ -756,7 +846,11 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg, char *password)
 
 	printf("Authenticated!\n");
 
-	// TODO: handle screen list
+	/* show screen list */
+	if (!rcon_print_screenlist(epoll_fd, cfg)) {
+		fprintf(stderr, "Failed to fetch screen list!\n");
+		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
+	}
 
 	/* register stdin for reading */
 	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;

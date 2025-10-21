@@ -79,6 +79,6 @@ $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ip
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
 
 clean:
-	rm -f *.o *.ll *.skel.h *.h~ $(USER_TARGETS) $(IFD_TARGETS) $(MUX_TARGETS) $(MUXER_TARGETS) $(SERVICE_TARGETS) vmlinux.h vmlinux.btf
+	rm -f *.o *.ll *.skel.h *.h~ $(USER_TARGETS) $(IFD_TARGETS) $(MUX_TARGETS) $(RCON_TARGETS) $(MUXER_TARGETS) $(SERVICE_TARGETS) vmlinux.h vmlinux.btf
 
 .PHONY: all clean
