@@ -1,9 +1,11 @@
 #include <assert.h>
+#include <menu.h>
 #include <ncurses.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
+#include <sys/queue.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -98,6 +100,17 @@ struct rcon_reply {
 	__be32 screen_id;
 	__u8 data[0];
 };
+
+struct rcon_screen {
+	__be32 screen_id;
+	char *screen_name;
+	ITEM *menu_item;
+	TAILQ_ENTRY(rcon_screen) list_entry;
+};
+
+TAILQ_HEAD(rcon_screen_list, rcon_screen);
+
+struct rcon_screen_list screen_list = TAILQ_HEAD_INITIALIZER(screen_list);
 
 #define RCON_NONCE_LEN 4
 
@@ -218,9 +231,106 @@ static bool send_out_spx_msg(int epoll_fd)
 	return (err >= 0);
 }
 
+static MENU *screen_menu = NULL;
+
+static bool in_screen_menu(void)
+{
+	return screen_menu != NULL;
+}
+
+static void unpost_screen_menu(void)
+{
+	if (screen_menu == NULL) {
+		return;
+	}
+
+	unpost_menu(screen_menu);
+
+	ITEM **screen_items = menu_items(screen_menu);
+	ITEM *exit_item = NULL;
+
+	int n_items = item_count(screen_menu);
+	if (n_items > 0) {
+		exit_item = screen_items[n_items - 1];
+	}
+
+	free_menu(screen_menu);
+	free(screen_items);
+	free(exit_item);
+
+	screen_menu = NULL;
+
+	echo();
+}
+
+static bool post_screen_menu(void)
+{
+	if (screen_menu != NULL) {
+		return false;
+	}
+
+	ITEM **screen_items = NULL;
+
+	/* insert all screens */
+	struct rcon_screen *sc;
+	size_t i = 0;
+	TAILQ_FOREACH(sc, &screen_list, list_entry) {
+		ITEM **screen_items_new = reallocarray(screen_items, i + 1, sizeof(ITEM *));
+		if (screen_items_new == NULL) {
+			free(screen_items);
+			return false;
+		}
+		screen_items = screen_items_new;
+		screen_items[i] = sc->menu_item;
+
+		i++;
+	}
+
+	ITEM **screen_items_new = reallocarray(screen_items, i + 2, sizeof(ITEM *));
+	if (screen_items_new == NULL) {
+		free(screen_items);
+		return false;
+	}
+	screen_items = screen_items_new;
+
+	/* insert the "exit" menu item */
+	screen_items[i] = new_item("Exit", NULL);
+	if (screen_items[i] == NULL) {
+		free(screen_items);
+		return false;
+	}
+	set_item_userptr(screen_items[i], NULL);
+
+	/* insert the terminating NULL */
+	screen_items[i + 1] = NULL;
+
+	screen_menu = new_menu(screen_items);
+	if (screen_menu == NULL) {
+		free(screen_items);
+		return false;
+	}
+
+	if (post_menu(screen_menu) != E_OK) {
+		free_menu(screen_menu);
+		free(screen_items);
+		screen_menu = NULL;
+
+		return false;
+	}
+
+	noecho();
+
+	return true;
+}
+
 static void init_ui(void)
 {
 	initscr();
+}
+
+static void cleanup_ui(void)
+{
+	unpost_screen_menu();
 }
 
 static bool config_ui(void)
@@ -259,9 +369,15 @@ static void enter_ui(void)
 	refresh();
 }
 
+static void rcon_empty_screenlist(void);
+
 static _Noreturn void cleanup_and_exit(int epoll_fd, struct rconcl_cfg *cfg,
 		enum rconcl_error_codes code)
 {
+	cleanup_ui();
+
+	rcon_empty_screenlist();
+
 	if (!isendwin()) {
 		endwin();
 	}
@@ -724,9 +840,96 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 	return false;
 }
 
-static bool rcon_print_screenlist(int epoll_fd, struct rconcl_cfg *cfg)
+static void rcon_free_screen(struct rcon_screen *sc)
 {
-	/* wait for screen list and print it */
+	free_item(sc->menu_item);
+	free(sc->screen_name);
+	free(sc);
+}
+
+static struct rcon_screen *rcon_new_screen(__s32 id, char *name)
+{
+	struct rcon_screen *sc = malloc(sizeof(struct rcon_screen));
+	if (sc == NULL) {
+		return NULL;
+	}
+
+	ITEM *menu_item = new_item(name, NULL);
+	if (menu_item == NULL) {
+		free(sc);
+		return NULL;
+	}
+
+	sc->screen_id = htonl(id);
+	sc->screen_name = name;
+	sc->menu_item = menu_item;
+
+	set_item_userptr(menu_item, sc);
+
+	return sc;
+}
+
+static bool rcon_add_screen(__s32 id, char *name)
+{
+	struct rcon_screen *sc = rcon_new_screen(id, name);
+	if (sc == NULL) {
+		return false;
+	}
+
+	TAILQ_INSERT_TAIL(&screen_list, sc, list_entry);
+	return true;
+}
+
+static void rcon_empty_screenlist(void)
+{
+	while (!TAILQ_EMPTY(&screen_list)) {
+		struct rcon_screen *sc = TAILQ_FIRST(&screen_list);
+		TAILQ_REMOVE(&screen_list, sc, list_entry);
+		rcon_free_screen(sc);
+	}
+}
+
+static bool rcon_fill_screenlist(struct rcon_reply *rep)
+{
+	if (ntohs(rep->code) != RCON_REPLY_SCREENLIST) {
+		return false;
+	}
+
+	int pos = 0;
+	while (true) {
+		__s32 screen_id;
+		char *screen_name;
+
+		pos = rcon_data_next_int(rep->data,
+				ntohs(rep->data_len), pos, &screen_id);
+		/* no more screens, exit */
+		if (pos < 0) {
+			return true;
+		}
+
+		pos = rcon_data_next_str(rep->data,
+				ntohs(rep->data_len), pos,
+				&screen_name);
+		/* screen ID but no screen name, error */
+		if (pos < 0) {
+			break;
+		}
+
+		if (!rcon_add_screen(screen_id, screen_name)) {
+			free(screen_name);
+			break;
+		}
+	}
+
+	/* empty half-filled screen list in case of error */
+	rcon_empty_screenlist();
+
+	return false;
+}
+
+static bool rcon_handle_screenlist(int epoll_fd, struct rconcl_cfg *cfg)
+{
+	/* wait for screen list and process it */
 
 	if ((wait_for_event(epoll_fd, cfg) & RCONCL_EVENT_MSG) == 0) {
 		return false;
@@ -739,46 +942,73 @@ static bool rcon_print_screenlist(int epoll_fd, struct rconcl_cfg *cfg)
 
 	struct rcon_reply *rep = (struct rcon_reply *)
 		ipxw_mux_spx_msg_data(msg);
-	if (ntohs(rep->code) != RCON_REPLY_SCREENLIST) {
-		free(msg);
-		return false;
-	}
 
+	bool success = rcon_fill_screenlist(rep);
+	free(msg);
+
+	return success;
+}
+
+static void rcon_print_screenlist(void)
+{
 	printf("Screen List:\n");
 
-	int pos = 0;
-	while (true) {
-		__s32 screen_id;
-		char *screen_name;
+	struct rcon_screen *sc;
+	TAILQ_FOREACH(sc, &screen_list, list_entry) {
+		printf("%08x: %s\n", ntohl(sc->screen_id), sc->screen_name);
+	}
+}
 
-		pos = rcon_data_next_int(rep->data,
-				ntohs(rep->data_len), pos, &screen_id);
-		/* no more screens, exit */
-		if (pos < 0) {
-			free(msg);
-			return true;
-		}
-
-		pos = rcon_data_next_str(rep->data,
-				ntohs(rep->data_len), pos,
-				&screen_name);
-		/* screen ID but no screen name, error */
-		if (pos < 0) {
+static void handle_screen_menu_input(int c)
+{
+	switch (c) {
+		case KEY_DOWN:
+		case 'j':
+			menu_driver(screen_menu, REQ_DOWN_ITEM);
+			return;
+		case KEY_UP:
+		case 'k':
+			menu_driver(screen_menu, REQ_UP_ITEM);
+			return;
+		case KEY_ENTER:
+		case '\n':
+		case '\r':
 			break;
-		}
-
-		printf("%08x: %s\n", screen_id, screen_name);
-		free(screen_name);
+		default:
+			return;
 	}
 
-	free(msg);
-	return false;
+	ITEM *cur = current_item(screen_menu);
+	if (cur == NULL) {
+		return;
+	}
+
+	struct rcon_screen *sc = item_userptr(cur);
+
+	/* exit item selected */
+	if (sc == NULL) {
+		keep_going = false;
+		return;
+	}
+
+	// TODO: switch to the selected screen!
 }
 
 static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 {
+	clear();
+	if (!post_screen_menu()) {
+		return false;
+	}
+	refresh();
+
 	while (true) {
 		enum rconcl_event ev = wait_for_event(epoll_fd, cfg);
+
+		/* exit */
+		if ((ev & RCONCL_EVENT_EXIT) != 0) {
+			return true;
+		}
 
 		/* message received */
 		if ((ev & RCONCL_EVENT_MSG) != 0) {
@@ -793,12 +1023,17 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 
 		/* stdin */
 		if ((ev & RCONCL_EVENT_STDIN) != 0) {
-			fprintf(stderr, "stdin\n");
-		}
+			int c = ERR;
+			while (true) {
+				c = getch();
+				if (c == ERR) {
+					break;
+				}
 
-		/* stdin */
-		if ((ev & RCONCL_EVENT_EXIT) != 0) {
-			return true;
+				if (in_screen_menu()) {
+					handle_screen_menu_input(c);
+				}
+			}
 		}
 	}
 }
@@ -932,19 +1167,23 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 
 	printf("Authenticated!\n");
 
+	/* read screen list */
+	if (!rcon_handle_screenlist(epoll_fd, cfg)) {
+		leave_ui();
+		fprintf(stderr, "Failed to fetch screen list!\n");
+		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
+	}
+
+	if (cfg->verbose) {
+		rcon_print_screenlist();
+	}
+
 	/* enter the UI and set it up for use */
 	enter_ui();
 	if (!config_ui()) {
 		leave_ui();
 		fprintf(stderr, "failed to set up UI\n");
 		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_UI);
-	}
-
-	/* show screen list */
-	if (!rcon_print_screenlist(epoll_fd, cfg)) {
-		leave_ui();
-		fprintf(stderr, "Failed to fetch screen list!\n");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
 	}
 
 	/* register stdin for reading */

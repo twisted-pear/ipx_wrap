@@ -24,7 +24,7 @@ BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap -lbpf
 MUX_LIBS = -lm
-RCON_LIBS = -lcrypto -lncursesw
+RCON_LIBS = -lcrypto -lmenuw -lncursesw
 
 all: $(MUX_TARGETS) $(RCON_TARGETS) $(USER_TARGETS) $(IFD_TARGETS) $(BPF_OBJ) $(MUXER_TARGETS) $(SERVICE_TARGETS)
 
