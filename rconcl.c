@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <ncurses.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,8 @@
 
 #include "ipx_wrap_mux_proto.h"
 #include "ipx_wrap_helpers.h"
+
+#define MAX_PASSWORD_LEN 32
 
 #define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (1024)
 #define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (1024)
@@ -34,6 +37,8 @@ enum rconcl_error_codes {
 	RCONCL_ERR_MSG_QUEUE,
 	RCONCL_ERR_AUTH,
 	RCONCL_ERR_PROTO,
+	RCONCL_ERR_UI,
+	RCONCL_ERR_PASS,
 	RCONCL_ERR_MAX
 };
 
@@ -213,9 +218,54 @@ static bool send_out_spx_msg(int epoll_fd)
 	return (err >= 0);
 }
 
+static void init_ui(void)
+{
+	initscr();
+}
+
+static bool config_ui(void)
+{
+	do {
+		if (cbreak() == ERR) {
+			break;
+		}
+
+		if (nodelay(stdscr, true) == ERR) {
+			break;
+		}
+
+		if (keypad(stdscr, true) == ERR) {
+			break;
+		}
+
+		return true;
+	} while (0);
+
+	endwin();
+	return false;
+}
+
+static void leave_ui(void)
+{
+	if (!isendwin()) {
+		def_prog_mode();
+		endwin();
+	}
+}
+
+static void enter_ui(void)
+{
+	reset_prog_mode();
+	refresh();
+}
+
 static _Noreturn void cleanup_and_exit(int epoll_fd, struct rconcl_cfg *cfg,
 		enum rconcl_error_codes code)
 {
+	if (!isendwin()) {
+		endwin();
+	}
+
 	if (tmr_fd >= 0) {
 		close(tmr_fd);
 	}
@@ -261,6 +311,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 				return;
 			}
 
+			leave_ui();
 			perror("SPX receive peek");
 			cleanup_and_exit(epoll_fd, cfg,
 					RCONCL_ERR_SPX_FAILURE);
@@ -273,6 +324,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 
 		struct ipxw_mux_spx_msg *msg = calloc(1, expected_msg_len);
 		if (msg == NULL) {
+			leave_ui();
 			perror("allocating message");
 			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_MSG_ALLOC);
 		}
@@ -288,6 +340,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 				continue;
 			}
 
+			leave_ui();
 			perror("SPX receive");
 			cleanup_and_exit(epoll_fd, cfg,
 					RCONCL_ERR_SPX_FAILURE);
@@ -309,6 +362,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 		/* queue received message */
 		if (!queue_spx_msg(epoll_fd, msg, data_len)) {
 			free(msg);
+			leave_ui();
 			perror("queueing message");
 			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_MSG_QUEUE);
 		}
@@ -343,6 +397,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 				continue;
 			}
 
+			leave_ui();
 			perror("event polling");
 			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_EPOLL_WAIT);
 		}
@@ -353,6 +408,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 			if (evs[i].data.fd == tmr_fd) {
 				/* something went wrong */
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					leave_ui();
 					fprintf(stderr, "timer fd error\n");
 					cleanup_and_exit(epoll_fd, cfg,
 							RCONCL_ERR_TMR_FAILURE);
@@ -360,6 +416,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 
 				/* maintain the SPX connection */
 				if (!ipxw_mux_spx_maintain(spxh)) {
+					leave_ui();
 					perror("maintaining connection");
 					cleanup_and_exit(epoll_fd, cfg,
 							RCONCL_ERR_SPX_MAINT);
@@ -382,6 +439,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 
 			/* something went wrong */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+				leave_ui();
 				fprintf(stderr, "SPX socket error\n");
 				cleanup_and_exit(epoll_fd, cfg,
 						RCONCL_ERR_SPX_FAILURE);
@@ -390,6 +448,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 			/* can write to SPX socket */
 			if (evs[i].events & EPOLLOUT) {
 				if (!send_out_spx_msg(epoll_fd)) {
+					leave_ui();
 					perror("SPX send");
 					cleanup_and_exit(epoll_fd, cfg,
 							RCONCL_ERR_SPX_FAILURE);
@@ -572,7 +631,7 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 			break;
 		}
 
-		struct ipxw_mux_spx_msg *msg = rcon_reply_pop();
+		msg = rcon_reply_pop();
 		if (msg == NULL) {
 			break;
 		}
@@ -633,6 +692,7 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 		}
 
 		if (!rcon_request_push(epoll_fd, req_digest)) {
+			free(req_digest);
 			break;
 		}
 
@@ -743,9 +803,35 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 	}
 }
 
-static _Noreturn void do_rconcl(struct rconcl_cfg *cfg, char *password)
+static bool read_password(char *password)
+{
+	printw("Enter RCONSOLE password: ");
+	noecho();
+	int err = getnstr(password, MAX_PASSWORD_LEN);
+	password[MAX_PASSWORD_LEN] = '\0';
+	echo();
+
+	return err != ERR;
+}
+
+static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 {
 	/* initial setup */
+
+	/* prepare ncurses UI */
+	init_ui();
+
+	/* ask for password */
+	char password[MAX_PASSWORD_LEN + 1];
+	bool password_read = read_password(password);
+
+	/* leave ncurses UI for setup */
+	leave_ui();
+
+	if (!password_read) {
+		fprintf(stderr, "failed to read password\n");
+		cleanup_and_exit(-1, cfg, RCONCL_ERR_PASS);
+	}
 
 	int epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
@@ -846,8 +932,17 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg, char *password)
 
 	printf("Authenticated!\n");
 
+	/* enter the UI and set it up for use */
+	enter_ui();
+	if (!config_ui()) {
+		leave_ui();
+		fprintf(stderr, "failed to set up UI\n");
+		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_UI);
+	}
+
 	/* show screen list */
 	if (!rcon_print_screenlist(epoll_fd, cfg)) {
+		leave_ui();
 		fprintf(stderr, "Failed to fetch screen list!\n");
 		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
 	}
@@ -856,6 +951,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg, char *password)
 	ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
 	ev.data.fd = fileno(stdin);
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(stdin), &ev) < 0) {
+		leave_ui();
 		perror("registering STDIN for event polling");
 		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_STDIN_FD);
 	}
@@ -928,8 +1024,5 @@ int main(int argc, char **argv)
 		usage();
 	}
 
-	// TODO: ask for password
-	char password[] = "admin";
-
-	do_rconcl(&cfg, password);
+	do_rconcl(&cfg);
 }
