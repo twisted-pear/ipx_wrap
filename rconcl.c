@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <menu.h>
 #include <ncurses.h>
 #include <signal.h>
@@ -36,7 +37,7 @@ enum rconcl_error_codes {
 	RCONCL_ERR_SPX_MAINT,
 	RCONCL_ERR_CONNECT,
 	RCONCL_ERR_MSG_ALLOC,
-	RCONCL_ERR_MSG_QUEUE,
+	RCONCL_ERR_MSG_REASSEMBLE,
 	RCONCL_ERR_AUTH,
 	RCONCL_ERR_PROTO,
 	RCONCL_ERR_UI,
@@ -110,7 +111,9 @@ struct rcon_screen {
 
 TAILQ_HEAD(rcon_screen_list, rcon_screen);
 
-struct rcon_screen_list screen_list = TAILQ_HEAD_INITIALIZER(screen_list);
+#define CURRENT_SCREEN_NONE 0xFFFFFFFF
+static __be32 current_screen_id = CURRENT_SCREEN_NONE;
+static struct rcon_screen_list screen_list = TAILQ_HEAD_INITIALIZER(screen_list);
 
 #define RCON_NONCE_LEN 4
 
@@ -166,28 +169,6 @@ static int setup_timer(int epoll_fd)
 	}
 
 	return tmr;
-}
-
-static bool queue_spx_msg(int epoll_fd, struct ipxw_mux_spx_msg *msg, size_t
-		data_len)
-{
-	// TODO
-	/* reregister for ready-to-write events on the TCP socket, now that
-	 * messages are available */
-	/*struct epoll_event ev = {
-		.events = EPOLLOUT | EPOLLIN | EPOLLERR | EPOLLHUP,
-		.data.fd = tcps
-	};
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, tcps, &ev) < 0) {
-		return false;
-	}*/
-
-	/* queue the SPX message */
-	msg->mux_msg.recv.data_len = data_len;
-	msg->mux_msg.recv.is_spx = 1;
-	counted_msg_queue_push(&rx_queue, &(msg->mux_msg));
-
-	return true;
 }
 
 static bool send_out_spx_msg(int epoll_fd)
@@ -371,6 +352,8 @@ static void enter_ui(void)
 
 static void rcon_empty_screenlist(void);
 
+static struct ipxw_mux_spx_msg *incomplete_msg = NULL;
+
 static _Noreturn void cleanup_and_exit(int epoll_fd, struct rconcl_cfg *cfg,
 		enum rconcl_error_codes code)
 {
@@ -400,11 +383,63 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, struct rconcl_cfg *cfg,
 		free(msg);
 	}
 
+	/* free any incomplete message */
+	free(incomplete_msg);
+
 	if (!ipxw_mux_spx_handle_is_error(spxh)) {
 		ipxw_mux_spx_conn_close(&spxh);
 	}
 
 	exit(code);
+}
+
+static bool continue_msg(struct ipxw_mux_spx_msg *msg, size_t data_len, struct
+		ipxw_mux_spx_msg **to_queue)
+{
+	assert(data_len <= USHRT_MAX);
+
+	bool end_of_msg = msg->end_of_msg;
+
+	if (incomplete_msg == NULL) {
+		msg->mux_msg.recv.data_len = data_len;
+		msg->mux_msg.recv.is_spx = 1;
+		incomplete_msg = msg;
+	} else {
+		size_t incomplete_msg_data_len =
+			incomplete_msg->mux_msg.recv.data_len;
+		assert(incomplete_msg_data_len <= USHRT_MAX);
+		if (USHRT_MAX - incomplete_msg_data_len < data_len) {
+			return false;
+		}
+
+		size_t new_data_len = incomplete_msg_data_len + data_len;
+		size_t new_msg_len = ipxw_mux_spx_msg_len(new_data_len,
+				ipxw_mux_spx_handle_is_spxii(spxh));
+
+		struct ipxw_mux_spx_msg *new_msg = realloc(incomplete_msg,
+				new_msg_len);
+		if (new_msg == NULL) {
+			return false;
+		}
+
+		__u8 *new_msg_data = ipxw_mux_spx_msg_data(new_msg);
+		__u8 *msg_data = ipxw_mux_spx_msg_data(msg);
+		memcpy(new_msg_data + incomplete_msg_data_len, msg_data,
+				data_len);
+		new_msg->mux_msg.recv.data_len = new_data_len;
+
+		incomplete_msg = new_msg;
+		free(msg);
+	}
+
+	if (end_of_msg) {
+		*to_queue = incomplete_msg;
+		incomplete_msg = NULL;
+	} else {
+		*to_queue = NULL;
+	}
+
+	return true;
 }
 
 static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
@@ -475,12 +510,19 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 			continue;
 		}
 
-		/* queue received message */
-		if (!queue_spx_msg(epoll_fd, msg, data_len)) {
+		/* continue previous message */
+		struct ipxw_mux_spx_msg *msg_to_queue = NULL;
+		if (!continue_msg(msg, data_len, &msg_to_queue)) {
 			free(msg);
 			leave_ui();
-			perror("queueing message");
-			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_MSG_QUEUE);
+			fprintf(stderr, "failed to reassemble message\n");
+			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_MSG_REASSEMBLE);
+		}
+
+		/* queue received message, if complete */
+		if (msg_to_queue != NULL) {
+			counted_msg_queue_push(&rx_queue,
+					&(msg_to_queue->mux_msg));
 		}
 	}
 }
@@ -630,7 +672,7 @@ static int rcon_data_next_str(__u8 *data, __u16 len, __u16 start, char **out) {
 }
 
 static struct ipxw_mux_spx_msg *rcon_prepare_request(__u16 data_len, __u16
-		code, __u32 screen_id)
+		code, __be32 screen_id)
 {
 	if (code <= RCON_REQUEST_MIN || code >= RCON_REQUEST_MAX) {
 		return NULL;
@@ -654,7 +696,7 @@ static struct ipxw_mux_spx_msg *rcon_prepare_request(__u16 data_len, __u16
 		ipxw_mux_spx_msg_data(msg);
 	req->data_len = htons(data_len);
 	req->code = htons(code);
-	req->screen_id = htonl(screen_id);
+	req->screen_id = screen_id;
 
 	msg->mux_msg.type = IPXW_MUX_XMIT;
 	msg->mux_msg.xmit.data_len = req_data_len;
@@ -959,7 +1001,7 @@ static void rcon_print_screenlist(void)
 	}
 }
 
-static void handle_screen_menu_input(int c)
+static void handle_screen_menu_input(int epoll_fd, int c)
 {
 	switch (c) {
 		case KEY_DOWN:
@@ -991,7 +1033,21 @@ static void handle_screen_menu_input(int c)
 		return;
 	}
 
-	// TODO: switch to the selected screen!
+	__be32 screen_id = sc->screen_id;
+	// TODO: switch to the selected screen
+	struct ipxw_mux_spx_msg *msg = rcon_prepare_request(0,
+			RCON_REQUEST_SCREEN_OPEN, screen_id);
+	if (msg == NULL) {
+		return;
+	}
+
+	if (!rcon_request_push(epoll_fd, msg)) {
+		free(msg);
+		return;
+	}
+
+	current_screen_id = screen_id;
+	unpost_screen_menu();
 }
 
 static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
@@ -1031,7 +1087,7 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 				}
 
 				if (in_screen_menu()) {
-					handle_screen_menu_input(c);
+					handle_screen_menu_input(epoll_fd, c);
 				}
 			}
 		}
