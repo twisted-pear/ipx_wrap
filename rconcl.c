@@ -719,6 +719,23 @@ static struct ipxw_mux_spx_msg *rcon_digest_request(const __u8 *hash)
 	return msg;
 }
 
+static struct ipxw_mux_spx_msg *rcon_screen_ack(__be32 screen_id, __s32 sid)
+{
+	struct ipxw_mux_spx_msg *msg = rcon_prepare_request(sizeof(__be32),
+			RCON_REQUEST_SCREEN_ACK, screen_id);
+	if (msg == NULL) {
+		return NULL;
+	}
+
+	__be32 data = htonl(sid);
+
+	struct rcon_request *req = (struct rcon_request *)
+		ipxw_mux_spx_msg_data(msg);
+	memcpy(req->data, &data, sizeof(__be32));
+
+	return msg;
+}
+
 static bool rcon_request_push(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 {
 	/* reregister for ready-to-write events on the SPX socket, now that
@@ -731,6 +748,8 @@ static bool rcon_request_push(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 				&ev) < 0) {
 		return false;
 	}
+
+	// TODO: split request into multiple messages if necessary
 
 	/* queue the SPX message */
 	msg->mux_msg.type = IPXW_MUX_XMIT;
@@ -1050,6 +1069,44 @@ static void handle_screen_menu_input(int epoll_fd, int c)
 	unpost_screen_menu();
 }
 
+static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
+{
+	struct rcon_reply *rep = (struct rcon_reply *)
+		ipxw_mux_spx_msg_data(msg);
+	switch (ntohs(rep->code)) {
+		case RCON_REPLY_SCREENLIST:
+		case RCON_REPLY_SCREEN_DESTROYED:
+		case RCON_REPLY_SCREEN_LOCKED:
+		case RCON_REPLY_SCREEN_UNLOCKED:
+			// TODO
+			return false;
+		case RCON_REPLY_SCREEN_COPY:
+		case RCON_REPLY_SCREEN_CHANGE:
+			// TODO: actually display
+
+			__s32 sid = 0;
+			if (rcon_data_next_int(rep->data, ntohs(rep->data_len),
+						0, &sid) < 0) {
+				return false;
+			}
+
+			struct ipxw_mux_spx_msg *req =
+				 rcon_screen_ack(current_screen_id, sid);
+			if (req == NULL) {
+				return false;
+			}
+
+			if (!rcon_request_push(epoll_fd, req)) {
+				free(req);
+				return false;
+			}
+
+			return true;
+		default:
+			return false;
+	}
+}
+
 static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 {
 	clear();
@@ -1070,10 +1127,14 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 		if ((ev & RCONCL_EVENT_MSG) != 0) {
 			struct ipxw_mux_spx_msg *msg = rcon_reply_pop();
 			if (msg == NULL) {
-				fprintf(stderr, "invalid message received\n");
-			} else {
-				// TODO: actually handle the message
-				free(msg);
+				return false;
+			}
+
+			/* actually handle the message */
+			bool success = rcon_handle_reply(epoll_fd, msg);
+			free(msg);
+			if (!success) {
+				return false;
 			}
 		}
 
@@ -1252,6 +1313,8 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	}
 
 	if (!rcon_main(epoll_fd, cfg)) {
+		leave_ui();
+		fprintf(stderr, "protocoll error\n");
 		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
 	}
 
