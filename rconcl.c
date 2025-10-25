@@ -1,3 +1,5 @@
+/* Much of this code was taken from or inspired by rconip-2.5:
+ * https://rconip.sourceforge.net/index.html */
 #include <assert.h>
 #include <limits.h>
 #include <menu.h>
@@ -17,6 +19,9 @@
 #include "ipx_wrap_helpers.h"
 
 #define MAX_PASSWORD_LEN 32
+
+#define RCON_LINES 25
+#define RCON_COLUMNS 80
 
 #define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (1024)
 #define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (1024)
@@ -318,6 +323,10 @@ static bool config_ui(void)
 {
 	do {
 		if (cbreak() == ERR) {
+			break;
+		}
+
+		if (wresize(stdscr, RCON_LINES, RCON_COLUMNS) == ERR) {
 			break;
 		}
 
@@ -638,7 +647,21 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 	return RCONCL_EVENT_EXIT;
 }
 
-static int rcon_data_next_int(__u8 *data, __u16 len, __u16 start, __s32 *out) {
+static int rcon_data_next_byte(__u8 *data, __u16 len, __u16 start, __u8 *out)
+{
+	if (start >= len) {
+		return -1;
+	}
+	if (len - start < 1) {
+		return -1;
+	}
+
+	*out = data[start];
+	return start + 1;
+}
+
+static int rcon_data_next_int(__u8 *data, __u16 len, __u16 start, __s32 *out)
+{
 	if (start >= len) {
 		return -1;
 	}
@@ -651,7 +674,8 @@ static int rcon_data_next_int(__u8 *data, __u16 len, __u16 start, __s32 *out) {
 	return start + 4;
 }
 
-static int rcon_data_next_str(__u8 *data, __u16 len, __u16 start, char **out) {
+static int rcon_data_next_str(__u8 *data, __u16 len, __u16 start, char **out)
+{
 	if (start >= len) {
 		return -1;
 	}
@@ -1069,6 +1093,121 @@ static void handle_screen_menu_input(int epoll_fd, int c)
 	unpost_screen_menu();
 }
 
+// TODO: clean up and make it work with screen updates as well!
+static void screen_draw(__u8 *data, __u16 len, int pos)
+{
+	move(0, 0);
+
+	__u8 b;
+	__u8 b2;
+	int state = 0;
+	int i = 0;
+	int j = 0;
+	int k = 0;
+	while ((pos = rcon_data_next_byte(data, len, pos, &b)) >= 0) {
+		switch (state) {
+			case 0:
+				switch (b) {
+					case 27:
+						state = 1;
+						break;
+					case 28:
+						state = 3;
+						break;
+					case 29:
+						state = 6;
+						break;
+					default:
+						addch(b);
+						i++;
+						break;
+				}
+				break;
+
+			case 1: // repeat1_1
+				b2 = b;
+				state = 2;
+				break;
+
+			case 2: // repeat1_2
+				k = b;
+				if (i + k > 8000) {
+					break;
+				}
+
+				if (b2 == 29) {
+					for (j = 0; j < k / 2; j++) {
+						addch(29);
+						i++;
+					}
+					if (k % 2) {
+						state = 6;
+					} else {
+						state = 0;
+					}
+				} else {
+					for (j = 0; j < k; j++) {
+						addch(b2);
+						i++;
+					}
+					state = 0;
+				}
+
+				break;
+
+			case 3: // repeat2_1
+				b2 = b;
+				state = 4;
+				break;
+
+			case 4: // repeat2_2
+				k = b;
+				state = 5;
+				break;
+
+			case 5: // repeat2_3
+				k += b << 8;
+				if (i + k > 8000) {
+					break;
+				}
+
+				for (j = 0; j < k; j++) {
+					addch(b2);
+					i++;
+				}
+
+				state = 0;
+				break;
+
+			case 6: // escape
+				switch (b) {
+					case 1: // 27
+						addch(27);
+						i++;
+						break;
+					case 2: // 28
+						addch(28);
+						i++;
+						break;
+					case 29: // 29
+						addch(29);
+						i++;
+						break;
+					default:
+						break;
+				}
+
+				state = 0;
+				break;
+
+			default:
+				assert(0);
+		}
+	}
+
+	refresh();
+}
+
 static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 {
 	struct rcon_reply *rep = (struct rcon_reply *)
@@ -1082,13 +1221,30 @@ static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 			return false;
 		case RCON_REPLY_SCREEN_COPY:
 		case RCON_REPLY_SCREEN_CHANGE:
-			// TODO: actually display
+			int pos = 0;
 
 			__s32 sid = 0;
-			if (rcon_data_next_int(rep->data, ntohs(rep->data_len),
-						0, &sid) < 0) {
+			pos = rcon_data_next_int(rep->data,
+					ntohs(rep->data_len), pos, &sid);
+			if (pos < 0) {
 				return false;
 			}
+
+			__u8 xpos = 0;
+			pos = rcon_data_next_byte(rep->data,
+					ntohs(rep->data_len), pos, &xpos);
+			if (pos < 0) {
+				return false;
+			}
+
+			__u8 ypos = 0;
+			pos = rcon_data_next_byte(rep->data,
+					ntohs(rep->data_len), pos, &ypos);
+			if (pos < 0) {
+				return false;
+			}
+
+			screen_draw(rep->data, ntohs(rep->data_len), pos);
 
 			struct ipxw_mux_spx_msg *req =
 				 rcon_screen_ack(current_screen_id, sid);
