@@ -312,6 +312,8 @@ static bool post_screen_menu(void)
 static void init_ui(void)
 {
 	initscr();
+
+	start_color();
 }
 
 static void cleanup_ui(void)
@@ -1093,7 +1095,62 @@ static void handle_screen_menu_input(int epoll_fd, int c)
 	unpost_screen_menu();
 }
 
-// TODO: clean up and make it work with screen updates as well!
+#define WIN_FG_BLUE 0x0001
+#define WIN_FG_GREEN 0x0002
+#define WIN_FG_RED 0x0004
+#define WIN_FG_INTENSITY 0x0008
+#define WIN_BG_BLUE 0x0010
+#define WIN_BG_GREEN 0x0020
+#define WIN_BG_RED 0x0040
+#define WIN_BG_INTENSITY 0x0080
+
+static int get_ncurses_color(__u8 win_col_attr)
+{
+	switch (win_col_attr) {
+		case 0:
+			return COLOR_BLACK;
+		case WIN_FG_BLUE:
+			return COLOR_BLUE;
+		case WIN_FG_GREEN:
+			return COLOR_GREEN;
+		case WIN_FG_RED:
+			return COLOR_RED;
+		case (WIN_FG_BLUE | WIN_FG_GREEN):
+			return COLOR_CYAN;
+		case (WIN_FG_BLUE | WIN_FG_RED):
+			return COLOR_MAGENTA;
+		case (WIN_FG_GREEN | WIN_FG_RED):
+			return COLOR_YELLOW;
+		case (WIN_FG_BLUE | WIN_FG_GREEN | WIN_FG_RED):
+			return COLOR_WHITE;
+		default:
+			assert(0);
+	}
+}
+
+static int translate_attrs(__u8 attrs)
+{
+	__u8 fg_col_attr = attrs & (WIN_FG_BLUE | WIN_FG_GREEN | WIN_FG_RED);
+	__u8 bg_col_attr = attrs & (WIN_BG_BLUE | WIN_BG_GREEN | WIN_BG_RED);
+
+	int fg_col = get_ncurses_color(fg_col_attr);
+	int bg_col = get_ncurses_color(bg_col_attr >> 4);
+	__u16 cp_name = fg_col | (bg_col << 3);
+	init_pair(cp_name, fg_col, bg_col);
+
+	int new_attrs = COLOR_PAIR(cp_name);
+
+	if ((attrs & WIN_FG_INTENSITY) != 0) {
+		new_attrs |= A_BOLD;
+	}
+	if ((attrs & WIN_BG_INTENSITY) != 0) {
+		new_attrs |= A_STANDOUT;
+	}
+
+	return new_attrs;
+}
+
+// TODO: clean up!
 static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 {
 	static char screen_content[RCON_LINES * RCON_COLUMNS] = {0};
@@ -1224,14 +1281,15 @@ static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 					* RCON_COLUMNS) + i];
 		}
 	} else {
-		memcpy(screen_content, screen_content_expanded, RCON_LINES * RCON_COLUMNS);
+		memcpy(screen_content, screen_content_expanded, RCON_LINES *
+				RCON_COLUMNS);
 		memcpy(screen_attrs, &screen_content_expanded[RCON_LINES *
 				RCON_COLUMNS], RCON_LINES * RCON_COLUMNS);
 	}
 
 	move(0, 0);
 	for (i = 0; i < RCON_LINES * RCON_COLUMNS; i++) {
-		addch(screen_content[i]);
+		addch(screen_content[i] | translate_attrs(screen_attrs[i]));
 	}
 	move(ypos, xpos);
 	refresh();
