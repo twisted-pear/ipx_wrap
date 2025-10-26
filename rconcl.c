@@ -23,6 +23,9 @@
 #define RCON_LINES 25
 #define RCON_COLUMNS 80
 
+#define SCREEN_ESCAPE_KEY (KEY_MAX + 1)
+static const char *screen_escape_seq = "\033X"; /* Alt+Shift+X */
+
 #define DEFAULT_RX_QUEUE_PAUSE_THRESHOLD (1024)
 #define DEFAULT_TX_QUEUE_PAUSE_THRESHOLD (1024)
 
@@ -245,8 +248,6 @@ static void unpost_screen_menu(void)
 	free(screen_items);
 
 	screen_menu = NULL;
-
-	echo();
 }
 
 static bool post_screen_menu(void)
@@ -306,8 +307,6 @@ static bool post_screen_menu(void)
 		return false;
 	}
 
-	noecho();
-
 	return true;
 }
 
@@ -341,6 +340,12 @@ static bool config_ui(void)
 		if (keypad(stdscr, true) == ERR) {
 			break;
 		}
+
+		if (define_key(screen_escape_seq, SCREEN_ESCAPE_KEY) == ERR) {
+			break;
+		}
+
+		noecho();
 
 		return true;
 	} while (0);
@@ -1081,6 +1086,18 @@ static void leave_screen(void)
 	refresh();
 }
 
+static void handle_screen_input(int epoll_fd, int c)
+{
+	switch(c) {
+		case SCREEN_ESCAPE_KEY:
+			leave_screen();
+			return;
+		default:
+			// TODO
+			return;
+	}
+}
+
 static void handle_screen_menu_input(int epoll_fd, int c)
 {
 	switch (c) {
@@ -1367,9 +1384,12 @@ static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 				return false;
 			}
 
-			if (!screen_draw(rep->data, ntohs(rep->data_len), pos,
-						update)) {
-				return false;
+			if (rep->screen_id == current_screen_id) {
+				if (!screen_draw(rep->data,
+							ntohs(rep->data_len),
+							pos, update)) {
+					return false;
+				}
 			}
 
 			struct ipxw_mux_spx_msg *req =
@@ -1436,6 +1456,8 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 
 				if (in_screen_menu()) {
 					handle_screen_menu_input(epoll_fd, c);
+				} else {
+					handle_screen_input(epoll_fd, c);
 				}
 			}
 		}
