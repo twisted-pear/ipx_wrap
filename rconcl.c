@@ -325,7 +325,7 @@ static void cleanup_ui(void)
 static bool config_ui(void)
 {
 	do {
-		if (cbreak() == ERR) {
+		if (raw() == ERR) {
 			break;
 		}
 
@@ -334,6 +334,10 @@ static bool config_ui(void)
 		}
 
 		if (nodelay(stdscr, true) == ERR) {
+			break;
+		}
+
+		if (nonl() == ERR) {
 			break;
 		}
 
@@ -372,8 +376,8 @@ static void rcon_empty_screenlist(void);
 
 static struct ipxw_mux_spx_msg *incomplete_msg = NULL;
 
-static _Noreturn void cleanup_and_exit(int epoll_fd, struct rconcl_cfg *cfg,
-		enum rconcl_error_codes code)
+static _Noreturn void cleanup_and_exit(int epoll_fd, enum rconcl_error_codes
+		code)
 {
 	cleanup_ui();
 
@@ -482,8 +486,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 
 			leave_ui();
 			perror("SPX receive peek");
-			cleanup_and_exit(epoll_fd, cfg,
-					RCONCL_ERR_SPX_FAILURE);
+			cleanup_and_exit(epoll_fd, RCONCL_ERR_SPX_FAILURE);
 		}
 
 		if (counted_msg_queue_nitems(&rx_queue) >
@@ -495,7 +498,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 		if (msg == NULL) {
 			leave_ui();
 			perror("allocating message");
-			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_MSG_ALLOC);
+			cleanup_and_exit(epoll_fd, RCONCL_ERR_MSG_ALLOC);
 		}
 
 		size_t expected_data_len =
@@ -511,8 +514,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 
 			leave_ui();
 			perror("SPX receive");
-			cleanup_and_exit(epoll_fd, cfg,
-					RCONCL_ERR_SPX_FAILURE);
+			cleanup_and_exit(epoll_fd, RCONCL_ERR_SPX_FAILURE);
 		}
 
 		/* system msg */
@@ -534,7 +536,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 			free(msg);
 			leave_ui();
 			fprintf(stderr, "failed to reassemble message\n");
-			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_MSG_REASSEMBLE);
+			cleanup_and_exit(epoll_fd, RCONCL_ERR_MSG_REASSEMBLE);
 		}
 
 		/* queue received message, if complete */
@@ -575,7 +577,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 
 			leave_ui();
 			perror("event polling");
-			cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_EPOLL_WAIT);
+			cleanup_and_exit(epoll_fd, RCONCL_ERR_EPOLL_WAIT);
 		}
 
 		int i;
@@ -586,7 +588,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 					leave_ui();
 					fprintf(stderr, "timer fd error\n");
-					cleanup_and_exit(epoll_fd, cfg,
+					cleanup_and_exit(epoll_fd,
 							RCONCL_ERR_TMR_FAILURE);
 				}
 
@@ -594,7 +596,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 				if (!ipxw_mux_spx_maintain(spxh)) {
 					leave_ui();
 					perror("maintaining connection");
-					cleanup_and_exit(epoll_fd, cfg,
+					cleanup_and_exit(epoll_fd,
 							RCONCL_ERR_SPX_MAINT);
 				}
 
@@ -617,7 +619,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 				leave_ui();
 				fprintf(stderr, "SPX socket error\n");
-				cleanup_and_exit(epoll_fd, cfg,
+				cleanup_and_exit(epoll_fd,
 						RCONCL_ERR_SPX_FAILURE);
 			}
 
@@ -626,7 +628,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 				if (!send_out_spx_msg(epoll_fd)) {
 					leave_ui();
 					perror("SPX send");
-					cleanup_and_exit(epoll_fd, cfg,
+					cleanup_and_exit(epoll_fd,
 							RCONCL_ERR_SPX_FAILURE);
 				}
 			}
@@ -765,6 +767,23 @@ static struct ipxw_mux_spx_msg *rcon_screen_ack(__be32 screen_id, __s32 sid)
 	struct rcon_request *req = (struct rcon_request *)
 		ipxw_mux_spx_msg_data(msg);
 	memcpy(req->data, &data, sizeof(__be32));
+
+	return msg;
+}
+
+static struct ipxw_mux_spx_msg *rcon_input_request(__be32 screen_id, int chr)
+{
+	struct ipxw_mux_spx_msg *msg = rcon_prepare_request(sizeof(__be16),
+			RCON_REQUEST_SCREEN_INPUT, screen_id);
+	if (msg == NULL) {
+		return NULL;
+	}
+
+	__be16 data = htons((__u16) chr);
+
+	struct rcon_request *req = (struct rcon_request *)
+		ipxw_mux_spx_msg_data(msg);
+	memcpy(req->data, &data, sizeof(__be16));
 
 	return msg;
 }
@@ -1094,6 +1113,24 @@ static void handle_screen_input(int epoll_fd, int c)
 			return;
 		default:
 			// TODO
+			c <<= 8;
+			struct ipxw_mux_spx_msg *req =
+				rcon_input_request(current_screen_id, c);
+			if (req == NULL) {
+				leave_ui();
+				perror("allocating message");
+				cleanup_and_exit(epoll_fd,
+						RCONCL_ERR_MSG_ALLOC);
+			}
+
+			if (!rcon_request_push(epoll_fd, req)) {
+				free(req);
+				leave_ui();
+				perror("queueing message");
+				cleanup_and_exit(epoll_fd,
+						RCONCL_ERR_MSG_ALLOC);
+			}
+
 			return;
 	}
 }
@@ -1491,20 +1528,20 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 
 	if (!password_read) {
 		fprintf(stderr, "failed to read password\n");
-		cleanup_and_exit(-1, cfg, RCONCL_ERR_PASS);
+		cleanup_and_exit(-1, RCONCL_ERR_PASS);
 	}
 
 	int epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_EPOLL_FD);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_EPOLL_FD);
 	}
 
 	/* create connection maintenance timer */
 	tmr_fd = setup_timer(epoll_fd);
 	if (tmr_fd < 0) {
 		perror("creating maintenance timer");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_TMR_FD);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_TMR_FD);
 	}
 
 	/* register signal handlers */
@@ -1515,7 +1552,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 			|| sigaction(SIGQUIT, &sig_act, NULL) < 0
 			|| sigaction(SIGTERM, &sig_act, NULL) < 0) {
 		perror("setting up signal handler");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_SIG_HANDLER);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_SIG_HANDLER);
 	}
 
 	/* establish SPX connection */
@@ -1532,15 +1569,14 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	struct ipxw_mux_handle ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {
 		perror("IPX bind");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_BIND);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_BIND);
 	}
 
 	if (cfg->verbose) {
 		if (!get_bound_ipx_addr(ipxh, &(cfg->spx_local_addr))) {
 			perror("IPX get bound address");
 			ipxw_mux_unbind(ipxh);
-			cleanup_and_exit(epoll_fd, cfg,
-					RCONCL_ERR_GETSOCKNAME);
+			cleanup_and_exit(epoll_fd, RCONCL_ERR_GETSOCKNAME);
 		}
 
 		fprintf(stderr, "SPX bound to ");
@@ -1556,7 +1592,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	if (ipxw_mux_spx_handle_is_error(spxh)) {
 		perror("SPX connect");
 		ipxw_mux_unbind(ipxh);
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_CONNECT);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_CONNECT);
 	}
 
 	if (cfg->verbose) {
@@ -1578,7 +1614,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ipxw_mux_spx_handle_sock(spxh),
 				&ev) < 0) {
 		perror("registering SPX socket for event polling");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_SPX_FD);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_SPX_FD);
 	}
 
 	/* authenticate */
@@ -1588,7 +1624,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 
 	if (!auth_succeeded) {
 		fprintf(stderr, "Authentication failed!\n");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_AUTH);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_AUTH);
 	}
 
 	printf("Authenticated!\n");
@@ -1597,7 +1633,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	if (!rcon_handle_screenlist(epoll_fd, cfg)) {
 		leave_ui();
 		fprintf(stderr, "Failed to fetch screen list!\n");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_PROTO);
 	}
 
 	if (cfg->verbose) {
@@ -1609,7 +1645,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	if (!config_ui()) {
 		leave_ui();
 		fprintf(stderr, "failed to set up UI\n");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_UI);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_UI);
 	}
 
 	/* register stdin for reading */
@@ -1618,16 +1654,16 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fileno(stdin), &ev) < 0) {
 		leave_ui();
 		perror("registering STDIN for event polling");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_STDIN_FD);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_STDIN_FD);
 	}
 
 	if (!rcon_main(epoll_fd, cfg)) {
 		leave_ui();
 		fprintf(stderr, "protocoll error\n");
-		cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_PROTO);
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_PROTO);
 	}
 
-	cleanup_and_exit(epoll_fd, cfg, RCONCL_ERR_OK);
+	cleanup_and_exit(epoll_fd, RCONCL_ERR_OK);
 }
 
 static _Noreturn void usage(void)
