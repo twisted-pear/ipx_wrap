@@ -241,8 +241,8 @@ static void unpost_screen_menu(void)
 	}
 
 	free_menu(screen_menu);
+	free_item(exit_item);
 	free(screen_items);
-	free(exit_item);
 
 	screen_menu = NULL;
 
@@ -292,12 +292,14 @@ static bool post_screen_menu(void)
 
 	screen_menu = new_menu(screen_items);
 	if (screen_menu == NULL) {
+		free_item(screen_items[i]);
 		free(screen_items);
 		return false;
 	}
 
 	if (post_menu(screen_menu) != E_OK) {
 		free_menu(screen_menu);
+		free_item(screen_items[i]);
 		free(screen_items);
 		screen_menu = NULL;
 
@@ -1046,6 +1048,39 @@ static void rcon_print_screenlist(void)
 	}
 }
 
+static bool enter_screen(int epoll_fd, __be32 screen_id)
+{
+	struct ipxw_mux_spx_msg *msg = rcon_prepare_request(0,
+			RCON_REQUEST_SCREEN_OPEN, screen_id);
+	if (msg == NULL) {
+		return false;
+	}
+
+	if (!rcon_request_push(epoll_fd, msg)) {
+		free(msg);
+		return false;
+	}
+
+	current_screen_id = screen_id;
+	unpost_screen_menu();
+
+	return true;
+}
+
+static void leave_screen(void)
+{
+	if (current_screen_id == CURRENT_SCREEN_NONE) {
+		return;
+	}
+
+	clear();
+	current_screen_id = CURRENT_SCREEN_NONE;
+	if (!post_screen_menu()) {
+		return;
+	}
+	refresh();
+}
+
 static void handle_screen_menu_input(int epoll_fd, int c)
 {
 	switch (c) {
@@ -1078,21 +1113,7 @@ static void handle_screen_menu_input(int epoll_fd, int c)
 		return;
 	}
 
-	__be32 screen_id = sc->screen_id;
-	// TODO: switch to the selected screen
-	struct ipxw_mux_spx_msg *msg = rcon_prepare_request(0,
-			RCON_REQUEST_SCREEN_OPEN, screen_id);
-	if (msg == NULL) {
-		return;
-	}
-
-	if (!rcon_request_push(epoll_fd, msg)) {
-		free(msg);
-		return;
-	}
-
-	current_screen_id = screen_id;
-	unpost_screen_menu();
+	enter_screen(epoll_fd, sc->screen_id);
 }
 
 #define WIN_FG_BLUE 0x0001
@@ -1304,11 +1325,35 @@ static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 		ipxw_mux_spx_msg_data(msg);
 	switch (ntohs(rep->code)) {
 		case RCON_REPLY_SCREENLIST:
+			bool in_menu = in_screen_menu();
+			if (in_menu) {
+				unpost_screen_menu();
+			}
+
+			rcon_empty_screenlist();
+			if (!rcon_fill_screenlist(rep)) {
+				return false;
+			}
+
+			if (in_menu) {
+				if (!post_screen_menu()) {
+					return false;
+				}
+				refresh();
+			}
+
+			return true;
 		case RCON_REPLY_SCREEN_DESTROYED:
+			if (rep->screen_id == current_screen_id) {
+				leave_screen();
+			}
+			return true;
+
 		case RCON_REPLY_SCREEN_LOCKED:
 		case RCON_REPLY_SCREEN_UNLOCKED:
 			// TODO
-			return false;
+			return true;
+
 		case RCON_REPLY_SCREEN_COPY:
 			update = false;
 			/* fall through on purpuse */
@@ -1354,6 +1399,11 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 
 	while (true) {
 		enum rconcl_event ev = wait_for_event(epoll_fd, cfg);
+
+		assert(!in_screen_menu() || current_screen_id ==
+				CURRENT_SCREEN_NONE);
+		assert(current_screen_id != CURRENT_SCREEN_NONE ||
+				in_screen_menu());
 
 		/* exit */
 		if ((ev & RCONCL_EVENT_EXIT) != 0) {
