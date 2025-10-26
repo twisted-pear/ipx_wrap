@@ -1094,9 +1094,23 @@ static void handle_screen_menu_input(int epoll_fd, int c)
 }
 
 // TODO: clean up and make it work with screen updates as well!
-static void screen_draw(__u8 *data, __u16 len, int pos)
+static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 {
-	move(0, 0);
+	static char screen_content[RCON_LINES * RCON_COLUMNS] = {0};
+	static char screen_attrs[RCON_LINES * RCON_COLUMNS] = {0};
+	static char screen_content_expanded[RCON_LINES * RCON_COLUMNS * 4] = {0};
+
+	__u8 xpos = 0;
+	pos = rcon_data_next_byte(data, len, pos, &xpos);
+	if (pos < 0) {
+		return false;
+	}
+
+	__u8 ypos = 0;
+	pos = rcon_data_next_byte(data, len, pos, &ypos);
+	if (pos < 0) {
+		return false;
+	}
 
 	__u8 b;
 	__u8 b2;
@@ -1118,8 +1132,7 @@ static void screen_draw(__u8 *data, __u16 len, int pos)
 						state = 6;
 						break;
 					default:
-						addch(b);
-						i++;
+						screen_content_expanded[i++] = b;
 						break;
 				}
 				break;
@@ -1137,8 +1150,7 @@ static void screen_draw(__u8 *data, __u16 len, int pos)
 
 				if (b2 == 29) {
 					for (j = 0; j < k / 2; j++) {
-						addch(29);
-						i++;
+						screen_content_expanded[i++] = 29;
 					}
 					if (k % 2) {
 						state = 6;
@@ -1147,8 +1159,7 @@ static void screen_draw(__u8 *data, __u16 len, int pos)
 					}
 				} else {
 					for (j = 0; j < k; j++) {
-						addch(b2);
-						i++;
+						screen_content_expanded[i++] = b2;
 					}
 					state = 0;
 				}
@@ -1172,8 +1183,7 @@ static void screen_draw(__u8 *data, __u16 len, int pos)
 				}
 
 				for (j = 0; j < k; j++) {
-					addch(b2);
-					i++;
+					screen_content_expanded[i++] = b2;
 				}
 
 				state = 0;
@@ -1182,16 +1192,13 @@ static void screen_draw(__u8 *data, __u16 len, int pos)
 			case 6: // escape
 				switch (b) {
 					case 1: // 27
-						addch(27);
-						i++;
+						screen_content_expanded[i++] = 27;
 						break;
 					case 2: // 28
-						addch(28);
-						i++;
+						screen_content_expanded[i++] = 28;
 						break;
 					case 29: // 29
-						addch(29);
-						i++;
+						screen_content_expanded[i++] = 29;
 						break;
 					default:
 						break;
@@ -1205,11 +1212,36 @@ static void screen_draw(__u8 *data, __u16 len, int pos)
 		}
 	}
 
+	/* abort if the server sent the wrong number of characters */
+	if (i != RCON_LINES * RCON_COLUMNS * 2) {
+		return false;
+	}
+
+	if (update) {
+		for (i = 0; i < RCON_LINES * RCON_COLUMNS; i++) {
+			screen_content[i] ^= screen_content_expanded[i];
+			screen_attrs[i] ^= screen_content_expanded[(RCON_LINES
+					* RCON_COLUMNS) + i];
+		}
+	} else {
+		memcpy(screen_content, screen_content_expanded, RCON_LINES * RCON_COLUMNS);
+		memcpy(screen_attrs, &screen_content_expanded[RCON_LINES *
+				RCON_COLUMNS], RCON_LINES * RCON_COLUMNS);
+	}
+
+	move(0, 0);
+	for (i = 0; i < RCON_LINES * RCON_COLUMNS; i++) {
+		addch(screen_content[i]);
+	}
+	move(ypos, xpos);
 	refresh();
+
+	return true;
 }
 
 static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 {
+	bool update = true;
 	struct rcon_reply *rep = (struct rcon_reply *)
 		ipxw_mux_spx_msg_data(msg);
 	switch (ntohs(rep->code)) {
@@ -1220,6 +1252,8 @@ static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 			// TODO
 			return false;
 		case RCON_REPLY_SCREEN_COPY:
+			update = false;
+			/* fall through on purpuse */
 		case RCON_REPLY_SCREEN_CHANGE:
 			int pos = 0;
 
@@ -1230,21 +1264,10 @@ static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 				return false;
 			}
 
-			__u8 xpos = 0;
-			pos = rcon_data_next_byte(rep->data,
-					ntohs(rep->data_len), pos, &xpos);
-			if (pos < 0) {
+			if (!screen_draw(rep->data, ntohs(rep->data_len), pos,
+						update)) {
 				return false;
 			}
-
-			__u8 ypos = 0;
-			pos = rcon_data_next_byte(rep->data,
-					ntohs(rep->data_len), pos, &ypos);
-			if (pos < 0) {
-				return false;
-			}
-
-			screen_draw(rep->data, ntohs(rep->data_len), pos);
 
 			struct ipxw_mux_spx_msg *req =
 				 rcon_screen_ack(current_screen_id, sid);
