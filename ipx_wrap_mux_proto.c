@@ -2521,19 +2521,27 @@ static bool ipxw_mux_spx_handle_recvd_generic(struct ipxw_mux_spx_handle h,
 		return false;
 	}
 
+	bool ret = true;
+
 	/* update the state */
 	if (!msg->system) {
-		__builtin_add_overflow(
-				h.last_known_state->remote_expected_sequence,
-				1,
-				&(h.last_known_state->remote_expected_sequence));
-		__builtin_add_overflow(h.last_known_state->local_alloc_no, 1,
-				&(h.last_known_state->local_alloc_no));
+		/* retransmit */
+		if (msg->seq_no !=
+				h.last_known_state->remote_expected_sequence) {
+			ret = false;
+		} else {
+			__builtin_add_overflow(
+					h.last_known_state->remote_expected_sequence,
+					1,
+					&(h.last_known_state->remote_expected_sequence));
+			__builtin_add_overflow(h.last_known_state->local_alloc_no, 1,
+					&(h.last_known_state->local_alloc_no));
 
-		if (waiting_for_ack) {
-			/* update the last message to retransmit */
-			ipxw_mux_fill_msg_from_state(h,
-					&(h.last_known_state->last_msg));
+			if (waiting_for_ack) {
+				/* update the last message to retransmit */
+				ipxw_mux_fill_msg_from_state(h,
+						&(h.last_known_state->last_msg));
+			}
 		}
 	} else {
 		/* size negotiation request, record this as the largest message
@@ -2558,7 +2566,7 @@ static bool ipxw_mux_spx_handle_recvd_generic(struct ipxw_mux_spx_handle h,
 		}
 	}
 
-	return true;
+	return ret;
 }
 
 ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
