@@ -1,6 +1,7 @@
 /* Much of this code was taken from or inspired by rconip-2.5:
  * https://rconip.sourceforge.net/index.html */
 #include <assert.h>
+#include <ctype.h>
 #include <limits.h>
 #include <menu.h>
 #include <ncurses.h>
@@ -802,6 +803,7 @@ static bool rcon_request_push(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 	}
 
 	// TODO: split request into multiple messages if necessary
+	msg->end_of_msg = 1;
 
 	/* queue the SPX message */
 	msg->mux_msg.type = IPXW_MUX_XMIT;
@@ -849,8 +851,6 @@ static struct ipxw_mux_spx_msg *rcon_reply_pop(void)
 
 static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password)
 {
-	// TODO: verbosity
-
 	struct ipxw_mux_spx_msg *msg = NULL;
 
 	do {
@@ -901,13 +901,15 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 			break;
 		}
 
-		// TODO: remove
-		char server_name_buf[128];
-		memset(server_name_buf, 0, 128);
-		size_t server_name_len = ntohs(rep->data_len) > 127 ? 127 :
-			ntohs(rep->data_len);
-		memcpy(server_name_buf, rep->data, server_name_len);
-		printf("Server Name: %s\n", server_name_buf);
+		if (cfg->verbose) {
+			char *server_name = NULL;
+			int pos = rcon_data_next_str(rep->data,
+					ntohs(rep->data_len), 0, &server_name);
+			if (pos >= 0) {
+				printf("Server Name: %s\n", server_name);
+				free(server_name);
+			}
+		}
 
 		free(msg);
 		msg = NULL;
@@ -1105,33 +1107,127 @@ static void leave_screen(void)
 	refresh();
 }
 
+static int translate_key(int c)
+{
+	int ret = -1;
+	bool shift = false;
+	switch(c) {
+		case KEY_HOME:
+			ret = 71;
+			break;
+
+		case KEY_END:
+			ret = 79;
+			break;
+
+		case KEY_PPAGE:
+			ret = 73;
+			break;
+
+		case KEY_NPAGE:
+			ret = 81;
+			break;
+
+		case KEY_UP:
+			ret = 72;
+			break;
+
+		case KEY_DOWN:
+			ret = 80;
+			break;
+
+		case KEY_LEFT:
+			ret = 75;
+			break;
+
+		case KEY_RIGHT:
+			ret = 77;
+			break;
+
+		case KEY_F(1):
+		case KEY_F(2):
+		case KEY_F(3):
+		case KEY_F(4):
+		case KEY_F(5):
+		case KEY_F(6):
+		case KEY_F(7):
+		case KEY_F(8):
+		case KEY_F(9):
+		case KEY_F(10):
+			ret = ((c - KEY_F(1) + 0x70) - 112) + 59;
+			break;
+
+		case '\n':
+		case '\r':
+		case KEY_ENTER:
+			ret = 13;
+			shift = true;
+			break;
+
+		case KEY_IC: /* insert character */
+			ret = 82;
+			break;
+
+		case 033: /* ESC */
+			ret = 27;
+			shift = true;
+			break;
+
+		case KEY_DC: /* delete character */
+			ret = 83;
+			break;
+
+		case KEY_BACKSPACE:
+			ret = 8;
+			shift = true;
+			break;
+
+		case KEY_STAB: /* tab */
+			ret = 15;
+			break;
+		case KEY_BTAB: /* shift+tab */
+			ret = 9;
+			shift = true;
+			break;
+		default:
+			return -1;
+	}
+
+	if(shift) {
+		ret <<= 8;
+	}
+	return ret;
+}
+
 static void handle_screen_input(int epoll_fd, int c)
 {
-	switch(c) {
-		case SCREEN_ESCAPE_KEY:
-			leave_screen();
-			return;
-		default:
-			// TODO
-			c <<= 8;
-			struct ipxw_mux_spx_msg *req =
-				rcon_input_request(current_screen_id, c);
-			if (req == NULL) {
-				leave_ui();
-				perror("allocating message");
-				cleanup_and_exit(epoll_fd,
-						RCONCL_ERR_MSG_ALLOC);
-			}
+	if (c == SCREEN_ESCAPE_KEY) {
+		leave_screen();
+		return;
+	}
 
-			if (!rcon_request_push(epoll_fd, req)) {
-				free(req);
-				leave_ui();
-				perror("queueing message");
-				cleanup_and_exit(epoll_fd,
-						RCONCL_ERR_MSG_ALLOC);
-			}
-
+	if (!isprint(c)) {
+		c = translate_key(c);
+		if (c == -1) {
 			return;
+		}
+	} else {
+		c <<= 8;
+	}
+
+	struct ipxw_mux_spx_msg *req = rcon_input_request(current_screen_id,
+			c);
+	if (req == NULL) {
+		leave_ui();
+		perror("allocating message");
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_MSG_ALLOC);
+	}
+
+	if (!rcon_request_push(epoll_fd, req)) {
+		free(req);
+		leave_ui();
+		perror("queueing message");
+		cleanup_and_exit(epoll_fd, RCONCL_ERR_MSG_ALLOC);
 	}
 }
 
@@ -1405,7 +1501,7 @@ static bool rcon_handle_reply(int epoll_fd, struct ipxw_mux_spx_msg *msg)
 
 		case RCON_REPLY_SCREEN_LOCKED:
 		case RCON_REPLY_SCREEN_UNLOCKED:
-			// TODO
+			/* nothing to do */
 			return true;
 
 		case RCON_REPLY_SCREEN_COPY:
@@ -1602,9 +1698,6 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	}
 
 	ipxw_mux_handle_close(ipxh);
-
-	// TODO: establish SPX connection and gate it properly until it is
-	// fully established
 
 	/* register SPX socket for reception */
 	struct epoll_event ev = {
