@@ -385,6 +385,11 @@ Usage:
 Usage: ipxping [-v] [-i <interval seconds>] [-c <count>] [-d <maximum data bytes>] [-t <packet type>] [-a] <local IPX address> <remote IPX address>
 ```
 
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
 The `-i` option specifies the interval between Ping packets sent in seconds.
 The minimum allowed value is 2 ms (0.002).
 
@@ -403,6 +408,63 @@ with `-t` (or `0x04` if `-t` was not specified) will be ignored.
 The `-d` option specifies how many bytes of data will be sent along with each
 Ping packet. This value may be automatically reduced to what is permissible
 given the output interface's MTU.
+
+The `-v` flag will cause the program to print more detailed information.
+
+## spxtcp
+
+This program can proxy TCP connections through SPX connections. This could
+enable a service that normally uses TCP to communicate via SPX.
+
+This program depends on a running `ipx_wrap_mux`.
+
+Usage:
+```
+Usage: spxtcp [-v] [-1] [-6] [-d <maximum SPX data bytes>] [-s <remote IPX address>] [-t <remote IP address>:<remote port>] <local IPX address> <local IP address>:<local port>
+```
+
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
+The program will take all data received via SPX and transmit it via TCP and
+vice-versa.
+
+If neither `-s` nor `-t` is specified, `spxtcp` will wait until an incoming SPX
+and an incoming TCP connection have been accepted and then fork. The forked
+process will forward data between those two connections, while the parent will
+once again wait for two new incoming connections.
+
+If both `-s` and `-t` are specified, `spxtcp` will connect to both remote
+addresses and then forward data between the two established connections.
+
+If either `-s` or `-t` (but not both) are specified, `spxtcp` will wait for an
+incoming SPX (or TCP) connection, connect to the given TCP (or SPX) endpoint
+and then fork. The forked process will forward data between those two
+connections, while the parent will once again wait for a new SPX (or TCP)
+connection.
+
+The `-1` flag specifies that only SPX version 1 should be used. This version of
+SPX does not support packet size negotiation and thus the maximum packet size
+when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
+is not specified, SPXII will be used if the connection peer supports it.
+
+The `-6` flag specifies that IPv6 should be used for the TCP connections. In
+that case local and remote IP addresses must be IPv6 addresses.
+
+The `-d` option specifies the maximum amount of bytes of data transmitted per
+SPX packet. For SPX this value is ignored and is 534. For SPXII this value must
+be between 1 and 65483 (inclusive). SPXII will perform a packet size
+negotiation. It will gradually reduce the packet size from the specified
+maximum down until packets go through. If the `-d` option is not specified it
+will start at 534 bytes of data.
+
+The `-s` option specifies the remote SPX address the program will connect to
+once the awaited incoming TCP connection (if any) has been established.
+
+The `-t` option specifies the remote IP address and TCP port the program will
+connect to once the awaited SPX connection (if any) has been established.
 
 The `-v` flag will cause the program to print more detailed information.
 
