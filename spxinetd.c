@@ -450,6 +450,8 @@ static bool write_to_exec_proc(int epoll_fd, struct spxinetd_cfg *cfg)
 		return true;
 	}
 
+	fflush(fd_exec_in);
+
 	/* could write the message, get rid of it */
 	counted_msg_queue_pop(&in_queue);
 	free(msg);
