@@ -1367,7 +1367,7 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 
 static _Noreturn void usage(void)
 {
-	printf("Usage: ipxtcp [-v] [-1] [-6] [-d <maximum SPX data bytes>] [-s <remote IPX address>] [-t <remote IP address>:<remote port>] <local IPX address> <local IP address>:<local port>\n");
+	printf("Usage: spxtcp [-v] [-1] [-6] [-d <maximum SPX data bytes>] [-s <remote IPX address>] [-t <remote IP address>:<remote port>] <local IPX address> <local IP address>:<local port>\n");
 	exit(SPXTCP_ERR_USAGE);
 }
 
