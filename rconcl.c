@@ -1761,7 +1761,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 
 static _Noreturn void usage(void)
 {
-	printf("Usage: rconcl [-v] [-1] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address\n");
+	printf("Usage: rconcl [-v] [-1] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address>\n");
 	exit(RCONCL_ERR_USAGE);
 }
 
