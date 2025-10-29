@@ -468,6 +468,43 @@ connect to once the awaited SPX connection (if any) has been established.
 
 The `-v` flag will cause the program to print more detailed information.
 
+## rconcl
+
+This program provides a rudimentary implementation of a client to the remote
+console on Novell Netware Servers.
+
+This program depends on a running `ipx_wrap_mux`.
+
+Usage:
+```
+Usage: rconcl [-v] [-1] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address>
+```
+
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
+After `rconcl` starts, it asks for the console password and then connects to
+the server. If authentication is successful, the list of console screens is
+displayed. The list can be navigated with the arrow-keys and a screen (or
+`Exit`) can be selected using the Enter-key. To return from a screen back to
+the list, the key combination Alt+Shift+X can be used.
+
+The `-1` flag specifies that only SPX version 1 should be used. This version of
+SPX does not support packet size negotiation and thus the maximum packet size
+when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
+is not specified, SPXII will be used if the connection peer supports it.
+
+The `-d` option specifies the maximum amount of bytes of data transmitted per
+SPX packet. For SPX this value is ignored and is 534. For SPXII this value must
+be between 1 and 65483 (inclusive). SPXII will perform a packet size
+negotiation. It will gradually reduce the packet size from the specified
+maximum down until packets go through. If the `-d` option is not specified it
+will start at 534 bytes of data.
+
+The `-v` flag will cause the program to print more detailed information.
+
 ## Acknowledgements
 
 ### uthash
@@ -478,3 +515,10 @@ license](https://troydhanson.github.io/uthash/license.html).
 
 The documentation for `uthash` is available
 [here](https://troydhanson.github.io/uthash/).
+
+### rconip
+
+It would not have been possible to implement `rconcl` without having `rconip`
+as a guide. It was developed by Paul Pergamenshchik and kindly released under
+the GPLv2. The website for `rconip` can be found
+[here](https://rconip.sourceforge.net/).
