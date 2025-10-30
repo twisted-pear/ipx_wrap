@@ -124,6 +124,15 @@ TAILQ_HEAD(rcon_screen_list, rcon_screen);
 static __be32 current_screen_id = CURRENT_SCREEN_NONE;
 static struct rcon_screen_list screen_list = TAILQ_HEAD_INITIALIZER(screen_list);
 
+static __u8 cp850[UCHAR_MAX + 1] = {
+	[0x10] = '>',
+	[0x11] = '<',
+	[0x1E] = '^',
+	[0x1F] = 'v'
+};
+
+static __u8 *current_cp = &cp850[0];
+
 #define RCON_NONCE_LEN 4
 
 static volatile sig_atomic_t keep_going = true;
@@ -849,6 +858,17 @@ static struct ipxw_mux_spx_msg *rcon_reply_pop(void)
 	return NULL;
 }
 
+static bool rcon_set_codepage(char *cp_name)
+{
+	if (strcmp("850", cp_name) == 0) {
+		current_cp = &cp850[0];
+		return true;
+	}
+
+	current_cp = &cp850[0];
+	return false;
+}
+
 static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password)
 {
 	struct ipxw_mux_spx_msg *msg = NULL;
@@ -901,15 +921,40 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 			break;
 		}
 
+		/* retrieve the server name */
+
+		char *server_name = NULL;
+		int pos = rcon_data_next_str(rep->data,
+				ntohs(rep->data_len), 0, &server_name);
+		if (pos < 0) {
+			break;
+		}
+
 		if (cfg->verbose) {
-			char *server_name = NULL;
-			int pos = rcon_data_next_str(rep->data,
-					ntohs(rep->data_len), 0, &server_name);
-			if (pos >= 0) {
-				printf("Server Name: %s\n", server_name);
-				free(server_name);
+			printf("Server Name: %s\n", server_name);
+		}
+
+		free(server_name);
+
+		/* retrieve the codepage */
+
+		char *cp = NULL;
+		pos = rcon_data_next_str(rep->data, ntohs(rep->data_len), pos,
+				&cp);
+		if (pos < 0) {
+			break;
+		}
+
+		bool cp_found = rcon_set_codepage(cp);
+
+		if (cfg->verbose) {
+			printf("Server Codepage: %s\n", cp);
+			if (!cp_found) {
+				printf("Using default codepage 850.\n");
 			}
 		}
+
+		free(cp);
 
 		free(msg);
 		msg = NULL;
@@ -1321,6 +1366,15 @@ static int translate_attrs(__u8 attrs)
 	return new_attrs;
 }
 
+static __u8 get_byte_from_codepage(__u8 c, __u8 *cp)
+{
+	if (cp[c] != 0) {
+		return cp[c];
+	}
+
+	return c;
+}
+
 // TODO: clean up!
 static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 {
@@ -1460,7 +1514,9 @@ static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 
 	move(0, 0);
 	for (i = 0; i < RCON_LINES * RCON_COLUMNS; i++) {
-		addch(screen_content[i] | translate_attrs(screen_attrs[i]));
+		__u8 cont = get_byte_from_codepage(screen_content[i],
+				current_cp);
+		addch(cont | translate_attrs(screen_attrs[i]));
 	}
 	move(ypos, xpos);
 	refresh();
@@ -1580,18 +1636,16 @@ static bool rcon_main(int epoll_fd, struct rconcl_cfg *cfg)
 
 		/* stdin */
 		if ((ev & RCONCL_EVENT_STDIN) != 0) {
-			int c = ERR;
-			while (true) {
-				c = getch();
-				if (c == ERR) {
-					break;
-				}
+			int c = getch();
+			if (c == ERR) {
+				continue;
+			}
 
-				if (in_screen_menu()) {
-					handle_screen_menu_input(epoll_fd, c);
-				} else {
-					handle_screen_input(epoll_fd, c);
-				}
+			if (in_screen_menu()) {
+				handle_screen_menu_input(epoll_fd, c);
+				refresh();
+			} else {
+				handle_screen_input(epoll_fd, c);
 			}
 		}
 	}
