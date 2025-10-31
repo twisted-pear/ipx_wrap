@@ -2515,12 +2515,6 @@ static bool ipxw_mux_spx_handle_recvd_generic(struct ipxw_mux_spx_handle h,
 {
 	assert(ipxw_mux_spx_established_pre_sizng(h));
 
-	if (h.last_known_state->local_current_sequence !=
-			msg->remote_expected_sequence) {
-		/* invalid message */
-		return false;
-	}
-
 	bool ret = true;
 
 	/* update the state */
@@ -2622,8 +2616,10 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 	size_t msg_buf_len = ipxw_mux_spx_msg_len(data_len,
 			h.last_known_state->spxii);
 
-	if (spx_seq_less_than(h.last_known_state->local_alloc_no, msg->seq_no))
-	{
+	if (msg->spxii && msg->system && msg->seq_no == 0) {
+		/* special case for SPXII acks, do nothing */
+	} else if (spx_seq_less_than(h.last_known_state->local_alloc_no,
+				msg->seq_no)) {
 		/* invalid message, no output */
 		memset(msg, 0, msg_buf_len);
 		return 0;
