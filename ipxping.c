@@ -424,7 +424,7 @@ static void print_stats(struct ipxping_stats *stats, struct ipx_addr
 	double loss = 0.0;
 	if (stats->n_pings > 0) {
 		loss = ((stats->n_pings - stats->n_pings_with_replies) /
-				stats->n_pings) * 100;
+				((double) stats->n_pings)) * 100.0;
 	}
 
 	double runtime_s = (stats->time_end.tv_sec - stats->time_start.tv_sec)
