@@ -3,7 +3,7 @@
 
 #define IPX_ADDR_NODE_BYTES 6
 
-#define IFINDEX_MAX 64
+#define IFINDEX_MAX 512
 
 #ifndef bpf_htons
 #	define bpf_htons htons
