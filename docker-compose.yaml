@@ -5,17 +5,28 @@ x-ipx-host: &service-ipx-host
   pull_policy: build
   build:
     context: .
-  cap_add:
-    - BPF
-    - NET_ADMIN
-    - NET_RAW
-    - PERFMON
   sysctls:
     - net.ipv4.ip_forward=0
     - net.ipv4.conf.all.forwarding=0
     - net.ipv4.conf.default.forwarding=0
     - net.ipv6.conf.all.forwarding=1
     - net.ipv6.conf.default.forwarding=1
+  environment:
+    - IPX_PREFIX=${IPX_PREFIX:-fdaabbbb}
+    - SAPD_CFG=${SAPD_CFG:-samples/empty.cfg}
+
+x-ipx-sidecar: &service-ipx-sidecar
+  image: ipx-host
+  tty: true
+  init: true
+  pull_policy: build
+  build:
+    context: .
+  cap_add:
+    - BPF
+    - NET_ADMIN
+    - NET_RAW
+    - PERFMON
   environment:
     - IPX_PREFIX=${IPX_PREFIX:-fdaabbbb}
     - SAPD_CFG=${SAPD_CFG:-samples/empty.cfg}
@@ -33,7 +44,7 @@ services:
   ipxhost001:
     <<: *service-ipx-host
     container_name: ipxhost001
-    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    command: /bin/sh -c "sleep infinity"
     networks:
       ipxnet_001_to_002:
         mac_address: 00:ad:de:ad:01:01
@@ -41,10 +52,16 @@ services:
       ipxnet_left:
         mac_address: 00:ad:de:ad:03:01
         ipv6_address: fdaa:bbbb:0000:0003:00ad:deff:fead:0301
+  ipxhost001-sidecar:
+    <<: *service-ipx-sidecar
+    container_name: ipxhost001-sidecar
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    network_mode: service:ipxhost001
+
   ipxhost002:
     <<: *service-ipx-host
     container_name: ipxhost002
-    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    command: /bin/sh -c "sleep infinity"
     networks:
       ipxnet_001_to_002:
         mac_address: 00:ad:de:ad:01:02
@@ -52,10 +69,16 @@ services:
       ipxnet_002_to_003:
         mac_address: 00:ad:de:ad:02:02
         ipv6_address: fdaa:bbbb:0000:0002:00ad:deff:fead:0202
+  ipxhost002-sidecar:
+    <<: *service-ipx-sidecar
+    container_name: ipxhost002-sidecar
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    network_mode: service:ipxhost002
+
   ipxhost003:
     <<: *service-ipx-host
     container_name: ipxhost003
-    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    command: /bin/sh -c "sleep infinity"
     networks:
       ipxnet_002_to_003:
         mac_address: 00:ad:de:ad:02:03
@@ -63,14 +86,25 @@ services:
       ipxnet_right:
         mac_address: 00:ad:de:ad:05:03
         ipv6_address: fdaa:bbbb:0000:0005:00ad:deff:fead:0503
+  ipxhost003-sidecar:
+    <<: *service-ipx-sidecar
+    container_name: ipxhost003-sidecar
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    network_mode: service:ipxhost003
+
   ipxhost004:
     <<: *service-ipx-host
     container_name: ipxhost004
-    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    command: /bin/sh -c "sleep infinity"
     networks:
       ipxnet_001_to_002:
         mac_address: 00:ad:de:ad:01:04
         ipv6_address: fdaa:bbbb:0000:0001:00ad:deff:fead:0104
+  ipxhost004-sidecar:
+    <<: *service-ipx-sidecar
+    container_name: ipxhost004-sidecar
+    command: /bin/sh -c "./start_for_prefix.sh $${IPX_PREFIX} $${SAPD_CFG} 2>&1"
+    network_mode: service:ipxhost004
 
 networks:
   ipxnet_001_to_002:
