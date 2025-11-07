@@ -468,6 +468,46 @@ connect to once the awaited SPX connection (if any) has been established.
 
 The `-v` flag will cause the program to print more detailed information.
 
+## ipxtap
+
+This program creates a virtual network interface and redirects Ethernet frames
+sent to that interface to the specified remote IPX address. Ethernet frames
+received on the specified local IPX address are redirected to the virtual
+interface. This can be used to establish a virtual Ethernet network over an IPX
+network.
+
+This program depends on a running `ipx_wrap_mux`.
+
+Usage:
+```
+Usage: ipxtap [-v] [-b] [-a] [-t <packet type>] <interface name> <local IPX address> <remote IPX address>
+```
+
+The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
+number>.<2 byte hex socket>`. For example: `deadcafe.000000000001.f00f`. If the
+socket number of the local IPX address is specified as zero, a random dynamic
+socket will be chosen.
+
+The interface name is the name of the virtual TAP interface to be created.
+
+Essentially, `ipxtap` will wrap Ethernet frames received on the virtual TAP
+interface in an IPX packet and send it to the remote address. It will unwrap
+the contents of received IPX packets and send them to the virtual TAP interface
+as Ethernet frames. Thus two mirrored `ipxtap` processes can be used to
+establish a virtual Ethernet link on top of an IPX network.
+
+The `-a` flag will cause the program to accept IPX packets of any type. If it
+is not specified, only packets of the type specified with `-t` (or `0x1e`, if
+`-t` is not specified) will be accepted.
+
+The `-b` flag instructs the program to also accept broadcast IPX packets.
+
+The `-t` option can be used to specify the packet type to use for sending IPX
+packets. If no packet type is specified, then the process will use the packet
+type `0x1e`.
+
+The `-v` flag will cause the program to print more detailed information.
+
 ## rconcl
 
 This program provides a rudimentary implementation of a client to the remote

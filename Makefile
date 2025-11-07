@@ -9,7 +9,7 @@ VMLINUX_H_PREREQ = $(shell test -f /sys/kernel/btf/vmlinux && echo "/sys/kernel/
 
 USER_TARGETS = ipx_wrap_if_config
 IFD_TARGETS = ipx_wrap_ifd
-MUX_TARGETS = ipxcat ipxdiag spxinetd ipxping spxtcp
+MUX_TARGETS = ipxcat ipxdiag spxinetd ipxping spxtcp ipxtap
 RCON_TARGETS = rconcl
 SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd ipx_wrap_pongd
 MUXER_TARGETS = ipx_wrap_mux
