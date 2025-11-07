@@ -5,6 +5,8 @@ x-ipx-host: &service-ipx-host
   pull_policy: build
   build:
     context: .
+  cap_add:
+    - NET_ADMIN
   sysctls:
     - net.ipv4.ip_forward=0
     - net.ipv4.conf.all.forwarding=0
