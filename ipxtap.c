@@ -222,7 +222,7 @@ static _Noreturn void do_ipxtap(struct ipxtap_cfg *cfg, int epoll_fd)
 	size_t mtu = max_oif_data_len - sizeof(struct ethhdr);
 
 	/* make TAP devicee */
-	if_fd = open("/dev/net/tun", O_RDWR);
+	if_fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
 	if (if_fd == -1) {
 		perror("opening TAP device");
 		cleanup_and_exit(epoll_fd, IPXTAP_ERR_TAP_FD);
