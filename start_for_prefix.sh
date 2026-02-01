@@ -46,6 +46,8 @@ ip -6 -o addr | grep "inet6 ${IPV6_PREFIX}:" | while read IFLINE; do
 	"${IPX_WRAP_DIR}/ipx_wrap_ifd" "${IFACE}" "${IPV6_ADDR}" &
 done
 
+sleep 5
+
 "${IPX_WRAP_DIR}/ipx_wrap_ripd" "0x${IPX_PREFIX}" &
 RIPD_PID="$!"
 
