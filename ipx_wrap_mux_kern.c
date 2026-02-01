@@ -64,6 +64,26 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } ipx_wrap_mux_spx_state SEC(".maps");
 
+struct bpf_cb_spx_info {
+	union {
+		__u32 cb[5];
+		struct {
+			__u32 mark;
+			__u16 is_spx_end_of_conn_ack:1,
+			      is_spxii:1,
+			      is_negotiate_size:1,
+			      reserved:13;
+			__be16 spx_conn_id;
+			struct ipx_addr spx_src;
+		} __attribute__((packed));
+	};
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct bpf_cb_spx_info) == (sizeof(__u32) * 5),
+		"bpf_cb_spx_info has invalid size");
+
+#define IPX_SPX_REFLECTED_ACK 0x47744703
+
 enum ipx_wrap_spx_ingress_verdict {
 	SPX_DROP = 0,
 	SPX_PASS,
@@ -273,19 +293,9 @@ bool __always_inline is_to_managed_sock(struct __sk_buff *skb, struct ipv6hdr
 	return false;
 }
 
-#define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
-
 SEC("tc/ingress")
 int ipx_wrap_demux(struct __sk_buff *skb)
 {
-	/* ugly but necessary to sneak it past the verifier */
-	struct bpf_cb_info cb;
-	cb.cb[0] = skb->cb[0];
-	cb.cb[1] = skb->cb[1];
-	cb.cb[2] = skb->cb[2];
-	cb.cb[3] = skb->cb[3];
-	cb.cb[4] = skb->cb[4];
-
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
 
@@ -340,12 +350,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	fib_params.ifindex = skb->ingress_ifindex;
 	long fib_res = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params),
 			BPF_FIB_LOOKUP_SKIP_NEIGH);
-	if (fib_res == 0) {
-		cb.is_for_local = false;
-		return (to_managed_sock ? TC_ACT_SHOT : TC_ACT_UNSPEC);
-	} else if (fib_res == BPF_FIB_LKUP_RET_NOT_FWDED) {
-		cb.is_for_local = true;
-	} else {
+	if (fib_res != BPF_FIB_LKUP_RET_NOT_FWDED) {
+		/* not for us */
 		return (to_managed_sock ? TC_ACT_SHOT : TC_ACT_UNSPEC);
 	}
 
@@ -357,7 +363,9 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	struct bpf_bind_entry *e = NULL;
 
-	if (cb.is_bcast) {
+	bool is_bcast = __builtin_memcmp(ipxh->daddr.node, IPX_BCAST_NODE,
+			sizeof(ipxh->daddr.node)) == 0;
+	if (is_bcast) {
 		struct mc_bind_entry_key key = {
 			.ifidx = skb->ingress_ifindex,
 			.dst_sock = ipxh->daddr.sock
@@ -377,7 +385,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	if (cb.is_bcast && !e->recv_bcast) {
+	if (is_bcast && !e->recv_bcast) {
 		return TC_ACT_SHOT;
 	}
 
@@ -392,7 +400,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 	/* if the packet is an SPX packet, see if it belongs to an existing
 	 * connection */
-	if (!cb.is_bcast && ipxh->type == SPX_PKT_TYPE) {
+	if (!is_bcast && ipxh->type == SPX_PKT_TYPE) {
 		if (cur.pos + sizeof(struct ipxhdr) + sizeof(struct spxhdr) <=
 				data_end) {
 			spxh = cur.pos + sizeof(struct ipxhdr);
@@ -470,7 +478,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	mux_msg->type = IPXW_MUX_RECV;
 	mux_msg->recv.saddr = saddr;
 	mux_msg->recv.pkt_type = pkt_type;
-	mux_msg->recv.is_bcast = cb.is_bcast;
+	mux_msg->recv.is_bcast = is_bcast;
 	mux_msg->recv.is_spx = (spx_state != NULL);
 	mux_msg->recv.data_len = data_len;
 	mux_msg->recv.tc = tc;
@@ -578,10 +586,8 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			sizeof(fib_params.ipv6_dst));
 
 	/* update cb */
-	struct bpf_cb_info cb_new = {
+	struct bpf_cb_spx_info cb_new = {
 		.mark = IPX_SPX_REFLECTED_ACK,
-		.is_bcast = false,
-		.is_for_local = false,
 		.is_spx_end_of_conn_ack = (spx_msg->datastream_type ==
 				SPX_DS_END_OF_CONN),
 		.is_spxii = spx_msg->spxii,
@@ -651,7 +657,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 
 static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 		*spx_state, struct ipxw_mux_spx_msg *spx_msg, bool
-		have_negotiate_size_hdr, struct bpf_cb_info *cb_info)
+		have_negotiate_size_hdr, struct bpf_cb_spx_info *cb_info)
 {
 	struct spxhdr *spxh = &(spx_msg->spxh);
 
@@ -778,7 +784,7 @@ static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
 }
 
 static __always_inline struct bpf_sock *get_client_sock_from_spx_conn(struct
-		bpf_cb_info *cb)
+		bpf_cb_spx_info *cb)
 {
 	if (cb->mark != IPX_SPX_REFLECTED_ACK) {
 		return NULL;
@@ -797,7 +803,7 @@ static __always_inline struct bpf_sock *get_client_sock_from_spx_conn(struct
 SEC("tc/egress")
 int ipx_wrap_mux(struct __sk_buff *skb)
 {
-	struct bpf_cb_info cb_info;
+	struct bpf_cb_spx_info cb_info;
 	cb_info.cb[0] = skb->cb[0];
 	cb_info.cb[1] = skb->cb[1];
 	cb_info.cb[2] = skb->cb[2];

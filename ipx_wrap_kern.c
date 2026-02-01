@@ -39,6 +39,22 @@ struct {
 #endif
 } ipx_wrap_if_config SEC(".maps");
 
+struct bpf_cb_mark_info {
+	union {
+		__u32 cb[5];
+		struct {
+			__u32 mark;
+			__u32 unused[4];
+		} __attribute__((packed));
+	};
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct bpf_cb_mark_info) == (sizeof(__u32) * 5),
+		"bpf_cb_mark_info has invalid size");
+
+#define IPX_TO_IPV6_REINJECT_MARK 0x47744701
+#define IPX_TO_IPV6UDP_REINJECT_MARK 0x47744702
+
 struct icmpv6_nd {
 	/* the reserved bits are already part of the ICMPv6 header struct */
 	struct in6_addr tgt_addr;
@@ -331,7 +347,7 @@ static __always_inline __sum16 calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh,
 
 static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 		if_config *ifcfg, struct ipv6_and_udphdr *newhdr, struct
-		__sk_buff *ctx, struct bpf_cb_info *cb_info)
+		__sk_buff *ctx)
 {
 	/* increase TC here as it is not constructed from the IPv6 hop limit on
 	 * egress */
@@ -361,11 +377,6 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 		}
 	}
 
-	/* set metadata in case this packet is for us, a second BPF program
-	 * will handle redirecting to the appropriate socket */
-	cb_info->is_bcast = false;
-	cb_info->is_for_local = false;
-
 	/* destination node is broadcast... */
 	if (__builtin_memcmp(ipxh->daddr.node, IPX_BCAST_NODE,
 				sizeof(ipxh->daddr.node)) == 0) {
@@ -376,8 +387,6 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 			__builtin_memcpy(&newhdr->ip6h.daddr,
 					IPV6_MCAST_ALL_NODES,
 					sizeof(newhdr->ip6h.daddr));
-			cb_info->is_bcast = true;
-			cb_info->is_for_local = true;
 		}
 	}
 
@@ -442,14 +451,13 @@ static __always_inline bool is_ipv6_in_ipx(struct ipxhdr *ipxh)
 	return true;
 }
 
-#define CB_INFO(ctx) ((struct bpf_cb_info *) &(ctx->cb[0]))
-
 SEC("tc/ingress")
 int ipx_wrap_in(struct __sk_buff *ctx)
 {
 	/* packet was already processed and reinjected, just accept */
-	if (CB_INFO(ctx)->mark == IPX_TO_IPV6_REINJECT_MARK ||
-			CB_INFO(ctx)->mark == IPX_TO_IPV6UDP_REINJECT_MARK) {
+	__u32 cb_mark = ((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark;
+	if (cb_mark == IPX_TO_IPV6_REINJECT_MARK || cb_mark ==
+			IPX_TO_IPV6UDP_REINJECT_MARK) {
 		return TC_ACT_OK;
 	}
 
@@ -487,8 +495,6 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	size_t newhdr_size;
 	struct ipv6_and_udphdr newhdr;
 	__builtin_memset(&newhdr, 0, sizeof(struct ipv6_and_udphdr));
-	struct bpf_cb_info cb_info;
-	__builtin_memset(&cb_info, 0, sizeof(struct bpf_cb_info));
 
 	bool ipv6_in_ipx = is_ipv6_in_ipx(ipxh);
 	if (ipv6_in_ipx) {
@@ -496,7 +502,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		newhdr_size = mk_ipv6_from_ipx(ipxh, ifcfg, &newhdr.ip6h);
 	} else {
 		oldhdr_size = 0;
-		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, ctx, &cb_info);
+		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, ctx);
 	}
 
 	/* install new IPv6 header */
@@ -536,16 +542,11 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 
 	/* mark and reinject the packet to trick the network stack */
 	if (ipv6_in_ipx) {
-		CB_INFO(ctx)->mark = IPX_TO_IPV6_REINJECT_MARK;
+		((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark =
+			IPX_TO_IPV6_REINJECT_MARK;
 	} else {
-		cb_info.mark = IPX_TO_IPV6UDP_REINJECT_MARK;
-
-		/* ugly but necessary to sneak it past the verifier */
-		ctx->cb[0] = cb_info.cb[0];
-		ctx->cb[1] = cb_info.cb[1];
-		ctx->cb[2] = cb_info.cb[2];
-		ctx->cb[3] = cb_info.cb[3];
-		ctx->cb[4] = cb_info.cb[4];
+		((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark =
+			IPX_TO_IPV6UDP_REINJECT_MARK;
 	}
 	return bpf_redirect(ctx->ingress_ifindex, BPF_F_INGRESS);
 }
@@ -593,7 +594,8 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 			}
 
 			/* reinject the packet on ingress */
-			CB_INFO(ctx)->mark = IPX_TO_IPV6_REINJECT_MARK;
+			// TODO: remove this when non-IPX traffic is allowed
+			((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark = IPX_TO_IPV6_REINJECT_MARK;
 			return bpf_redirect(ifidx, BPF_F_INGRESS);
 		}
 	}
