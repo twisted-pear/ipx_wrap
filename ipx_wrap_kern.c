@@ -227,13 +227,11 @@ static __always_inline bool is_nd_sol_for_prefix(__be32 prefix, struct ipv6hdr
 	/* check that we have a full ND packet */
 	struct icmpv6_nd *nd = (void *)((*icmp6h) + 1);
 	if (nd + 1 > data_end) {
-		bpf_printk("no-ND");
 		return false;
 	}
 
 	struct ipv6_eui64_addr *tgt_addr = (void *) &nd->tgt_addr;
 	if (tgt_addr->prefix != prefix) {
-		bpf_printk("nonmatching prefix %08x", tgt_addr->prefix);
 		return false;
 	}
 
