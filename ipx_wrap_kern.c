@@ -202,11 +202,15 @@ static __always_inline int mk_nd_adv(struct __sk_buff *ctx, struct ethhdr *eth,
 	return 0;
 }
 
-static __always_inline bool is_nd_sol(struct ipv6hdr *ip6h, void *data_end,
-		struct icmp6hdr **icmp6h)
+static __always_inline bool is_nd_sol_for_prefix(__be32 prefix, struct ipv6hdr
+		*ip6h, void *data_end, struct icmp6hdr **icmp6h)
 {
 	struct hdr_cursor cur;
 	cur.pos = ip6h + 1;
+
+	if (ip6h->nexthdr != IPPROTO_ICMPV6) {
+		return false;
+	}
 
 	if (parse_icmp6hdr(&cur, data_end, icmp6h) < 0) {
 		return false;
@@ -217,6 +221,19 @@ static __always_inline bool is_nd_sol(struct ipv6hdr *ip6h, void *data_end,
 	}
 
 	if ((*icmp6h)->icmp6_code != 0) {
+		return false;
+	}
+
+	/* check that we have a full ND packet */
+	struct icmpv6_nd *nd = (void *)((*icmp6h) + 1);
+	if (nd + 1 > data_end) {
+		bpf_printk("no-ND");
+		return false;
+	}
+
+	struct ipv6_eui64_addr *tgt_addr = (void *) &nd->tgt_addr;
+	if (tgt_addr->prefix != prefix) {
+		bpf_printk("nonmatching prefix %08x", tgt_addr->prefix);
 		return false;
 	}
 
@@ -584,20 +601,18 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	if (ip6h->nexthdr == IPPROTO_ICMPV6) {
-		struct icmp6hdr *icmp6h;
-		/* check for neighbor solicitations */
-		if (is_nd_sol(ip6h, data_end, &icmp6h)) {
-			/* rewrite the packet into a neighbor advertisement */
-			if (mk_nd_adv(ctx, eth, ip6h, icmp6h) < 0) {
-				return TC_ACT_SHOT;
-			}
-
-			/* reinject the packet on ingress */
-			// TODO: remove this when non-IPX traffic is allowed
-			((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark = IPX_TO_IPV6_REINJECT_MARK;
-			return bpf_redirect(ifidx, BPF_F_INGRESS);
+	struct icmp6hdr *icmp6h = NULL;
+	/* check for neighbor solicitations */
+	if (is_nd_sol_for_prefix(ifcfg->prefix, ip6h, data_end, &icmp6h)) {
+		/* rewrite the packet into a neighbor advertisement */
+		if (mk_nd_adv(ctx, eth, ip6h, icmp6h) < 0) {
+			return TC_ACT_SHOT;
 		}
+
+		/* reinject the packet on ingress */
+		// TODO: remove this when non-IPX traffic is allowed
+		((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark = IPX_TO_IPV6_REINJECT_MARK;
+		return bpf_redirect(ifidx, BPF_F_INGRESS);
 	}
 
 	struct ipv6_eui64_addr *daddr6 = (void *) &ip6h->daddr;
