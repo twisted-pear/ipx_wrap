@@ -255,19 +255,6 @@ static __always_inline void fill_ipv6_from_ipx_basic(struct ipxhdr *ipxh,
 	ipx_to_ipv6_addr(&(newhdr->daddr), &(ipxh->daddr), ifcfg->prefix);
 }
 
-static __always_inline size_t mk_ipv6_from_ipx(struct ipxhdr *ipxh, struct
-		if_config *ifcfg, struct ipv6hdr *newhdr)
-{
-	/* build new IPv6 header */
-	fill_ipv6_from_ipx_basic(ipxh, ifcfg, newhdr);
-
-	newhdr->payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) - sizeof(struct
-				ipxhdr));
-	newhdr->nexthdr = bpf_ntohs(ipxh->daddr.sock) & 0xFF;
-
-	return sizeof(struct ipv6hdr);
-}
-
 struct calc_ipx_in_ipv6_csum_loopctx {
 	__s64 diff;
 	__u32 pkt_offset;
@@ -412,58 +399,9 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 	return sizeof(struct ipv6_and_udphdr);
 }
 
-static __always_inline size_t mk_ipx_from_ipv6(struct ipv6hdr *ip6h, struct
-		ipxhdr *newhdr)
-{
-	struct ipv6_eui64_addr *daddr6 = (void *) &ip6h->daddr;
-	struct ipv6_eui64_addr *saddr6 = (void *) &ip6h->saddr;
-
-	/* build new IPX header */
-	newhdr->csum = IPX_CSUM_NONE;
-	newhdr->pktlen = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(struct
-				ipxhdr));
-	newhdr->tc = (ip6h->hop_limit > IPV6_HOP_LIMIT_MAX) ? 0 :
-		IPV6_HOP_LIMIT_MAX - ip6h->hop_limit;
-	newhdr->type = IPV6_IN_IPX_PKT_TYPE;
-
-	newhdr->daddr.net = daddr6->ipx_net;
-	__builtin_memcpy(&newhdr->daddr.node, daddr6->ipx_node_fst,
-			sizeof(newhdr->daddr.node) / 2);
-	__builtin_memcpy(((__u8 *) &newhdr->daddr.node) +
-			(sizeof(newhdr->daddr.node) / 2), daddr6->ipx_node_snd,
-			sizeof(newhdr->daddr.node) / 2);
-	newhdr->daddr.sock = bpf_htons(IPV6_IN_IPX_SOCK_BASE | ip6h->nexthdr);
-
-	newhdr->saddr.net = saddr6->ipx_net;
-	__builtin_memcpy(&newhdr->saddr.node, saddr6->ipx_node_fst,
-			sizeof(newhdr->saddr.node) / 2);
-	__builtin_memcpy(((__u8 *) &newhdr->saddr.node) +
-			(sizeof(newhdr->saddr.node) / 2), saddr6->ipx_node_snd,
-			sizeof(newhdr->saddr.node) / 2);
-	newhdr->saddr.sock = bpf_htons(IPV6_IN_IPX_SOCK_BASE | ip6h->nexthdr);
-
-	return sizeof(struct ipxhdr);
-}
-
 static __always_inline size_t unpack_ipx_in_ipv6(void)
 {
 	return 0;
-}
-
-static __always_inline bool is_ipv6_in_ipx(struct ipxhdr *ipxh)
-{
-	if (ipxh->type != IPV6_IN_IPX_PKT_TYPE) {
-		return false;
-	}
-
-	if ((bpf_ntohs(ipxh->daddr.sock) & 0xFF00) != IPV6_IN_IPX_SOCK_BASE) {
-		return false;
-	}
-	if ((bpf_ntohs(ipxh->saddr.sock) & 0xFF00) != IPV6_IN_IPX_SOCK_BASE) {
-		return false;
-	}
-
-	return true;
 }
 
 SEC("tc/ingress")
@@ -511,14 +449,8 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	struct ipv6_and_udphdr newhdr;
 	__builtin_memset(&newhdr, 0, sizeof(struct ipv6_and_udphdr));
 
-	bool ipv6_in_ipx = is_ipv6_in_ipx(ipxh);
-	if (ipv6_in_ipx) {
-		oldhdr_size = sizeof(struct ipxhdr);
-		newhdr_size = mk_ipv6_from_ipx(ipxh, ifcfg, &newhdr.ip6h);
-	} else {
-		oldhdr_size = 0;
-		newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, ctx);
-	}
+	oldhdr_size = 0;
+	newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, ctx);
 
 	/* install new IPv6 header */
 	eth->h_proto = bpf_htons(ETH_P_IPV6);
@@ -545,10 +477,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	/* the compiler cannot handle using newhdr_size directly */
-	if (newhdr_size == sizeof(struct ipv6hdr)) {
-		__builtin_memcpy(cur.pos, &newhdr, sizeof(struct ipv6hdr));
-	} else if (newhdr_size == sizeof(struct ipv6_and_udphdr)) {
+	if (newhdr_size == sizeof(struct ipv6_and_udphdr)) {
 		__builtin_memcpy(cur.pos, &newhdr, sizeof(struct
 					ipv6_and_udphdr));
 	} else {
@@ -556,13 +485,8 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	}
 
 	/* mark and reinject the packet to trick the network stack */
-	if (ipv6_in_ipx) {
-		((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark =
-			IPX_TO_IPV6_REINJECT_MARK;
-	} else {
-		((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark =
-			IPX_TO_IPV6UDP_REINJECT_MARK;
-	}
+	((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark =
+		IPX_TO_IPV6UDP_REINJECT_MARK;
 	return bpf_redirect(ctx->ingress_ifindex, BPF_F_INGRESS);
 }
 
@@ -622,18 +546,8 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	size_t oldhdr_size;
-	size_t newhdr_size;
-	struct ipxhdr newhdr;
-	__builtin_memset(&newhdr, 0, sizeof(struct ipxhdr));
-
-	if (is_ipx_in_ipv6(ip6h, data_end)) {
-		oldhdr_size = sizeof(struct iphdr) + sizeof(struct udphdr);
-		newhdr_size = unpack_ipx_in_ipv6();
-	} else {
-		oldhdr_size = sizeof(struct iphdr);
-		newhdr_size = mk_ipx_from_ipv6(ip6h, &newhdr);
-	}
+	size_t oldhdr_size = sizeof(struct iphdr) + sizeof(struct udphdr);
+	size_t newhdr_size = unpack_ipx_in_ipv6();
 
 	/* install new IPX header */
 	eth->h_proto = bpf_htons(ETH_P_IPX);
@@ -661,11 +575,7 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	if (newhdr_start + newhdr_size > data_end) {
 		return TC_ACT_SHOT;
 	}
-	if (newhdr_size == sizeof(struct ipxhdr)) {
-		__builtin_memcpy(newhdr_start, &newhdr, sizeof(struct ipxhdr));
-	} else if (newhdr_size == 0) {
-		// do nothing
-	} else {
+	if (newhdr_size != 0) {
 		return TC_ACT_SHOT;
 	}
 
