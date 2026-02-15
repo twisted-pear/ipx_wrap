@@ -35,10 +35,6 @@ IPX_WRAP_DIR="`dirname ${0}`"
 
 trap 'cleanup_subprocesses' EXIT INT QUIT TERM
 
-"${IPX_WRAP_DIR}/ipx_wrap_mux" "0x${IPX_PREFIX}" &
-MUX_PID="$!"
-sleep 5
-
 ip -6 -o addr | grep "inet6 ${IPV6_PREFIX}:" | while read IFLINE; do
 	IFACE=`echo "${IFLINE}" | cut -d ' ' -f 2`
 	IPV6_ADDR=`echo "${IFLINE}" | awk '{print $4}' | cut -d '/' -f 1`
@@ -46,6 +42,8 @@ ip -6 -o addr | grep "inet6 ${IPV6_PREFIX}:" | while read IFLINE; do
 	"${IPX_WRAP_DIR}/ipx_wrap_ifd" "${IFACE}" "${IPV6_ADDR}" &
 done
 
+"${IPX_WRAP_DIR}/ipx_wrap_mux" "0x${IPX_PREFIX}" &
+MUX_PID="$!"
 sleep 5
 
 "${IPX_WRAP_DIR}/ipx_wrap_ripd" "0x${IPX_PREFIX}" &

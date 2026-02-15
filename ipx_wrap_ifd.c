@@ -25,10 +25,54 @@ enum ifd_error_codes {
 };
 
 static struct ipx_wrap_kern_nopin *bpf_kern = NULL;
-static struct bpf_link *ingress_link = NULL;
-static struct bpf_link *egress_link = NULL;
+
+static struct bpf_tc_hook *if_hook = NULL;
 
 static volatile sig_atomic_t keep_going = true;
+
+static struct bpf_tc_hook *create_tc_hook(__u32 ifidx)
+{
+	struct bpf_tc_hook *h = calloc(1, sizeof(struct bpf_tc_hook));
+	if (h == NULL) {
+		return NULL;
+	}
+
+	h->sz = sizeof(struct bpf_tc_hook);
+	h->ifindex = ifidx;
+	h->attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+
+	int err = bpf_tc_hook_create(h);
+	if (err != 0) {
+		free(h);
+
+		errno = -err;
+		return NULL;
+	}
+
+	return h;
+}
+
+static bool attach_tc_prog(int fd, struct bpf_tc_hook *h, bool ingress)
+{
+	struct bpf_tc_opts o;
+	memset(&o, 0, sizeof(struct bpf_tc_opts));
+
+	o.sz = sizeof(struct bpf_tc_opts);
+	o.prog_fd = fd;
+	o.handle = h->parent;
+
+	struct bpf_tc_hook tmph;
+	memcpy(&tmph, h, sizeof(struct bpf_tc_hook));
+	tmph.attach_point = ingress ? BPF_TC_INGRESS : BPF_TC_EGRESS;
+
+	int err = bpf_tc_attach(&tmph, &o);
+	if (err != 0) {
+		errno = -err;
+		return false;
+	}
+
+	return true;
+}
 
 static void signal_handler(int signal)
 {
@@ -45,14 +89,8 @@ static void signal_handler(int signal)
 
 static _Noreturn void cleanup_and_exit(int exit_code)
 {
-	if (ingress_link != NULL) {
-		bpf_link__detach(ingress_link);
-		bpf_link__destroy(ingress_link);
-	}
-
-	if (egress_link != NULL) {
-		bpf_link__detach(egress_link);
-		bpf_link__destroy(egress_link);
+	if (if_hook != NULL) {
+		bpf_tc_hook_destroy(if_hook);
 	}
 
 	if (bpf_kern != NULL) {
@@ -98,12 +136,25 @@ int main(int argc, char **argv)
 		cleanup_and_exit(IFD_ERR_BPF);
 	}
 
-	ingress_link = bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_in,
-			ifidx, NULL);
-	egress_link = bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_out,
-			ifidx, NULL);
-	if (ingress_link == NULL || egress_link == NULL) {
-		perror("attach BPF programs");
+	if_hook = create_tc_hook(ifidx);
+	if (if_hook == NULL) {
+		perror("create TC hook");
+		cleanup_and_exit(IFD_ERR_BPF);
+	}
+
+	int ingress_fd = bpf_program__fd(bpf_kern->progs.ipx_wrap_in);
+	int egress_fd = bpf_program__fd(bpf_kern->progs.ipx_wrap_out);
+	if (ingress_fd < 0 || egress_fd < 0) {
+		fprintf(stderr, "Failed to obtain program FD\n");
+		cleanup_and_exit(IFD_ERR_BPF);
+	}
+
+	if (!attach_tc_prog(ingress_fd, if_hook, true)) {
+		perror("attach ingress BPF program");
+		cleanup_and_exit(IFD_ERR_BPF);
+	}
+	if (!attach_tc_prog(egress_fd, if_hook, false)) {
+		perror("attach egress BPF program");
 		cleanup_and_exit(IFD_ERR_BPF);
 	}
 
