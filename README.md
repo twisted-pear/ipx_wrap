@@ -14,7 +14,7 @@ client programs to bind to IPX sockets and transmit IPX packets.
 To propagate routes to real IPX hosts there is `ipx_wrap_ripd`. To advertise
 services on the IPX internetwork there is `ipx_wrap_sapd`.
 
-This most likely only works with a recent Linux kernel. Tested with Linux 6.15
+This most likely only works with a recent Linux kernel. Tested with Linux 6.18
 and libbpf 1.4.6.
 
 ## Warning!
@@ -68,28 +68,11 @@ address.
 
 ### Packet Conversion
 
-There are two ways packets are converted between IPX and IPv6. The first is
-intended to carry arbitrary IPv6 traffic over IPX. Here both the source and
-destination IPX socket numbers have a value of `(0xd6 << 8) | <next header>`.
-The IPX packet type is `0x1f`. On ingress, if both socket numbers have `0xd6`
-in their most significant bit and the packet type is `0x1f`, the IPX header is
-directly translated into an IPv6 header and the payload of the IPX packet is
-appended to that IPv6 header. On egress, any IPv6 packet that is not a UDP
-packet with source and destination port equal to `213` has its IPv6 header
-converted into an IPX header and its payload is appended to that IPX header.
-
-The second way to convert packets is intended to allow for routing of native
-IPX traffic. On ingress the entire IPX packet (header + payload) is wrapped in
-an IPv6 UDP packet with source and destination port `213`. The IPv6 header is
-populated with information from the IPX header. On egress, any IPv6 UDP packet
-with source and destination port equal to `213` has the IPv6 and UDP headers
+On ingress the entire IPX packet (header + payload) is wrapped in an IPv6 UDP
+packet with source and destination port `213`. The IPv6 header is populated
+with information from the IPX header. On egress, any IPv6 UDP packet with
+source and destination port equal to `213` has the IPv6 and UDP headers
 stripped out and the UDP payload is appended directly to the Ethernet header.
-
-Note that the first approach takes up all socket numbers between `0xd600` and
-`0xd6ff`. These are "well-known" sockets. Since this is not a NetWare
-application and what is left of Novell is now owned by OpenText, I have not
-contacted anybody to have these sockets reserved. So it is possible that they
-clash with existing applications.
 
 ### Loading
 
@@ -149,10 +132,6 @@ Loads and configures the BPF programs for one interface. As long as the program
 is running, the BPF programs remain active. When the program is stopped, the
 BPF programs are unloaded. The parameters and their meanings are the same as
 for `ipx_wrap_if_config`.
-
-It is crucial that this program is started _after_ `ipx_wrap_mux` for all
-participating interfaces. This is necessary to ensure the correct order of BPF
-programs.
 
 Usage:
 ```
