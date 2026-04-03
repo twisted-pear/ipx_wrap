@@ -20,7 +20,7 @@ CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -DNDEBUG
 else
 CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -fsanitize=address -fsanitize=leak -g
 endif
-BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wno-address-of-packed-member -Werror -O2
+BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wno-address-of-packed-member -Wno-missing-declarations -Werror -O2
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap -lbpf
 MUX_LIBS = -lm
