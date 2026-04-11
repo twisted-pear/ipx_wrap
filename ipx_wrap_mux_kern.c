@@ -896,6 +896,65 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	if (parse_udphdr(&cur, data_end, &udph) < 0) {
 		return TC_ACT_SHOT;
 	}
+
+	struct ipxw_mux_msg *mux_msg = cur.pos;
+
+	struct ipv6_eui64_addr *ip6_dummy_daddr = (struct ipv6_eui64_addr *)
+		&(ip6h->daddr);
+	__u8 direct_mark = bpf_ntohs(ip6_dummy_daddr->fffe) >> 8;
+	if (direct_mark == IPX_DIRECT_MARK) {
+		/* no xmit message exists, reconstruct destination and packet
+		 * type from IPv6 and UDP headers */
+
+		/* SPX is not supported in direct mode */
+		if (spx_state != NULL) {
+			return TC_ACT_SHOT;
+		}
+
+		/* make room for the ipx header */
+		if (bpf_skb_adjust_room(skb, sizeof(struct ipxhdr), BPF_ADJ_ROOM_NET, 0) < 0) {
+			return TC_ACT_SHOT;
+		}
+		bpf_skb_pull_data(skb, 0);
+
+		/* adjust pointers and reverify */
+		data_end = (void *)(long)skb->data_end;
+		data = (void *)(long)skb->data;
+
+		eth = data;
+		ip6h = (void *) (data + sizeof(struct ethhdr));
+		udph = (void *) (ip6h + sizeof(struct ipv6hdr));
+		mux_msg = (void *) (udph + sizeof(struct udphdr));
+		if (mux_msg + sizeof(struct ipxw_mux_msg) > data_end) {
+			return TC_ACT_SHOT;
+		}
+
+		/* copy the UDP header after the IPv6 header */
+		__builtin_memcpy(udph, ip6h + sizeof(struct ipxhdr),
+				sizeof(struct udphdr));
+
+		/* construct the mux msg */
+		mux_msg->type = IPXW_MUX_XMIT;
+		mux_msg->xmit.pkt_type = bpf_ntohs(ip6_dummy_daddr->fffe) &
+			0xFF;
+		mux_msg->xmit.data_len = bpf_ntohs(udph->len) - sizeof(struct
+				udphdr);
+		struct ipx_addr *ipx_daddr = &(mux_msg->xmit.daddr);
+		ipx_daddr->net = ip6_dummy_daddr->ipx_net;
+		__builtin_memcpy(ipx_daddr->node,
+				ip6_dummy_daddr->ipx_node_fst,
+				IPX_ADDR_NODE_BYTES / 2);
+		__builtin_memcpy(&(ipx_daddr->node[3]),
+				ip6_dummy_daddr->ipx_node_snd,
+				IPX_ADDR_NODE_BYTES / 2);
+		ipx_daddr->sock = udph->dest;
+
+		/* TODO: adjust the UDP length and checksum */
+
+		// TODO
+		return TC_ACT_SHOT;
+	}
+
 	if (bpf_ntohs(udph->len) < sizeof(struct udphdr) + sizeof(struct
 				ipxhdr)) {
 		return TC_ACT_SHOT;
@@ -904,8 +963,6 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	if (cur.pos + sizeof(struct ipxw_mux_msg) > data_end) {
 		return TC_ACT_SHOT;
 	}
-
-	struct ipxw_mux_msg *mux_msg = cur.pos;
 
 	/* remove IPX message data from checksum */
 	__s64 csum_diff = csum_del_ipxhdr(&(mux_msg->ipxh), 0);
