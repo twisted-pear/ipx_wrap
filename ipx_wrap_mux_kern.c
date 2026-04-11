@@ -898,11 +898,13 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	}
 
 	struct ipxw_mux_msg *mux_msg = cur.pos;
+	__s64 csum_diff = 0;
 
 	struct ipv6_eui64_addr *ip6_dummy_daddr = (struct ipv6_eui64_addr *)
 		&(ip6h->daddr);
-	__u8 direct_mark = bpf_ntohs(ip6_dummy_daddr->fffe) >> 8;
-	if (direct_mark == IPX_DIRECT_MARK) {
+	bool is_direct = (bpf_ntohs(ip6_dummy_daddr->fffe) >> 8) ==
+		IPX_DIRECT_MARK;
+	if (is_direct) {
 		/* no xmit message exists, reconstruct destination and packet
 		 * type from IPv6 and UDP headers */
 
@@ -912,7 +914,8 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		}
 
 		/* make room for the ipx header */
-		if (bpf_skb_adjust_room(skb, sizeof(struct ipxhdr), BPF_ADJ_ROOM_NET, 0) < 0) {
+		if (bpf_skb_adjust_room(skb, sizeof(struct ipxhdr),
+					BPF_ADJ_ROOM_NET, 0) < 0) {
 			return TC_ACT_SHOT;
 		}
 		bpf_skb_pull_data(skb, 0);
@@ -928,6 +931,7 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		if (mux_msg + sizeof(struct ipxw_mux_msg) > data_end) {
 			return TC_ACT_SHOT;
 		}
+		ip6_dummy_daddr = (struct ipv6_eui64_addr *) &(ip6h->daddr);
 
 		/* copy the UDP header after the IPv6 header */
 		__builtin_memcpy(udph, ip6h + sizeof(struct ipxhdr),
@@ -949,10 +953,13 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 				IPX_ADDR_NODE_BYTES / 2);
 		ipx_daddr->sock = udph->dest;
 
-		/* TODO: adjust the UDP length and checksum */
-
-		// TODO
-		return TC_ACT_SHOT;
+		/* adjust the UDP length and checksum */
+		csum_diff = csum_del((__be32 *) &(udph->len),
+				sizeof(udph->len), csum_diff);
+		udph->len = bpf_htons(bpf_ntohs(udph->len) + sizeof(struct
+					ipxhdr));
+		csum_diff = csum_add((__be32 *) &(udph->len),
+				sizeof(udph->len), csum_diff);
 	}
 
 	if (bpf_ntohs(udph->len) < sizeof(struct udphdr) + sizeof(struct
@@ -965,9 +972,11 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 	}
 
 	/* remove IPX message data from checksum */
-	__s64 csum_diff = csum_del_ipxhdr(&(mux_msg->ipxh), 0);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
+	if (!is_direct) {
+		csum_diff = csum_del_ipxhdr(&(mux_msg->ipxh), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
 	}
 
 	/* if we have an SPX socket, create the xmit message from the SPX state
