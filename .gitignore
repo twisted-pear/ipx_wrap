@@ -16,6 +16,7 @@
 /ipxping
 /spxtcp
 /ipxtap
+/ipxsend
 /rconcl
 /vmlinux.h
 /vmlinux.btf

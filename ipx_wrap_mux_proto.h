@@ -73,6 +73,10 @@ void ipxw_mux_unbind(struct ipxw_mux_handle h);
 ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		ipxw_mux_msg *conf_in, struct ipxw_mux_msg *conf_out);
 
+/* a thin wrapper around the sendto syscall */
+ssize_t ipxw_sendto(struct ipxw_mux_handle h, const void *buf, size_t len, int
+		flags, const struct sockaddr *dest_addr, socklen_t addrlen);
+
 /* write message to data socket, may block if the caller did not check if the
  * data socket is writeable and block is true */
 ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,

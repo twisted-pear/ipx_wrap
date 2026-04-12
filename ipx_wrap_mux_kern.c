@@ -925,16 +925,17 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 		data = (void *)(long)skb->data;
 
 		eth = data;
-		ip6h = (void *) (data + sizeof(struct ethhdr));
-		udph = (void *) (ip6h + sizeof(struct ipv6hdr));
-		mux_msg = (void *) (udph + sizeof(struct udphdr));
-		if (mux_msg + sizeof(struct ipxw_mux_msg) > data_end) {
+		ip6h = ((void *) eth) + sizeof(struct ethhdr);
+		udph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+		mux_msg = ((void *) udph) + sizeof(struct udphdr);
+		if (mux_msg + 1 > data_end) {
 			return TC_ACT_SHOT;
 		}
 		ip6_dummy_daddr = (struct ipv6_eui64_addr *) &(ip6h->daddr);
+		cur.pos = mux_msg;
 
 		/* copy the UDP header after the IPv6 header */
-		__builtin_memcpy(udph, ip6h + sizeof(struct ipxhdr),
+		__builtin_memcpy(udph, ((void *) udph) + sizeof(struct ipxhdr),
 				sizeof(struct udphdr));
 
 		/* construct the mux msg */
@@ -953,13 +954,23 @@ int ipx_wrap_mux(struct __sk_buff *skb)
 				IPX_ADDR_NODE_BYTES / 2);
 		ipx_daddr->sock = udph->dest;
 
+		/* adjust the IPv6 payload length */
+		ip6h->payload_len = bpf_htons(bpf_ntohs(ip6h->payload_len) +
+				sizeof(struct ipxhdr));
+
 		/* adjust the UDP length and checksum */
 		csum_diff = csum_del((__be32 *) &(udph->len),
 				sizeof(udph->len), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
 		udph->len = bpf_htons(bpf_ntohs(udph->len) + sizeof(struct
 					ipxhdr));
 		csum_diff = csum_add((__be32 *) &(udph->len),
 				sizeof(udph->len), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
 	}
 
 	if (bpf_ntohs(udph->len) < sizeof(struct udphdr) + sizeof(struct
