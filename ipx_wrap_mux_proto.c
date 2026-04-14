@@ -165,6 +165,7 @@ int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
 	}
 
 	struct ipxw_mux_msg bind_msg;
+	memset(&bind_msg, 0, sizeof(struct ipxw_mux_msg));
 	bind_msg.type = IPXW_MUX_BIND;
 	bind_msg.bind.addr.sock = ipx_addr->sipx_port;
 	bind_msg.bind.addr.net = ipx_addr->sipx_network;
@@ -780,6 +781,8 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 static void ipx_to_ipv6_sockaddr(struct sockaddr_in6 *dst, const struct
 		sockaddr_ipx *src, __be32 prefix)
 {
+	memset(dst, 0, sizeof(struct sockaddr_in6));
+
 	dst->sin6_family = AF_INET6;
 	dst->sin6_port = src->sipx_port;
 	dst->sin6_scope_id = 0;
@@ -789,11 +792,10 @@ static void ipx_to_ipv6_sockaddr(struct sockaddr_in6 *dst, const struct
 		&(dst->sin6_addr);
 	res->prefix = prefix;
 	res->ipx_net = src->sipx_network;
-	__builtin_memcpy(&(res->ipx_node_fst), src->sipx_node,
-			IPX_ADDR_NODE_BYTES / 2);
+	memcpy(&(res->ipx_node_fst), src->sipx_node, IPX_ADDR_NODE_BYTES / 2);
 	res->fffe = htons((IPX_DIRECT_MARK << 8) | src->sipx_type);
-	__builtin_memcpy(&(res->ipx_node_snd), &(src->sipx_node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
+	memcpy(&(res->ipx_node_snd), &(src->sipx_node[3]), IPX_ADDR_NODE_BYTES
+			/ 2);
 }
 
 ssize_t ipxw_sendto(struct ipxw_mux_handle h, const void *buf, size_t len, int
@@ -882,6 +884,66 @@ ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 		bool block)
 {
 	return ipxw_mux_xmit_with_ctrl(h, msg, block, NULL, 0);
+}
+
+static void ipv6_to_ipx_sockaddr(struct sockaddr_ipx *dst, const struct
+		sockaddr_in6 *src)
+{
+	memset(dst, 0, sizeof(struct sockaddr_ipx));
+
+	struct ipv6_eui64_addr *saddr = (struct ipv6_eui64_addr *)
+		&src->sin6_addr;
+
+	dst->sipx_family = AF_IPX;
+	dst->sipx_network = saddr->ipx_net;
+	memcpy(dst->sipx_node, saddr->ipx_node_fst, IPX_ADDR_NODE_BYTES / 2);
+	memcpy(&(dst->sipx_node[3]), saddr->ipx_node_snd, IPX_ADDR_NODE_BYTES /
+			2);
+	dst->sipx_port = src->sin6_port;
+	dst->sipx_type = ntohs(saddr->fffe) & 0xFF;
+}
+
+ssize_t ipxw_mux_recvfrom(struct ipxw_mux_handle h, void *buf, size_t len, int
+		flags, struct sockaddr *src_addr, socklen_t *addrlen)
+{
+	/* need both src_addr and addrlen if one is specified */
+	if ((addrlen == NULL) != (src_addr == NULL)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_in6 dummy_src;
+	socklen_t dummy_src_len = sizeof(dummy_src);
+
+	ssize_t ret = recvfrom(h.data_sock, buf, len, flags, (struct sockaddr
+				*) &dummy_src, &dummy_src_len);
+	if (ret < 0) {
+		return -1;
+	}
+
+	if (dummy_src_len != sizeof(struct sockaddr_in6)) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (dummy_src.sin6_family != AF_INET6) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_ipx real_src;
+	ipv6_to_ipx_sockaddr(&real_src, &dummy_src);
+
+	if (addrlen == NULL) {
+		return ret;
+	}
+
+	socklen_t addr_to_write = (*addrlen < sizeof(struct sockaddr_ipx)) ?
+		*addrlen : sizeof(struct sockaddr_ipx);
+
+	memcpy(src_addr, &real_src, addr_to_write);
+	*addrlen = sizeof(struct sockaddr_ipx);
+
+	return ret;
 }
 
 ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block)

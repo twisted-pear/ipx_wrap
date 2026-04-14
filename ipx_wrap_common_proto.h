@@ -62,7 +62,8 @@ struct ipxw_mux_msg_bind {
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
 	     pkt_type_any:1,
-	     reserved:6;
+	     recv_direct:1,
+	     reserved:5;
 	__u32 reserved2;
 } __attribute__((packed));
 
@@ -83,7 +84,8 @@ struct ipxw_mux_msg_getsockname {
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
 	     pkt_type_any:1,
-	     reserved:6;
+	     recv_direct:1,
+	     reserved:5;
 	__u16 reserved2;
 	__u16 reserved3;
 } __attribute__((packed));
@@ -153,7 +155,8 @@ struct bpf_bind_entry {
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
 	     pkt_type_any:1,
-	     reserved:6;
+	     recv_direct:1,
+	     reserved:5;
 };
 
 #define SPX_PKT_TYPE 0x05

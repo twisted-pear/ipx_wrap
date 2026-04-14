@@ -85,6 +85,10 @@ ssize_t ipxw_mux_xmit(struct ipxw_mux_handle h, const struct ipxw_mux_msg *msg,
 ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
 		ipxw_mux_msg *msg, bool block, void *ctrl, size_t ctrl_len);
 
+/* a thin wrapper around the recvfrom syscall */
+ssize_t ipxw_mux_recvfrom(struct ipxw_mux_handle h, void *buf, size_t len, int
+		flags, struct sockaddr *src_addr, socklen_t *addrlen);
+
 /* get the length of the received message from the header, may block */
 ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block);
 

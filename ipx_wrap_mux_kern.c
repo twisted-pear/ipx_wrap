@@ -444,6 +444,11 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	/* direct reception and SPX are incompatible for now */
+	if (e->recv_direct && spx_state != NULL) {
+		return TC_ACT_SHOT;
+	}
+
 	struct ipx_addr saddr = ipxh->saddr;
 	__u8 pkt_type = ipxh->type;
 	__u8 tc = ipxh->tc;
@@ -471,22 +476,91 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	/* clear the header so we can rewrite into a recv msg */
-	__builtin_memset(mux_msg, 0, sizeof(struct ipxw_mux_msg));
+	/* direct reception, mangle the source IPv6 address and UDP port */
+	if (e->recv_direct) {
+		/* move the UDP header directly before the payload */
+		__builtin_memcpy(((void *) (mux_msg + 1)) - sizeof(struct
+					udphdr), udph, sizeof(struct udphdr));
+		udph = ((void *) (mux_msg + 1)) - sizeof(struct udphdr);
 
-	/* rewrite to recv msg */
-	mux_msg->type = IPXW_MUX_RECV;
-	mux_msg->recv.saddr = saddr;
-	mux_msg->recv.pkt_type = pkt_type;
-	mux_msg->recv.is_bcast = is_bcast;
-	mux_msg->recv.is_spx = (spx_state != NULL);
-	mux_msg->recv.data_len = data_len;
-	mux_msg->recv.tc = tc;
+		/* adjust the source IPv6 addr and update checksum */
+		csum_diff = csum_del((__be32 *) &(ip6h->saddr), sizeof(struct
+					ipv6_eui64_addr), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+		struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
+			&(ip6h->saddr);
+		ip6_saddr->ipx_net = saddr.net;
+		__builtin_memcpy(ip6_saddr->ipx_node_fst, saddr.node,
+				IPX_ADDR_NODE_BYTES / 2);
+		ip6_saddr->fffe = bpf_htons((IPX_DIRECT_MARK << 8) | pkt_type);
+		__builtin_memcpy(ip6_saddr->ipx_node_snd, &(saddr.node[3]),
+				IPX_ADDR_NODE_BYTES / 2);
+		csum_diff = csum_add((__be32 *) &(ip6h->saddr), sizeof(struct
+					ipv6_eui64_addr), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
 
-	/* add recv msg header to checksum */
-	csum_diff = csum_add_ipxhdr(ipxh, csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
+		/* adjust the UDP source port and update checksum */
+		csum_diff = csum_del((__be32 *) &(udph->source),
+				sizeof(udph->source), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+		udph->source = saddr.sock;
+		csum_diff = csum_add((__be32 *) &(udph->source),
+				sizeof(udph->source), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+
+		/* adjust the IPv6 payload length and update checksum */
+		csum_diff = csum_del((__be32 *) &(ip6h->payload_len),
+				sizeof(ip6h->payload_len), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+		ip6h->payload_len = bpf_htons(data_len + sizeof(struct udphdr));
+		csum_diff = csum_add((__be32 *) &(ip6h->payload_len),
+				sizeof(ip6h->payload_len), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+
+		/* adjust the UDP length and update checksum */
+		csum_diff = csum_del((__be32 *) &(udph->len),
+				sizeof(udph->len), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+		udph->len = bpf_htons(data_len + sizeof(struct udphdr));
+		csum_diff = csum_add((__be32 *) &(udph->len),
+				sizeof(udph->len), csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
+
+	/* indirect reception */
+	} else {
+		/* clear the header so we can rewrite into a recv msg */
+		__builtin_memset(mux_msg, 0, sizeof(struct ipxw_mux_msg));
+
+		/* rewrite to recv msg */
+		mux_msg->type = IPXW_MUX_RECV;
+		mux_msg->recv.saddr = saddr;
+		mux_msg->recv.pkt_type = pkt_type;
+		mux_msg->recv.is_bcast = is_bcast;
+		mux_msg->recv.is_spx = (spx_state != NULL);
+		mux_msg->recv.data_len = data_len;
+		mux_msg->recv.tc = tc;
+
+		/* add recv msg header to checksum */
+		csum_diff = csum_add_ipxhdr(ipxh, csum_diff);
+		if (csum_diff < 0) {
+			return TC_ACT_SHOT;
+		}
 	}
 
 	enum ipx_wrap_spx_ingress_verdict spx_verdict = SPX_DROP;
@@ -553,6 +627,15 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		/* insert the modified checksum */
 		if (!csum_replace_with_zero_check(skb, csum_ofs, csum_diff)) {
 			return TC_ACT_SHOT;
+		}
+
+		/* shorten the packet when direct reception is enabled */
+		if (e->recv_direct) {
+			if (bpf_skb_adjust_room(skb, -((__s32)sizeof(struct
+								ipxhdr)),
+						BPF_ADJ_ROOM_NET, 0) < 0) {
+				return TC_ACT_SHOT;
+			}
 		}
 
 		return TC_ACT_OK;

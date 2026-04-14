@@ -66,7 +66,8 @@ struct bind_entry {
 	__u8 pkt_type;
 	__u8 recv_bcast:1,
 	     pkt_type_any:1,
-	     reserved:6;
+	     recv_direct:1,
+	     reserved:5;
 };
 
 struct ipx_if_addr {
@@ -278,6 +279,11 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	conn_rsp->addr = bind_addr;
 	conn_rsp->err = ENOTSUP;
 
+	if (e->recv_direct) {
+		conn_rsp->err = ENOTSUP;
+		return false;
+	}
+
 	__be16 conn_id = find_next_free_spx_conn_id(e);
 	/* no free connection ID */
 	if (conn_id == SPX_CONN_ID_UNKNOWN) {
@@ -439,6 +445,7 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	e->pkt_type = bind_msg->pkt_type;
 	e->pkt_type_any = bind_msg->pkt_type_any;
 	e->recv_bcast = bind_msg->recv_bcast;
+	e->recv_direct = bind_msg->recv_direct;
 	e->ht_id_to_spx_conn = NULL;
 	STAILQ_INIT(&e->conf_queue);
 
@@ -454,7 +461,8 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 			.prefix = iface->prefix,
 			.pkt_type = bind_msg->pkt_type,
 			.pkt_type_any = bind_msg->pkt_type_any,
-			.recv_bcast = bind_msg->recv_bcast
+			.recv_bcast = bind_msg->recv_bcast,
+			.recv_direct = bind_msg->recv_direct
 		};
 		int err =
 			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_bind_entries_uc,
@@ -537,7 +545,9 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 		} else {
 			printf("pkt type: %02hhx, ", bind_msg->pkt_type);
 		}
-		printf("recv bcasts: %s\n", bind_msg->recv_bcast ? "yes" :
+		printf("recv bcasts: %s, ", bind_msg->recv_bcast ? "yes" :
+				"no");
+		printf("recv direct: %s\n", bind_msg->recv_direct ? "yes" :
 				"no");
 
 		return true;
@@ -681,6 +691,8 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 			rsp_msg->getsockname.recv_bcast = be_conf->recv_bcast;
 			rsp_msg->getsockname.pkt_type_any =
 				be_conf->pkt_type_any;
+			rsp_msg->getsockname.recv_direct =
+				be_conf->recv_direct;
 
 			break;
 		case IPXW_MUX_SPX_ACCEPT:

@@ -168,6 +168,7 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 	}
 
 	struct ipxw_mux_msg bind_msg;
+	memset(&bind_msg, 0, sizeof(struct ipxw_mux_msg));
 	bind_msg.type = IPXW_MUX_BIND;
 	bind_msg.bind.addr = iface->addr;
 	bind_msg.bind.pkt_type = ifcfg->pkt_type;
