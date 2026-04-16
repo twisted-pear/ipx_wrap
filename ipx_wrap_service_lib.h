@@ -31,7 +31,14 @@ enum service_general_error_codes {
 	SRVC_ERR_MAX
 };
 
-STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
+struct queued_ipx_msg {
+	STAILQ_ENTRY(queued_ipx_msg) q_entry;
+	struct sockaddr_ipx addr;
+	__u16 data_len;
+	__u8 data[0];
+};
+
+STAILQ_HEAD(ipx_msg_queue, queued_ipx_msg);
 
 struct if_bind_config {
 	__be32 prefix;
@@ -51,13 +58,13 @@ struct if_entry {
 	UT_hash_handle h_data_sock; /* by data socket */
 	UT_hash_handle h_ipx_addr; /* by IPX addr */
 	/* msgs to send */
-	struct ipxw_msg_queue out_queue;
+	struct ipx_msg_queue out_queue;
 	/* whether to keep the interface after the if-scan */
 	bool keep;
 };
 
 bool get_now_secs(time_t *now_secs);
-bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg *msg, int
+bool queue_msg_on_iface(struct if_entry *iface, struct queued_ipx_msg *msg, int
 		epoll_fd);
 _Noreturn void cleanup_and_exit(int tmr_fd, int epoll_fd, void *service_ctx,
 		int exit_code);
@@ -72,7 +79,7 @@ extern void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx);
 extern bool service_reload(void *ctx);
 extern bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd);
 extern void service_handle_signal(int signal);
-extern bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry
+extern bool service_handle_msg(struct queued_ipx_msg *msg, struct if_entry
 		*iface, int epoll_fd, void *ctx);
 
 #endif /* __IPX_WRAP_SERVICE_LIB_H__ */

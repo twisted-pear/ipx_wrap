@@ -62,8 +62,8 @@ static _Noreturn void do_ipxsend(struct ipxsend_cfg *cfg, const char *to_send,
 	dst.sipx_port = cfg->target_addr.sock;
 
 	/* send the message */
-	ssize_t sent = ipxw_sendto(ipxh, to_send, len, 0, (struct sockaddr *)
-			&dst, sizeof(dst));
+	ssize_t sent = ipxw_mux_sendto(ipxh, to_send, len, 0, (struct sockaddr
+				*) &dst, sizeof(dst));
 	if (sent < 0) {
 		perror("sending message");
 		ipxw_mux_unbind(ipxh);

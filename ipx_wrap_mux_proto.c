@@ -798,8 +798,8 @@ static void ipx_to_ipv6_sockaddr(struct sockaddr_in6 *dst, const struct
 			/ 2);
 }
 
-ssize_t ipxw_sendto(struct ipxw_mux_handle h, const void *buf, size_t len, int
-		flags, const struct sockaddr *dest_addr, socklen_t addrlen)
+ssize_t ipxw_mux_sendto(struct ipxw_mux_handle h, const void *buf, size_t len,
+		int flags, const struct sockaddr *dest_addr, socklen_t addrlen)
 {
 	if (len > IPX_MAX_DATA_LEN) {
 		errno = EMSGSIZE;
@@ -3080,4 +3080,12 @@ int ipxw_get_outif_max_spx_data_len_for_peer(struct ipxw_mux_spx_handle h)
 	}
 
 	return (mtu - overhead);
+}
+
+void sockaddr_ipx_to_ipx_addr(struct ipx_addr *addr, const struct sockaddr_ipx
+		*sockaddr)
+{
+	addr->net = sockaddr->sipx_network;
+	memcpy(addr->node, sockaddr->sipx_node, IPX_ADDR_NODE_BYTES);
+	addr->sock = sockaddr->sipx_port;
 }

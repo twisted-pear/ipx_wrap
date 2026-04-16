@@ -17,7 +17,7 @@ bool get_now_secs(time_t *now_secs)
 	return true;
 }
 
-bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg *msg, int
+bool queue_msg_on_iface(struct if_entry *iface, struct queued_ipx_msg *msg, int
 		epoll_fd)
 {
 	int data_sock = ipxw_mux_handle_data(iface->mux_handle);
@@ -36,25 +36,30 @@ bool queue_msg_on_iface(struct if_entry *iface, struct ipxw_mux_msg *msg, int
 	return true;
 }
 
-static struct ipxw_mux_msg *recv_msg(struct if_entry *iface)
+static struct queued_ipx_msg *recv_msg(struct if_entry *iface)
 {
-	ssize_t expected = ipxw_mux_peek_recvd_len(iface->mux_handle, false);
+	__u8 dummy;
+	ssize_t expected = ipxw_mux_recvfrom(iface->mux_handle, &dummy, 1,
+			MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT, NULL, NULL);
 	if (expected < 0) {
 		return NULL;
 	}
 
-	struct ipxw_mux_msg *msg = calloc(1, expected);
+	struct queued_ipx_msg *msg = calloc(1, sizeof(struct queued_ipx_msg) +
+			expected);
 	if (msg == NULL) {
 		return NULL;
 	}
 
-	msg->type = IPXW_MUX_RECV;
-	msg->recv.data_len = expected - sizeof(*msg);
-	ssize_t msg_len = ipxw_mux_get_recvd(iface->mux_handle, msg, false);
+	socklen_t addr_len = sizeof(msg->addr);
+	ssize_t msg_len = ipxw_mux_recvfrom(iface->mux_handle, msg->data,
+			expected, MSG_DONTWAIT, (struct sockaddr *)
+			&(msg->addr), &addr_len);
 	if (msg_len < 0) {
 		free(msg);
 		return NULL;
 	}
+	msg->data_len = msg_len;
 
 	return msg;
 }
@@ -76,8 +81,11 @@ static ssize_t send_queued_msgs(struct if_entry *iface, int epoll_fd)
 		return 0;
 	}
 
-	struct ipxw_mux_msg *xmit_msg = STAILQ_FIRST(&iface->out_queue);
-	ssize_t err = ipxw_mux_xmit(iface->mux_handle, xmit_msg, false);
+	struct queued_ipx_msg *xmit_msg = STAILQ_FIRST(&iface->out_queue);
+	xmit_msg->addr.sipx_family = AF_IPX;
+	ssize_t err = ipxw_mux_sendto(iface->mux_handle, xmit_msg->data,
+			xmit_msg->data_len, MSG_DONTWAIT, (struct sockaddr *)
+			&(xmit_msg->addr), sizeof(xmit_msg->addr));
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
@@ -102,7 +110,7 @@ static void cleanup_iface(struct if_entry *iface)
 
 	/* remove all undelivered messages */
 	while (!STAILQ_EMPTY(&iface->out_queue)) {
-		struct ipxw_mux_msg *msg = STAILQ_FIRST(&iface->out_queue);
+		struct queued_ipx_msg *msg = STAILQ_FIRST(&iface->out_queue);
 		STAILQ_REMOVE_HEAD(&iface->out_queue, q_entry);
 		free(msg);
 	}
@@ -174,6 +182,7 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 	bind_msg.bind.pkt_type = ifcfg->pkt_type;
 	bind_msg.bind.pkt_type_any = ifcfg->pkt_type_any;
 	bind_msg.bind.recv_bcast = ifcfg->recv_bcast;
+	bind_msg.bind.recv_direct = true;
 
 	do {
 		iface->mux_handle = ipxw_mux_bind(&bind_msg);
@@ -501,7 +510,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 
 			/* can receive */
 			if (evs[i].events & EPOLLIN) {
-				struct ipxw_mux_msg *msg = recv_msg(iface);
+				struct queued_ipx_msg *msg = recv_msg(iface);
 				if (msg == NULL) {
 					perror("receiving msg");
 				} else {

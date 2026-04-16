@@ -3,18 +3,16 @@
 
 #define MAINTENANCE_INTERVAL_SECS INTERFACE_RESCAN_SECS
 
-static struct ipxw_mux_msg *mk_pong(struct ipxw_mux_msg *ping)
+static struct queued_ipx_msg *mk_pong(struct queued_ipx_msg *ping)
 {
-	struct ipxw_mux_msg *pong = calloc(1, sizeof(struct ipxw_mux_msg) +
-			ping->recv.data_len);
+	struct queued_ipx_msg *pong = calloc(1, sizeof(struct queued_ipx_msg) +
+			ping->data_len);
 	if (pong == NULL) {
 		return NULL;
 	}
 
-	pong->type = IPXW_MUX_XMIT;
-	pong->xmit.daddr = ping->recv.saddr;
-	pong->xmit.pkt_type = ping->recv.pkt_type;
-	pong->xmit.data_len = ping->recv.data_len;
+	pong->addr = ping->addr;
+	pong->data_len = ping->data_len;
 
 	struct ping_pkt *ping_pkt = (struct ping_pkt *) ping->data;
 	struct ping_pkt *pong_pkt = (struct ping_pkt *) pong->data;
@@ -24,24 +22,25 @@ static struct ipxw_mux_msg *mk_pong(struct ipxw_mux_msg *ping)
 	pong_pkt->type = PING_TYPE_REPLY;
 	pong_pkt->id = ping_pkt->id;
 	pong_pkt->result = PING_RESULT_REPLY;
-	memcpy(pong_pkt->data, ping_pkt->data, ping->recv.data_len -
-			sizeof(struct ping_pkt));
+	memcpy(pong_pkt->data, ping_pkt->data, ping->data_len - sizeof(struct
+				ping_pkt));
 
 	return pong;
 }
 
 
-static void handle_ping(struct ipxw_mux_msg *ping, struct if_entry *in_if, int epoll_fd)
+static void handle_ping(struct queued_ipx_msg *ping, struct if_entry *in_if,
+		int epoll_fd)
 {
 	fprintf(stderr, "Received Ping message from "
 			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx: ",
-			ntohl(ping->recv.saddr.net), ping->recv.saddr.node[0],
-			ping->recv.saddr.node[1], ping->recv.saddr.node[2],
-			ping->recv.saddr.node[3], ping->recv.saddr.node[4],
-			ping->recv.saddr.node[5], ntohs(ping->recv.saddr.sock));
+			ntohl(ping->addr.sipx_network), ping->addr.sipx_node[0],
+			ping->addr.sipx_node[1], ping->addr.sipx_node[2],
+			ping->addr.sipx_node[3], ping->addr.sipx_node[4],
+			ping->addr.sipx_node[5], ntohs(ping->addr.sipx_port));
 
 	/* not a valid Ping */
-	if (ping->recv.data_len < sizeof(struct ping_pkt)) {
+	if (ping->data_len < sizeof(struct ping_pkt)) {
 		fprintf(stderr, "invalid.\n");
 		return;
 	}
@@ -57,7 +56,7 @@ static void handle_ping(struct ipxw_mux_msg *ping, struct if_entry *in_if, int e
 	fprintf(stderr, "(ID: %hu) ", ntohs(ping_pkt->id));
 
 	do {
-		struct ipxw_mux_msg *pong = mk_pong(ping);
+		struct queued_ipx_msg *pong = mk_pong(ping);
 		if (pong == NULL) {
 			break;
 		}
@@ -96,7 +95,7 @@ void service_handle_signal(int signal)
 	/* do nothing */
 }
 
-bool service_handle_msg(struct ipxw_mux_msg *msg, struct if_entry *iface, int
+bool service_handle_msg(struct queued_ipx_msg *msg, struct if_entry *iface, int
 		epoll_fd, void *ctx)
 {
 	handle_ping(msg, iface, epoll_fd);

@@ -8,6 +8,7 @@
 #include <linux/ipv6.h>
 #include <linux/time_types.h>
 #include <linux/udp.h>
+#include <netipx/ipx.h>
 
 #include "common.h"
 #include "ipx_wrap_common_proto.h"
@@ -31,15 +32,6 @@ int ipxw_mux_handle_conf(struct ipxw_mux_handle h);
 /* absolutely not multithreading-safe */
 
 #define IPXW_MUX_SK_PKT_TYPE_ANY 0xFF
-
-struct sockaddr_ipx {
-	sa_family_t sipx_family;
-	__be16 sipx_port;
-	__be32 sipx_network;
-	__u8 sipx_node[IPX_ADDR_NODE_BYTES];
-	__u8 sipx_type;
-	__u8 sipx_zero; /* 16 byte fill */
-};
 
 int ipxw_mux_sk_socket(int domain, int type, int protocol);
 int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
@@ -74,8 +66,9 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		ipxw_mux_msg *conf_in, struct ipxw_mux_msg *conf_out);
 
 /* a thin wrapper around the sendto syscall */
-ssize_t ipxw_sendto(struct ipxw_mux_handle h, const void *buf, size_t len, int
-		flags, const struct sockaddr *dest_addr, socklen_t addrlen);
+ssize_t ipxw_mux_sendto(struct ipxw_mux_handle h, const void *buf, size_t len,
+		int flags, const struct sockaddr *dest_addr, socklen_t
+		addrlen);
 
 /* write message to data socket, may block if the caller did not check if the
  * data socket is writeable and block is true */
@@ -216,5 +209,8 @@ ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
 int ipxw_get_outif_max_ipx_data_len_for_dst(struct ipxw_mux_handle h, struct
 		ipx_addr *dst);
 int ipxw_get_outif_max_spx_data_len_for_peer(struct ipxw_mux_spx_handle h);
+
+void sockaddr_ipx_to_ipx_addr(struct ipx_addr *addr, const struct sockaddr_ipx
+		*sockaddr);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */
