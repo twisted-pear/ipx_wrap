@@ -39,6 +39,7 @@ ip -6 -o addr | grep "inet6 ${IPV6_PREFIX}:" | while read IFLINE; do
 	IFACE=`echo "${IFLINE}" | cut -d ' ' -f 2`
 	IPV6_ADDR=`echo "${IFLINE}" | awk '{print $4}' | cut -d '/' -f 1`
 
+	ethtool -K "${IFACE}" tx off rx off generic-segmentation-offload off scatter-gather off tx-gso-list off tx-ipxip4-segmentation off tx-ipxip6-segmentation off tx-udp_tnl-segmentation off tx-udp_tnl-csum-segmentation off >/dev/null
 	"${IPX_WRAP_DIR}/ipx_wrap_ifd" "${IFACE}" "${IPV6_ADDR}" &
 done
 
