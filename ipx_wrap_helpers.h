@@ -19,6 +19,15 @@ bool parse_ipxaddr(const char *str, struct ipx_addr *addr);
 
 bool get_bound_ipx_addr(struct ipxw_mux_handle h, struct ipx_addr *addr);
 
+struct queued_ipx_msg {
+	STAILQ_ENTRY(queued_ipx_msg) q_entry;
+	struct sockaddr_ipx addr;
+	__u16 data_len;
+	__u8 data[0];
+};
+
+STAILQ_HEAD(ipx_msg_queue, queued_ipx_msg);
+
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct counted_msg_queue {

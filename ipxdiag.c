@@ -121,7 +121,7 @@ struct diag_rsp_cursor {
 
 static volatile sig_atomic_t keep_going = true;
 static bool stdout_is_file = false;
-struct ipxw_msg_queue in_queue = STAILQ_HEAD_INITIALIZER(in_queue);
+struct ipx_msg_queue in_queue = STAILQ_HEAD_INITIALIZER(in_queue);
 
 static struct ipxw_mux_handle ipxh = ipxw_mux_handle_init;
 
@@ -168,7 +168,7 @@ static int setup_timer(int epoll_fd, time_t secs)
 	return tmr;
 }
 
-static bool queue_in_msg(int epoll_fd, struct ipxw_mux_msg *msg)
+static bool queue_in_msg(int epoll_fd, struct queued_ipx_msg *msg)
 {
 	/* reregister for ready-to-write events, now that messages are
 	 * available */
@@ -258,18 +258,20 @@ static int parse_diag_rsp(struct diag_rsp_cursor *cur, void *data_end, struct
 	return rsp->n_components;
 }
 
-static void print_diag_msg(struct ipxw_mux_msg *msg, bool verbose)
+static void print_diag_msg(struct queued_ipx_msg *msg, bool verbose)
 {
 	void *data = msg->data;
-	void *data_end = msg->data + msg->recv.data_len;
+	void *data_end = msg->data + msg->data_len;
 
 	struct diag_rsp_cursor cur = { .pos = data };
 
 	printf("response from ");
-	print_ipxaddr(stdout, &(msg->recv.saddr));
+	struct ipx_addr saddr;
+	sockaddr_ipx_to_ipx_addr(&saddr, &(msg->addr));
+	print_ipxaddr(stdout, &saddr);
 
 	if (verbose) {
-		printf(" (packet type: %02hhx)", msg->recv.pkt_type);
+		printf(" (packet type: %02hhx)", msg->addr.sipx_type);
 	}
 
 	printf(":\n");
@@ -345,7 +347,7 @@ static bool print_in_msg(int epoll_fd, struct ipxdiag_cfg *cfg)
 		return false;
 	}
 
-	struct ipxw_mux_msg *msg = STAILQ_FIRST(&in_queue);
+	struct queued_ipx_msg *msg = STAILQ_FIRST(&in_queue);
 	STAILQ_REMOVE_HEAD(&in_queue, q_entry);
 
 	print_diag_msg(msg, cfg->verbose);
@@ -377,7 +379,9 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
 static void ipx_recv(int epoll_fd, int tmr_fd, struct ipxdiag_cfg *cfg)
 {
 	/* IPX message received */
-	ssize_t expected_msg_len = ipxw_mux_peek_recvd_len(ipxh, false);
+	__u8 dummy;
+	ssize_t expected_msg_len = ipxw_mux_recvfrom(ipxh, &dummy, 1, MSG_PEEK
+			| MSG_TRUNC | MSG_DONTWAIT, NULL, NULL);
 	if (expected_msg_len < 0) {
 		if (errno == EINTR) {
 			return;
@@ -392,15 +396,17 @@ static void ipx_recv(int epoll_fd, int tmr_fd, struct ipxdiag_cfg *cfg)
 				IPXDIAG_ERR_IPX_FAILURE);
 	}
 
-	struct ipxw_mux_msg *msg = calloc(1, expected_msg_len + 1);
+	struct queued_ipx_msg *msg = calloc(1, sizeof(struct queued_ipx_msg) +
+			expected_msg_len + 1);
 	if (msg == NULL) {
 		perror("allocating message");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXDIAG_ERR_MSG_ALLOC);
 	}
 
-	msg->type = IPXW_MUX_RECV;
-	msg->recv.data_len = expected_msg_len - sizeof(struct ipxw_mux_msg);
-	ssize_t rcvd_len = ipxw_mux_get_recvd(ipxh, msg, false);
+	socklen_t addr_len = sizeof(msg->addr);
+	ssize_t rcvd_len = ipxw_mux_recvfrom(ipxh, msg->data, expected_msg_len,
+			MSG_DONTWAIT, (struct sockaddr *) &(msg->addr),
+			&addr_len);
 	if (rcvd_len < 0) {
 		free(msg);
 		if (errno == EINTR) {
@@ -412,12 +418,13 @@ static void ipx_recv(int epoll_fd, int tmr_fd, struct ipxdiag_cfg *cfg)
 				IPXDIAG_ERR_IPX_FAILURE);
 	}
 
-	size_t data_len = msg->recv.data_len;
+	size_t data_len = rcvd_len;
 	if (data_len == 0) {
 		free(msg);
 		return;
 	}
 	msg->data[data_len] = '\0';
+	msg->data_len = data_len;
 
 	/* queue received message */
 	if (!queue_in_msg(epoll_fd, msg)) {
@@ -427,20 +434,23 @@ static void ipx_recv(int epoll_fd, int tmr_fd, struct ipxdiag_cfg *cfg)
 	}
 }
 
-static struct ipxw_mux_msg *mk_diag_req(struct ipxdiag_cfg *cfg)
+static struct queued_ipx_msg *mk_diag_req(struct ipxdiag_cfg *cfg)
 {
 	size_t diag_req_data_len = sizeof(struct ipx_diag_req) +
 		(cfg->n_exclude_addrs * IPX_ADDR_NODE_BYTES);
-	struct ipxw_mux_msg *diag_req_msg = calloc(1, sizeof(struct
-				ipxw_mux_msg) + diag_req_data_len);
+	struct queued_ipx_msg *diag_req_msg = calloc(1, sizeof(struct
+				queued_ipx_msg) + diag_req_data_len);
 	if (diag_req_msg == NULL) {
 		return NULL;
 	}
 
-	diag_req_msg->type = IPXW_MUX_XMIT;
-	diag_req_msg->xmit.daddr = cfg->target_addr;
-	diag_req_msg->xmit.pkt_type = cfg->pkt_type;
-	diag_req_msg->xmit.data_len = diag_req_data_len;
+	diag_req_msg->addr.sipx_family = AF_IPX;
+	diag_req_msg->addr.sipx_network = cfg->target_addr.net;
+	memcpy(diag_req_msg->addr.sipx_node, cfg->target_addr.node,
+			IPX_ADDR_NODE_BYTES);
+	diag_req_msg->addr.sipx_port = cfg->target_addr.sock;
+	diag_req_msg->addr.sipx_type = cfg->pkt_type;
+	diag_req_msg->data_len = diag_req_data_len;
 
 	struct ipx_diag_req *diag_req_data = (struct ipx_diag_req *)
 		diag_req_msg->data;
@@ -464,6 +474,7 @@ static _Noreturn void do_ipxdiag(struct ipxdiag_cfg *cfg, int epoll_fd, int
 	bind_msg.bind.pkt_type = cfg->pkt_type;
 	bind_msg.bind.pkt_type_any = true;
 	bind_msg.bind.recv_bcast = false;
+	bind_msg.bind.recv_direct = true;
 
 	ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {
@@ -521,7 +532,7 @@ static _Noreturn void do_ipxdiag(struct ipxdiag_cfg *cfg, int epoll_fd, int
 	}
 
 	/* build the diagnostics request */
-	struct ipxw_mux_msg *diag_req = mk_diag_req(cfg);
+	struct queued_ipx_msg *diag_req = mk_diag_req(cfg);
 	if (diag_req == NULL) {
 		perror("creating diagnostics request");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg,
@@ -529,7 +540,9 @@ static _Noreturn void do_ipxdiag(struct ipxdiag_cfg *cfg, int epoll_fd, int
 	}
 
 	/* send the actual diagnostics request */
-	if (ipxw_mux_xmit(ipxh, diag_req, true) < 0) {
+	if (ipxw_mux_sendto(ipxh, diag_req->data, diag_req->data_len, 0,
+				(struct sockaddr *) &(diag_req->addr),
+				sizeof(diag_req->addr)) < 0) {
 		free(diag_req);
 		perror("sending diagnostics request");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg,
