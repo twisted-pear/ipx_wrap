@@ -31,7 +31,6 @@ enum ipxtap_error_codes {
 	IPXTAP_ERR_CONF_FAILURE,
 	IPXTAP_ERR_IPX_FAILURE,
 	IPXTAP_ERR_TAP_FAILURE,
-	IPXTAP_ERR_MSG_ALLOC,
 	IPXTAP_ERR_MAX
 };
 
@@ -81,20 +80,11 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, enum ipxtap_error_codes
 	exit(code);
 }
 
+static __u8 if_to_ipx_buf[IPX_MAX_DATA_LEN];
 static void if_to_ipx(int epoll_fd, struct ipxtap_cfg *cfg)
 {
-	size_t max_msg_len = sizeof(struct ipxw_mux_msg) + IPX_MAX_DATA_LEN;
-
-	struct ipxw_mux_msg *msg = calloc(1, max_msg_len);
-	if (msg == NULL) {
-		perror("allocating message");
-		cleanup_and_exit(epoll_fd, IPXTAP_ERR_MSG_ALLOC);
-	}
-
-	ssize_t n_read = read(if_fd, msg->data, IPX_MAX_DATA_LEN);
+	ssize_t n_read = read(if_fd, if_to_ipx_buf, IPX_MAX_DATA_LEN);
 	if (n_read < 0) {
-		free(msg);
-
 		if (cfg->verbose) {
 			perror("receiving from interface");
 		}
@@ -102,14 +92,11 @@ static void if_to_ipx(int epoll_fd, struct ipxtap_cfg *cfg)
 		return;
 	}
 
-	msg->type = IPXW_MUX_XMIT;
-	msg->xmit.data_len = n_read;
-	msg->xmit.pkt_type = cfg->pkt_type;
-	msg->xmit.daddr = cfg->remote_addr;
-	ssize_t err = ipxw_mux_xmit(ipxh, msg, false);
+	struct sockaddr_ipx dest;
+	ipx_addr_to_sockaddr_ipx(&dest, &(cfg->remote_addr), cfg->pkt_type);
+	ssize_t err = ipxw_mux_sendto(ipxh, if_to_ipx_buf, n_read,
+			MSG_DONTWAIT, (struct sockaddr *) &dest, sizeof(dest));
 	if (err < 0) {
-		free(msg);
-
 		if (errno == EINTR) {
 			return;
 		}
@@ -121,16 +108,15 @@ static void if_to_ipx(int epoll_fd, struct ipxtap_cfg *cfg)
 		perror("IPX xmit");
 		cleanup_and_exit(epoll_fd, IPXTAP_ERR_IPX_FAILURE);
 	}
-
-	free(msg);
 }
 
+static __u8 ipx_to_if_buf[IPX_MAX_DATA_LEN];
 static void ipx_to_if(int epoll_fd, struct ipxtap_cfg *cfg)
 {
 	/* IPX message received */
-	ssize_t expected_msg_len = ipxw_mux_peek_recvd_len(ipxh,
-			false);
-	if (expected_msg_len < 0) {
+	ssize_t rcvd_len = ipxw_mux_recvfrom(ipxh, ipx_to_if_buf,
+			IPX_MAX_DATA_LEN, MSG_DONTWAIT, NULL, NULL);
+	if (rcvd_len < 0) {
 		if (errno == EINTR) {
 			return;
 		}
@@ -139,39 +125,16 @@ static void ipx_to_if(int epoll_fd, struct ipxtap_cfg *cfg)
 			return;
 		}
 
-		perror("IPX receive peek");
-		cleanup_and_exit(epoll_fd, IPXTAP_ERR_IPX_FAILURE);
-	}
-
-	struct ipxw_mux_msg *msg = calloc(1, expected_msg_len);
-	if (msg == NULL) {
-		perror("allocating message");
-		cleanup_and_exit(epoll_fd, IPXTAP_ERR_MSG_ALLOC);
-	}
-
-	msg->type = IPXW_MUX_RECV;
-	msg->recv.data_len = expected_msg_len - sizeof(struct
-			ipxw_mux_msg);
-	ssize_t rcvd_len = ipxw_mux_get_recvd(ipxh, msg, false);
-	if (rcvd_len < 0) {
-		free(msg);
-		if (errno == EINTR) {
-			return;
-		}
-
 		perror("IPX receive");
 		cleanup_and_exit(epoll_fd, IPXTAP_ERR_IPX_FAILURE);
 	}
 
-	size_t data_len = msg->recv.data_len;
-	if (data_len == 0) {
-		free(msg);
+	if (rcvd_len == 0) {
 		return;
 	}
 
-	/* write to if_fd and free msg */
-	ssize_t err = write(if_fd, msg->data, data_len);
-	free(msg);
+	/* write to if_fd */
+	ssize_t err = write(if_fd, ipx_to_if_buf, rcvd_len);
 	if (err < 0) {
 		if (cfg->verbose) {
 			perror("sending to interface");
@@ -189,6 +152,7 @@ static _Noreturn void do_ipxtap(struct ipxtap_cfg *cfg, int epoll_fd)
 	bind_msg.bind.pkt_type = cfg->pkt_type;
 	bind_msg.bind.pkt_type_any = cfg->pkt_type_any;
 	bind_msg.bind.recv_bcast = cfg->accept_broadcasts;
+	bind_msg.bind.recv_direct = true;
 
 	ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {
