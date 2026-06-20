@@ -3089,3 +3089,13 @@ void sockaddr_ipx_to_ipx_addr(struct ipx_addr *addr, const struct sockaddr_ipx
 	memcpy(addr->node, sockaddr->sipx_node, IPX_ADDR_NODE_BYTES);
 	addr->sock = sockaddr->sipx_port;
 }
+
+void ipx_addr_to_sockaddr_ipx(struct sockaddr_ipx *sockaddr, const struct
+		ipx_addr *addr, __u8 pkt_type)
+{
+	sockaddr->sipx_family = AF_IPX;
+	sockaddr->sipx_type = pkt_type;
+	sockaddr->sipx_network = addr->net;
+	memcpy(sockaddr->sipx_node, addr->node, IPX_ADDR_NODE_BYTES);
+	sockaddr->sipx_port = addr->sock;
+}

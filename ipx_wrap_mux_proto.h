@@ -212,5 +212,7 @@ int ipxw_get_outif_max_spx_data_len_for_peer(struct ipxw_mux_spx_handle h);
 
 void sockaddr_ipx_to_ipx_addr(struct ipx_addr *addr, const struct sockaddr_ipx
 		*sockaddr);
+void ipx_addr_to_sockaddr_ipx(struct sockaddr_ipx *sockaddr, const struct
+		ipx_addr *addr, __u8 pkt_type);
 
 #endif /* __IPX_WRAP_MUX_PROTO_H__ */

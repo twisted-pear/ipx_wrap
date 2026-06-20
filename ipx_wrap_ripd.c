@@ -116,6 +116,7 @@ static struct queued_ipx_msg *mk_rip_request_for_iface(struct if_entry *iface,
 	}
 	struct rip_req_pkt *rip = (struct rip_req_pkt *) req->data;
 
+	req->addr.sipx_family = AF_IPX;
 	req->addr.sipx_network = iface->addr.net;
 	memcpy(req->addr.sipx_node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
 	req->addr.sipx_port = htons(RIP_SOCK);
@@ -140,10 +141,7 @@ static struct queued_ipx_msg *mk_rip_response_to_addr(struct ipx_addr *addr)
 	}
 	struct rip_rsp_pkt *rip = (struct rip_rsp_pkt *) rsp->data;
 
-	rsp->addr.sipx_network = addr->net;
-	memcpy(rsp->addr.sipx_node, addr->node, IPX_ADDR_NODE_BYTES);
-	rsp->addr.sipx_port = addr->sock;
-	rsp->addr.sipx_type = RIP_PKT_TYPE;
+	ipx_addr_to_sockaddr_ipx(&(rsp->addr), addr, RIP_PKT_TYPE);
 	rsp->data_len = sizeof(struct rip_rsp_pkt);
 	rip->rip_type = RIP_PKT_TYPE_RESPONSE;
 

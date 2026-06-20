@@ -287,6 +287,7 @@ static struct queued_ipx_msg *mk_sap_request_for_iface(struct if_entry *iface,
 	}
 	struct srv_query *sap = (struct srv_query *) req->data;
 
+	req->addr.sipx_family = AF_IPX;
 	req->addr.sipx_network = iface->addr.net;
 	memcpy(req->addr.sipx_node, IPX_BCAST_NODE, IPX_ADDR_NODE_BYTES);
 	req->addr.sipx_port = htons(SAP_SOCK);
@@ -310,10 +311,7 @@ static struct queued_ipx_msg *mk_sap_response_to_addr(struct ipx_addr *daddr,
 	}
 	struct srv_id_pkt *sap = (struct srv_id_pkt *) rsp->data;
 
-	rsp->addr.sipx_network = daddr->net;
-	memcpy(rsp->addr.sipx_node, daddr->node, IPX_ADDR_NODE_BYTES);
-	rsp->addr.sipx_port = daddr->sock;
-	rsp->addr.sipx_type = SAP_PKT_TYPE;
+	ipx_addr_to_sockaddr_ipx(&(rsp->addr), daddr, SAP_PKT_TYPE);
 	rsp->data_len = sizeof(struct srv_id_pkt);
 	sap->rsp_type = (nearest ? SAP_RSP_TYPE_NEAREST_SQ :
 			SAP_RSP_TYPE_GENERAL_SQ);

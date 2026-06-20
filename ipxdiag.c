@@ -444,12 +444,8 @@ static struct queued_ipx_msg *mk_diag_req(struct ipxdiag_cfg *cfg)
 		return NULL;
 	}
 
-	diag_req_msg->addr.sipx_family = AF_IPX;
-	diag_req_msg->addr.sipx_network = cfg->target_addr.net;
-	memcpy(diag_req_msg->addr.sipx_node, cfg->target_addr.node,
-			IPX_ADDR_NODE_BYTES);
-	diag_req_msg->addr.sipx_port = cfg->target_addr.sock;
-	diag_req_msg->addr.sipx_type = cfg->pkt_type;
+	ipx_addr_to_sockaddr_ipx(&(diag_req_msg->addr), &(cfg->target_addr),
+			cfg->pkt_type);
 	diag_req_msg->data_len = diag_req_data_len;
 
 	struct ipx_diag_req *diag_req_data = (struct ipx_diag_req *)

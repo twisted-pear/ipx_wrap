@@ -82,7 +82,6 @@ static ssize_t send_queued_msgs(struct if_entry *iface, int epoll_fd)
 	}
 
 	struct queued_ipx_msg *xmit_msg = STAILQ_FIRST(&iface->out_queue);
-	xmit_msg->addr.sipx_family = AF_IPX;
 	ssize_t err = ipxw_mux_sendto(iface->mux_handle, xmit_msg->data,
 			xmit_msg->data_len, MSG_DONTWAIT, (struct sockaddr *)
 			&(xmit_msg->addr), sizeof(xmit_msg->addr));
