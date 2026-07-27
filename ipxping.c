@@ -170,20 +170,24 @@ static bool send_ping(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 		ping_wait = NULL;
 	}
 
-	struct ipxw_mux_msg *ping_msg = calloc(1, sizeof(struct ipxw_mux_msg) +
-			sizeof(struct ping_pkt) + cfg->data_len);
-	if (ping_msg == NULL) {
+	__u8 *ping_buf = calloc(1, sizeof(struct ping_pkt) +
+			cfg->data_len);
+	if (ping_buf == NULL) {
 		return false;
 	}
 
 	/* build the ping packet */
 
-	ping_msg->type = IPXW_MUX_XMIT;
-	ping_msg->xmit.daddr = cfg->remote_addr;
-	ping_msg->xmit.pkt_type = cfg->tx_pkt_type;
-	ping_msg->xmit.data_len = sizeof(struct ping_pkt) + cfg->data_len;
+	struct sockaddr_ipx ping_dst;
+	ipx_addr_to_sockaddr_ipx(&ping_dst, &(cfg->remote_addr),
+			cfg->tx_pkt_type);
 
-	struct ping_pkt *ping_pkt = (struct ping_pkt *) ping_msg->data;
+	struct iovec iov = {
+		.iov_base = ping_buf,
+		.iov_len = sizeof(struct ping_pkt) + cfg->data_len
+	};
+
+	struct ping_pkt *ping_pkt = (struct ping_pkt *) ping_buf;
 	memcpy(ping_pkt->ping, PING_STR, PING_STR_LEN);
 	ping_pkt->version = PING_VERSION;
 	ping_pkt->type = PING_TYPE_QUERY;
@@ -207,9 +211,19 @@ static bool send_ping(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 			break;
 		}
 
+		/* create msg header */
+		struct msghdr msg = {
+			.msg_name = &ping_dst,
+			.msg_namelen = sizeof(ping_dst),
+			.msg_iov = &iov,
+			.msg_iovlen = 1,
+			.msg_control = ctrl_data,
+			.msg_controllen = ctrl_data_len,
+			.msg_flags = 0
+		};
+
 		/* send the ping */
-		ssize_t sent_len = ipxw_mux_xmit_with_ctrl(ipxh, ping_msg, false,
-				ctrl_data, ctrl_data_len);
+		ssize_t sent_len = ipxw_mux_sendmsg(ipxh, &msg, MSG_DONTWAIT);
 		if (sent_len < 0) {
 			break;
 		}
@@ -230,11 +244,11 @@ static bool send_ping(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 		/* update stats */
 		stats->n_pings++;
 
-		free(ping_msg);
+		free(ping_buf);
 		return true;
 	} while (0);
 
-	free(ping_msg);
+	free(ping_buf);
 	if (ping_wait != NULL) {
 		free(ping_wait);
 	}
@@ -295,7 +309,9 @@ static bool recv_ping_tx_ts(struct ipxping_cfg *cfg)
 
 static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 {
-	ssize_t expected_msg_len = ipxw_mux_peek_recvd_len(ipxh, false);
+	__u8 dummy;
+	ssize_t expected_msg_len = ipxw_mux_recvfrom(ipxh, &dummy, 1, MSG_PEEK
+			| MSG_TRUNC | MSG_DONTWAIT, NULL, NULL);
 	if (expected_msg_len < 0) {
 		if (errno == EINTR) {
 			return true;
@@ -304,18 +320,28 @@ static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 		return false;
 	}
 
-	struct ipxw_mux_msg *msg = calloc(1, expected_msg_len + 1);
-	if (msg == NULL) {
+	__u8 *buf = calloc(1, expected_msg_len + 1);
+	if (buf == NULL) {
 		return false;
 	}
 
+	struct sockaddr_ipx saddr;
+	struct iovec iov = {
+		.iov_base = buf,
+		.iov_len = expected_msg_len
+	};
 	__u8 cmsg_data[CTRL_DATA_LEN];
-	msg->type = IPXW_MUX_RECV;
-	msg->recv.data_len = expected_msg_len - sizeof(struct ipxw_mux_msg);
-	ssize_t rcvd_len = ipxw_mux_get_recvd_with_ctrl(ipxh, msg, false,
-			cmsg_data, CTRL_DATA_LEN);
+	struct msghdr msg = {
+		.msg_name = &saddr,
+		.msg_namelen = sizeof(struct sockaddr_ipx),
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+		.msg_control = cmsg_data,
+		.msg_controllen = CTRL_DATA_LEN
+	};
+	ssize_t rcvd_len = ipxw_mux_recvmsg(ipxh, &msg, MSG_DONTWAIT);
 	if (rcvd_len < 0) {
-		free(msg);
+		free(buf);
 		if (errno == EINTR) {
 			return true;
 		}
@@ -323,28 +349,29 @@ static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 		return false;
 	}
 
+	/* save out relevant data to the Pong */
+	struct ipx_addr pong_saddr;
+	sockaddr_ipx_to_ipx_addr(&pong_saddr, &saddr);
+	// TODO: get TC again
+	__u8 pong_tc = 0xFF;
+
 	/* need at least a full Ping msg */
-	size_t data_len = msg->recv.data_len;
-	if (data_len < sizeof(struct ping_pkt)) {
+	if (rcvd_len < sizeof(struct ping_pkt)) {
 		if (cfg->verbose) {
 			fprintf(stderr, "received truncated Pong from ");
-			print_ipxaddr(stderr, &(msg->recv.saddr));
+			print_ipxaddr(stderr, &(pong_saddr));
 			fprintf(stderr, "\n");
 		}
 
-		free(msg);
+		free(buf);
 		return true;
 	}
 
-	/* save out relevant data to the Pong */
-	struct ipx_addr pong_saddr = msg->recv.saddr;
-	__u8 pong_tc = msg->recv.tc;
-
-	struct ping_pkt *pong_pkt = (struct ping_pkt *) msg->data;
+	struct ping_pkt *pong_pkt = (struct ping_pkt *) buf;
 	__u8 pong_type = pong_pkt->type;
 	__u16 pong_id = ntohs(pong_pkt->id);
-	size_t pong_data_len = msg->recv.data_len - sizeof(struct ping_pkt);
-	free(msg);
+	size_t pong_data_len = rcvd_len - sizeof(struct ping_pkt);
+	free(buf);
 
 	if (pong_type != PING_TYPE_REPLY) {
 		if (cfg->verbose) {
@@ -457,6 +484,7 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 	bind_msg.bind.pkt_type = cfg->tx_pkt_type;
 	bind_msg.bind.pkt_type_any = cfg->rx_pkt_type_any;
 	bind_msg.bind.recv_bcast = false;
+	bind_msg.bind.recv_direct = true;
 
 	ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {
