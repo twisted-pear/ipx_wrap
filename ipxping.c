@@ -294,7 +294,7 @@ static bool recv_ping_tx_ts(struct ipxping_cfg *cfg)
 	if (ping_wait->have_tx_ts) {
 		if (cfg->verbose) {
 			fprintf(stderr, "got duplicate TX timestamp for ping "
-					" %hu\n", ping_id);
+					"%hu\n", ping_id);
 		}
 		errno = EINVAL;
 		return false;
