@@ -798,6 +798,36 @@ static void ipx_to_ipv6_sockaddr(struct sockaddr_in6 *dst, const struct
 			/ 2);
 }
 
+ssize_t ipxw_mux_sendmsg(struct ipxw_mux_handle h, const struct msghdr *msg,
+		int flags)
+{
+	struct msghdr actual_hdr;
+	memcpy(&actual_hdr, msg, sizeof(struct msghdr));
+
+	if (actual_hdr.msg_namelen == 0 && actual_hdr.msg_name == NULL) {
+		return sendmsg(h.data_sock, &actual_hdr, flags);
+	}
+
+	if (actual_hdr.msg_namelen != sizeof(struct sockaddr_ipx) ||
+			actual_hdr.msg_name == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (((struct sockaddr *) actual_hdr.msg_name)->sa_family != AF_IPX) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct sockaddr_in6 dummy_dst;
+	ipx_to_ipv6_sockaddr(&dummy_dst, (struct sockaddr_ipx *)
+			actual_hdr.msg_name, h.prefix);
+
+	actual_hdr.msg_name = &dummy_dst;
+	actual_hdr.msg_namelen = sizeof(struct sockaddr_in6);
+
+	return sendmsg(h.data_sock, &actual_hdr, flags);
+}
+
 ssize_t ipxw_mux_sendto(struct ipxw_mux_handle h, const void *buf, size_t len,
 		int flags, const struct sockaddr *dest_addr, socklen_t addrlen)
 {
@@ -903,6 +933,59 @@ static void ipv6_to_ipx_sockaddr(struct sockaddr_ipx *dst, const struct
 	dst->sipx_type = ntohs(saddr->fffe) & 0xFF;
 }
 
+ssize_t ipxw_mux_recvmsg(struct ipxw_mux_handle h, struct msghdr *msg, int
+		flags)
+{
+	/* need both src_addr and addrlen if one is specified */
+	if ((msg->msg_namelen == 0) != (msg->msg_name == NULL)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct msghdr actual_hdr;
+	memcpy(&actual_hdr, msg, sizeof(struct msghdr));
+
+	struct sockaddr_in6 dummy_src;
+	actual_hdr.msg_name = &dummy_src;
+	actual_hdr.msg_namelen = sizeof(struct sockaddr_in6);
+
+	ssize_t ret = recvmsg(h.data_sock, &actual_hdr, flags);
+	if (ret < 0) {
+		return -1;
+	}
+
+	if (actual_hdr.msg_namelen != sizeof(struct sockaddr_in6)) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (((struct sockaddr *) actual_hdr.msg_name)->sa_family != AF_INET6) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* restore info from actual header */
+	msg->msg_iovlen = actual_hdr.msg_iovlen;
+	msg->msg_controllen = actual_hdr.msg_controllen;
+	msg->msg_flags = actual_hdr.msg_flags;
+
+	if (msg->msg_name == NULL) {
+		return ret;
+	}
+
+	/* restore source address from actual header */
+	struct sockaddr_ipx real_src;
+	ipv6_to_ipx_sockaddr(&real_src, &dummy_src);
+
+	socklen_t addr_to_write = (msg->msg_namelen < sizeof(struct
+				sockaddr_ipx)) ? msg->msg_namelen :
+		sizeof(struct sockaddr_ipx);
+
+	memcpy(msg->msg_name, &real_src, addr_to_write);
+	msg->msg_namelen = sizeof(struct sockaddr_ipx);
+
+	return ret;
+}
+
 ssize_t ipxw_mux_recvfrom(struct ipxw_mux_handle h, void *buf, size_t len, int
 		flags, struct sockaddr *src_addr, socklen_t *addrlen)
 {
@@ -930,12 +1013,12 @@ ssize_t ipxw_mux_recvfrom(struct ipxw_mux_handle h, void *buf, size_t len, int
 		return -1;
 	}
 
-	struct sockaddr_ipx real_src;
-	ipv6_to_ipx_sockaddr(&real_src, &dummy_src);
-
 	if (addrlen == NULL) {
 		return ret;
 	}
+
+	struct sockaddr_ipx real_src;
+	ipv6_to_ipx_sockaddr(&real_src, &dummy_src);
 
 	socklen_t addr_to_write = (*addrlen < sizeof(struct sockaddr_ipx)) ?
 		*addrlen : sizeof(struct sockaddr_ipx);

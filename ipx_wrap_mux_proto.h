@@ -69,6 +69,9 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 ssize_t ipxw_mux_sendto(struct ipxw_mux_handle h, const void *buf, size_t len,
 		int flags, const struct sockaddr *dest_addr, socklen_t
 		addrlen);
+/* a thin wrapper around the sendmsg syscall */
+ssize_t ipxw_mux_sendmsg(struct ipxw_mux_handle h, const struct msghdr *msg,
+		int flags);
 
 /* write message to data socket, may block if the caller did not check if the
  * data socket is writeable and block is true */
@@ -81,6 +84,9 @@ ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
 /* a thin wrapper around the recvfrom syscall */
 ssize_t ipxw_mux_recvfrom(struct ipxw_mux_handle h, void *buf, size_t len, int
 		flags, struct sockaddr *src_addr, socklen_t *addrlen);
+/* a thin wrapper around the recvmsg syscall */
+ssize_t ipxw_mux_recvmsg(struct ipxw_mux_handle h, struct msghdr *msg, int
+		flags);
 
 /* get the length of the received message from the header, may block */
 ssize_t ipxw_mux_peek_recvd_len(struct ipxw_mux_handle h, bool block);
