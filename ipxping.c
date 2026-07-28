@@ -28,6 +28,7 @@ enum ipxping_error_codes {
 	IPXPING_ERR_SIG_HANDLER,
 	IPXPING_ERR_BIND,
 	IPXPING_ERR_RX_TX_TSTAMPS,
+	IPXPING_ERR_RX_TC,
 	IPXPING_ERR_GETSOCKNAME,
 	IPXPING_ERR_GET_OIF_DATA_LEN,
 	IPXPING_ERR_OIF_DATA_LEN_ZERO,
@@ -352,8 +353,6 @@ static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 	/* save out relevant data to the Pong */
 	struct ipx_addr pong_saddr;
 	sockaddr_ipx_to_ipx_addr(&pong_saddr, &saddr);
-	// TODO: get TC again
-	__u8 pong_tc = 0xFF;
 
 	/* need at least a full Ping msg */
 	if (rcvd_len < sizeof(struct ping_pkt)) {
@@ -384,7 +383,8 @@ static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 	}
 
 	struct __kernel_timespec pong_rx_ts;
-	if (!ipxw_mux_get_rx_timestamp(cmsg_data, CTRL_DATA_LEN, &pong_rx_ts))
+	if (!ipxw_mux_get_rx_timestamp(cmsg_data, msg.msg_controllen,
+				&pong_rx_ts))
 	{
 		if (cfg->verbose) {
 			fprintf(stderr, "failed to get RX timestamp for Pong from ");
@@ -393,6 +393,13 @@ static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 		}
 
 		return true;
+	}
+
+	__u8 pong_tc = ipxw_mux_get_rx_tc(cmsg_data, msg.msg_controllen);
+	if (pong_tc == IPXW_TC_INVALID && cfg->verbose) {
+		fprintf(stderr, "failed to get transport control for Pong from ");
+		print_ipxaddr(stderr, &pong_saddr);
+		fprintf(stderr, "\n");
 	}
 
 	struct ping_wait *ping_wait;
@@ -496,6 +503,11 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 		perror("timestamps");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg,
 				IPXPING_ERR_RX_TX_TSTAMPS);
+	}
+
+	if (!ipxw_mux_enable_rx_tc(ipxh)) {
+		perror("enabling reception of transport control");
+		cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_RX_TC);
 	}
 
 	if (cfg->verbose) {
