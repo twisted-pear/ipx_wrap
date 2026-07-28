@@ -15,6 +15,11 @@
 
 #define IPXW_MUX_CTRL_SOCK_NAME "ipxw_mux_ctrl"
 
+#define IPXPROTO_IPX IPPROTO_IPV6
+#define IPX_RECV_TRANSPORT_CONTROL IPV6_RECVHOPLIMIT
+#define IPX_TRANSPORT_CONTROL IPV6_HOPLIMIT
+#define IPXW_TC_INVALID (0xFF)
+
 struct ipxw_mux_handle {
 	int data_sock;
 	int conf_sock;
@@ -108,6 +113,10 @@ bool ipxw_mux_get_tx_timestamp(struct ipxw_mux_handle h, struct
 		__kernel_timespec *ts, __u32 *ts_id, bool block);
 bool ipxw_mux_get_rx_timestamp(void *ctrl, size_t ctrl_len, struct
 		__kernel_timespec *ts);
+
+/* get the transport control field from a message's ancillary data */
+bool ipxw_mux_enable_rx_tc(struct ipxw_mux_handle h);
+__u8 ipxw_mux_get_rx_tc(void *ctrl, size_t ctrl_len);
 
 /* muxer functions */
 

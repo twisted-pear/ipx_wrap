@@ -933,6 +933,55 @@ static void ipv6_to_ipx_sockaddr(struct sockaddr_ipx *dst, const struct
 	dst->sipx_type = ntohs(saddr->fffe) & 0xFF;
 }
 
+static void *ipxw_mux_get_rx_cmsg(void *ctrl, size_t ctrl_len, int level, int
+		type)
+{
+	struct msghdr msgh = {
+		.msg_name = NULL,
+		.msg_namelen = 0,
+		.msg_iov = NULL,
+		.msg_iovlen = 0,
+		.msg_control = ctrl,
+		.msg_controllen = ctrl_len,
+		.msg_flags = 0
+	};
+
+	struct cmsghdr *cmsgh;
+	for (cmsgh = CMSG_FIRSTHDR(&msgh); cmsgh != NULL; cmsgh =
+			CMSG_NXTHDR(&msgh, cmsgh)) {
+		if (cmsgh->cmsg_level == level && cmsgh->cmsg_type == type) {
+			return CMSG_DATA(cmsgh);
+		}
+	}
+
+	return NULL;
+}
+
+bool ipxw_mux_enable_rx_tc(struct ipxw_mux_handle h)
+{
+	int val = 1;
+	if (setsockopt(h.data_sock, IPXPROTO_IPX, IPX_RECV_TRANSPORT_CONTROL,
+				&val, sizeof(val)) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
+__u8 ipxw_mux_get_rx_tc(void *ctrl, size_t ctrl_len)
+{
+	int tc;
+
+	void *rcvd_tc = ipxw_mux_get_rx_cmsg(ctrl, ctrl_len, IPXPROTO_IPX,
+			IPX_TRANSPORT_CONTROL);
+	if (rcvd_tc == NULL) {
+		return IPXW_TC_INVALID;
+	}
+
+	memcpy(&tc, rcvd_tc, sizeof(int));
+	return tc;
+}
+
 ssize_t ipxw_mux_recvmsg(struct ipxw_mux_handle h, struct msghdr *msg, int
 		flags)
 {
@@ -1288,39 +1337,23 @@ bool ipxw_mux_get_tx_timestamp(struct ipxw_mux_handle h, struct
 bool ipxw_mux_get_rx_timestamp(void *ctrl, size_t ctrl_len, struct
 		__kernel_timespec *ts)
 {
-	struct msghdr msgh = {
-		.msg_name = NULL,
-		.msg_namelen = 0,
-		.msg_iov = NULL,
-		.msg_iovlen = 0,
-		.msg_control = ctrl,
-		.msg_controllen = ctrl_len,
-		.msg_flags = 0
-	};
-
 	struct scm_timestamping64 tsmsg;
+	void *rcvd_tsmsg = ipxw_mux_get_rx_cmsg(ctrl, ctrl_len, SOL_SOCKET,
+			SO_TIMESTAMPING_NEW);
+	if (rcvd_tsmsg == NULL) {
+		return false;
+	}
 
-	struct cmsghdr *cmsgh;
-	for (cmsgh = CMSG_FIRSTHDR(&msgh); cmsgh != NULL; cmsgh =
-			CMSG_NXTHDR(&msgh, cmsgh)) {
-		if (cmsgh->cmsg_level == SOL_SOCKET && cmsgh->cmsg_type ==
-				SO_TIMESTAMPING_NEW) {
-			memcpy(&tsmsg, CMSG_DATA(cmsgh), sizeof(tsmsg));
-			/* have hardware timestamp */
-			if (tsmsg.ts[2].tv_sec != 0 || tsmsg.ts[2].tv_nsec !=
-					0) {
-				memcpy(ts, &(tsmsg.ts[2]), sizeof(struct
-							__kernel_timespec));
-				return true;
-			}
-			/* have software timestamp */
-			if (tsmsg.ts[0].tv_sec != 0 || tsmsg.ts[0].tv_nsec !=
-					0) {
-				memcpy(ts, &(tsmsg.ts[0]), sizeof(struct
-							__kernel_timespec));
-				return true;
-			}
-		}
+	memcpy(&tsmsg, rcvd_tsmsg, sizeof(tsmsg));
+	/* have hardware timestamp */
+	if (tsmsg.ts[2].tv_sec != 0 || tsmsg.ts[2].tv_nsec != 0) {
+		memcpy(ts, &(tsmsg.ts[2]), sizeof(struct __kernel_timespec));
+		return true;
+	}
+	/* have software timestamp */
+	if (tsmsg.ts[0].tv_sec != 0 || tsmsg.ts[0].tv_nsec != 0) {
+		memcpy(ts, &(tsmsg.ts[0]), sizeof(struct __kernel_timespec));
+		return true;
 	}
 
 	return false;

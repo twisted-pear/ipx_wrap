@@ -476,6 +476,10 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
+	/* set the hop limit to the transport control field of the IPX header
+	 * so that userspace can read it with IPV6_HOPLIMIT */
+	ip6h->hop_limit = tc;
+
 	/* direct reception, mangle the source IPv6 address and UDP port */
 	if (e->recv_direct) {
 		/* move the UDP header directly before the payload */
