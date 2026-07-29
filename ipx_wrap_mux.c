@@ -285,6 +285,37 @@ static int get_socket_type(int fd)
 	return type;
 }
 
+static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
+		struct ipx_addr *remote_addr, __be16 local_id, __be16
+		remote_id, __be32 prefix, int conn_fd)
+{
+	struct bpf_spx_state spx_state = {
+		.remote_addr = *remote_addr,
+		.local_addr = *local_addr,
+		.remote_id = remote_id,
+		.local_id = local_id,
+		.remote_alloc_no = 0,
+		.local_alloc_no = 0,
+		.remote_expected_sequence = 0,
+		.local_current_sequence = 0,
+		.neg_size_to_local = 0,
+		.prefix = prefix
+	};
+
+	__u32 conn_fd32 = conn_fd;
+	int err =
+		bpf_map__update_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
+				&conn_fd32, sizeof(__u32), &spx_state,
+				sizeof(struct bpf_spx_state),
+				BPF_NOEXIST);
+	if (err != 0) {
+		errno = -err;
+		return false;
+	}
+
+	return true;
+}
+
 static bool record_spx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		struct ipx_addr *remote_addr, __be16 local_id, __be16
 		remote_id, __be32 prefix, int conn_fd)
@@ -386,8 +417,12 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	bool bpf_recorded = false;
 
 	if (kernel) {
-		fprintf(stderr, "WARN: Kernel SPX not yet supported!\n");
-		errno = ENOTSUP;
+		fprintf(stderr, "WARN: Kernel SPX is experimental!\n");
+		bpf_recorded = record_kspx_conn_in_bpf(&bind_addr,
+				&(conn_req->addr), conn_id, (accepted ?
+					conn_req->conn_id :
+					SPX_CONN_ID_UNKNOWN), e->iface->prefix,
+				conn_fd);
 	} else {
 		bpf_recorded = record_spx_conn_in_bpf(&bind_addr,
 				&(conn_req->addr), conn_id, (accepted ?
@@ -614,6 +649,18 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	return false;
 }
 
+static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
+		local_id)
+{
+	struct spx_conn_key conn_key = {
+		.bind_addr = *local_addr,
+		.conn_id = local_id
+	};
+
+	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_ingress,
+			&conn_key, sizeof(struct spx_conn_key), 0);
+}
+
 static void delete_spx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
 		local_id)
 {
@@ -637,7 +684,7 @@ static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
 	__be16 conn_id = conn->conn_id;
 
 	if (conn->kernel) {
-		fprintf(stderr, "WARN: Kernel SPX not yet supported!\n");
+		delete_kspx_conn_from_bpf(&bind_addr, conn_id);
 	} else {
 		delete_spx_conn_from_bpf(&bind_addr, conn_id);
 	}
