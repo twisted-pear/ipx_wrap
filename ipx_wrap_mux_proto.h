@@ -162,13 +162,15 @@ struct ipxw_mux_spx_handle {
 };
 
 #define ipxw_mux_spx_handle_init { .spx_sock = -1, .conf_sock = -1, \
-	.last_known_state = NULL }
+	.kernel = false, .spxii = false, .last_known_state = NULL }
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
 bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h);
 int ipxw_mux_spx_handle_sock(struct ipxw_mux_spx_handle h);
 void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h);
 
+struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
+		struct ipx_addr *daddr);
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr, int spxii_size_negotiation_hint);
 

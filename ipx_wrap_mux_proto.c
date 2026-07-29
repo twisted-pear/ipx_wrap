@@ -2203,6 +2203,60 @@ static __u16 ipxw_mux_spx_get_cur_sizng_val(struct ipxw_mux_spx_handle h)
 	return h.last_known_state->cur_sizng_value;
 }
 
+struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
+		struct ipx_addr *daddr)
+{
+	struct ipxw_mux_spx_handle ret = ipxw_mux_spx_mk_handle(h, true);
+	if (ret.last_known_state == NULL || ret.spx_sock < 0) {
+		return ret;
+	}
+
+	struct ipxw_mux_msg connect_req;
+	connect_req.type = IPXW_MUX_SPX_CONNECT;
+	connect_req.spx_connect.addr = *daddr;
+	connect_req.spx_connect.spx_sock = ret.spx_sock;
+	connect_req.spx_connect.conn_id = SPX_CONN_ID_UNKNOWN;
+
+	struct ipxw_mux_msg connect_rsp;
+	connect_rsp.type = IPXW_MUX_CONF;
+	connect_rsp.conf.data_len = 0;
+
+	ssize_t rcvd_len = ipxw_mux_send_recv_conf_msg(h, &connect_req,
+			&connect_rsp);
+
+	do {
+		if (rcvd_len < 0) {
+			break;
+		}
+
+		if (connect_rsp.type != IPXW_MUX_SPX_CONNECT) {
+			errno = EINVAL;
+			break;
+		}
+
+		if (connect_rsp.spx_connect.err != 0) {
+			errno = connect_rsp.spx_connect.err;
+			break;
+		}
+
+		ret.conn_id = connect_rsp.spx_connect.conn_id;
+		ret.spxii = false;
+		ret.last_known_state->state = IPXW_MUX_SPX_INVALID;
+
+		if (!ipxw_mux_spx_bind_and_connect(ret.spx_sock, h.prefix,
+					&(connect_rsp.spx_connect.addr),
+					daddr)) {
+			break;
+		}
+
+		return ret;
+	} while (0);
+
+	ipxw_mux_spx_conn_close(&ret);
+
+	return ret;
+}
+
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr, int spxii_size_negotiation_hint)
 {
