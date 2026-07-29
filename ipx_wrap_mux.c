@@ -20,6 +20,7 @@
 #include "ipx_wrap_mux_proto.h"
 
 #include "ipx_wrap_mux_kern.skel.h"
+#include "ipx_wrap_mux_spx_kern.skel.h"
 
 #define INTERFACE_RESCAN_SECS 10
 #define MAX_EPOLL_EVENTS 64
@@ -45,6 +46,7 @@ struct if_entry;
 
 struct spx_connection {
 	__be16 conn_id;
+	bool kernel; /* whether this is kernel SPX */
 	UT_hash_handle hh; /* by connection ID */
 };
 
@@ -112,6 +114,8 @@ struct if_prog_entry {
 	/* BPF links for the programs attached to the interface */
 	struct bpf_link *ingress_link;
 	struct bpf_link *egress_link;
+	struct bpf_link *kspx_ingress_link;
+	struct bpf_link *kspx_egress_link;
 };
 
 struct do_ctx {
@@ -126,6 +130,7 @@ static struct if_prog_entry *ht_ifidx_to_if_prog = NULL;
 
 static int tmr_fd = -1;
 static struct ipx_wrap_mux_kern *bpf_kern = NULL;
+static struct ipx_wrap_mux_spx_kern *bpf_spx_kern = NULL;
 
 static volatile sig_atomic_t rescan_now = false;
 static volatile sig_atomic_t keep_going = true;
@@ -265,6 +270,68 @@ static bool has_net_bind_service(struct ipxw_mux_handle h)
 	return on == CAP_SET;
 }
 
+static int get_socket_type(int fd)
+{
+	int type = -1;
+	socklen_t type_len = sizeof(int);
+	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_len) != 0) {
+		return -1;
+	}
+
+	if (type_len != sizeof(int)) {
+		return -1;
+	}
+
+	return type;
+}
+
+static bool record_spx_conn_in_bpf(const struct ipx_addr *local_addr, const
+		struct ipx_addr *remote_addr, __be16 local_id, __be16
+		remote_id, __be32 prefix, int conn_fd)
+{
+	struct spx_conn_key spx_key = {
+		.bind_addr = *local_addr,
+		.conn_id = local_id
+	};
+
+	struct bpf_spx_state spx_state = {
+		.remote_addr = *remote_addr,
+		.local_addr = *local_addr,
+		.remote_id = remote_id,
+		.local_id = local_id,
+		.remote_alloc_no = 0,
+		.local_alloc_no = 0,
+		.remote_expected_sequence = 0,
+		.local_current_sequence = 0,
+		.neg_size_to_local = 0,
+		.prefix = prefix
+	};
+	__u64 conn_fd64 = conn_fd;
+	int err =
+		bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
+				&spx_key, sizeof(struct spx_conn_key),
+				&conn_fd64, sizeof(__u64),
+				BPF_NOEXIST);
+	if (err != 0) {
+		errno = -err;
+		return false;
+	}
+	__u32 conn_fd32 = conn_fd;
+	err =
+		bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_state,
+				&conn_fd32, sizeof(__u32), &spx_state,
+				sizeof(struct bpf_spx_state),
+				BPF_NOEXIST);
+	if (err != 0) {
+		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
+				&spx_key, sizeof(struct spx_conn_key), 0);
+		errno = -err;
+		return false;
+	}
+
+	return true;
+}
+
 static bool record_spx_conn(struct bind_entry *e, struct
 		ipxw_mux_msg_spx_connect *conn_req, int conn_fd, struct
 		ipxw_mux_msg_spx_connect *conn_rsp, bool accepted)
@@ -278,6 +345,21 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	/* fill in the response */
 	conn_rsp->addr = bind_addr;
 	conn_rsp->err = ENOTSUP;
+
+	/* check the socket type to determine if we use user space SPX or
+	 * kernel space SPX */
+	bool kernel = false;
+	switch (get_socket_type(conn_fd)) {
+		case SOCK_DGRAM:
+			kernel = false;
+			break;
+		case SOCK_STREAM:
+			kernel = true;
+			break;
+		default:
+			conn_rsp->err = ENOTSUP;
+			return false;
+	}
 
 	if (e->recv_direct) {
 		conn_rsp->err = ENOTSUP;
@@ -299,88 +381,53 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		return false;
 	}
 	conn->conn_id = conn_id;
+	conn->kernel = kernel;
 
-	struct spx_conn_key spx_key = {
-		.bind_addr = bind_addr,
-		.conn_id = conn_id
-	};
+	bool bpf_recorded = false;
 
-	do {
-		/* register the connection in the BPF maps */
-		struct bpf_spx_state spx_state = {
-			.remote_addr = conn_req->addr,
-			.local_addr = bind_addr,
-			.remote_id = (accepted ? conn_req->conn_id :
-					SPX_CONN_ID_UNKNOWN),
-			.local_id = conn_id,
-			.remote_alloc_no = 0,
-			.local_alloc_no = 0,
-			.remote_expected_sequence = 0,
-			.local_current_sequence = 0,
-			.neg_size_to_local = 0,
-			.prefix = e->iface->prefix
-		};
-		__u64 conn_fd64 = conn_fd;
-		int err =
-			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
-					&spx_key, sizeof(struct spx_conn_key),
-					&conn_fd64, sizeof(__u64),
-					BPF_NOEXIST);
-		if (err != 0) {
-			errno = -err;
-			perror("registering SPX connection in BPF map");
-			conn_rsp->err = errno;
-			break;
-		}
-		__u32 conn_fd32 = conn_fd;
-		err =
-			bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_state,
-					&conn_fd32, sizeof(__u32), &spx_state,
-					sizeof(struct bpf_spx_state),
-					BPF_NOEXIST);
-		if (err != 0) {
-			errno = -err;
-			perror("registering SPX connection in BPF map");
-			conn_rsp->err = errno;
-			break;
-		}
+	if (kernel) {
+		fprintf(stderr, "WARN: Kernel SPX not yet supported!\n");
+		errno = ENOTSUP;
+	} else {
+		bpf_recorded = record_spx_conn_in_bpf(&bind_addr,
+				&(conn_req->addr), conn_id, (accepted ?
+					conn_req->conn_id :
+					SPX_CONN_ID_UNKNOWN), e->iface->prefix,
+				conn_fd);
+	}
 
-		/* save SPX connection */
-		HASH_ADD_INORDER(hh, e->ht_id_to_spx_conn, conn_id,
-				sizeof(__be16), conn, sort_spx_conn_by_id);
+	if (!bpf_recorded) {
+		perror("registering SPX connection in BPF map");
+		conn_rsp->err = errno;
+		free(conn);
+		return false;
+	}
 
-		/* reset the error code for the response */
-		conn_rsp->err = 0;
-		conn_rsp->conn_id = conn_id;
+	/* save SPX connection */
+	HASH_ADD_INORDER(hh, e->ht_id_to_spx_conn, conn_id,
+			sizeof(__be16), conn, sort_spx_conn_by_id);
 
-		/* show the new SPX connection */
-		printf("SPX connection %04hx: "
-				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx -> "
-				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
-				ntohs(conn_id),
-				ntohl(bind_addr.net),
-				bind_addr.node[0], bind_addr.node[1],
-				bind_addr.node[2], bind_addr.node[3],
-				bind_addr.node[4], bind_addr.node[5],
-				ntohs(bind_addr.sock),
-				ntohl(conn_req->addr.net),
-				conn_req->addr.node[0], conn_req->addr.node[1],
-				conn_req->addr.node[2], conn_req->addr.node[3],
-				conn_req->addr.node[4], conn_req->addr.node[5],
-				ntohs(conn_req->addr.sock));
+	/* reset the error code for the response */
+	conn_rsp->err = 0;
+	conn_rsp->conn_id = conn_id;
 
-		return true;
-	} while (0);
+	/* show the new SPX connection */
+	printf("SPX connection %04hx: "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx -> "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
+			ntohs(conn_id),
+			ntohl(bind_addr.net),
+			bind_addr.node[0], bind_addr.node[1],
+			bind_addr.node[2], bind_addr.node[3],
+			bind_addr.node[4], bind_addr.node[5],
+			ntohs(bind_addr.sock),
+			ntohl(conn_req->addr.net),
+			conn_req->addr.node[0], conn_req->addr.node[1],
+			conn_req->addr.node[2], conn_req->addr.node[3],
+			conn_req->addr.node[4], conn_req->addr.node[5],
+			ntohs(conn_req->addr.sock));
 
-	/* remove the SPX connection from the BPF maps */
-	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
-			&spx_key, sizeof(struct spx_conn_key), 0);
-	__u32 conn_fd32 = conn_fd;
-	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_state, &conn_fd32,
-			sizeof(__u32), 0);
-
-	free(conn);
-	return false;
+	return true;
 }
 
 static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
@@ -567,25 +614,38 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	return false;
 }
 
-static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
+static void delete_spx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
+		local_id)
 {
 	struct spx_conn_key conn_key = {
-		.bind_addr = {
-			.net = e->iface->addr.net,
-			.sock = e->ipx_sock
-		},
-		.conn_id = conn->conn_id
+		.bind_addr = *local_addr,
+		.conn_id = local_id
 	};
-	memcpy(conn_key.bind_addr.node, e->iface->addr.node,
-			IPX_ADDR_NODE_BYTES);
 
 	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
 			&conn_key, sizeof(struct spx_conn_key), 0);
+}
+
+static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
+{
+	struct ipx_addr bind_addr = {
+		.net = e->iface->addr.net,
+		.sock = e->ipx_sock
+	};
+	memcpy(bind_addr.node, e->iface->addr.node, IPX_ADDR_NODE_BYTES);
+
+	__be16 conn_id = conn->conn_id;
+
+	if (conn->kernel) {
+		fprintf(stderr, "WARN: Kernel SPX not yet supported!\n");
+	} else {
+		delete_spx_conn_from_bpf(&bind_addr, conn_id);
+	}
 
 	HASH_DEL(e->ht_id_to_spx_conn, conn);
 	free(conn);
 
-	printf("SPX connection %04hx closed\n", ntohs(conn_key.conn_id));
+	printf("SPX connection %04hx closed\n", ntohs(conn_id));
 }
 
 static void unbind_entry(struct bind_entry *e)
@@ -861,6 +921,10 @@ static void remove_bpf_on_interface(struct if_prog_entry *pe)
 	bpf_link__destroy(pe->ingress_link);
 	bpf_link__detach(pe->egress_link);
 	bpf_link__destroy(pe->egress_link);
+	bpf_link__detach(pe->kspx_ingress_link);
+	bpf_link__destroy(pe->kspx_ingress_link);
+	bpf_link__detach(pe->kspx_egress_link);
+	bpf_link__destroy(pe->kspx_egress_link);
 
 	printf("removed muxer/demuxer from interface %u\n", pe->ifidx);
 
@@ -900,6 +964,20 @@ static struct if_prog_entry *install_bpf_on_interface(__u32 ifidx)
 			break;
 		}
 
+		pe->kspx_ingress_link =
+			bpf_program__attach_tcx(bpf_spx_kern->progs.ipx_wrap_spx_demux,
+					ifidx, NULL);
+		if (pe->kspx_ingress_link == NULL) {
+			break;
+		}
+
+		pe->kspx_egress_link =
+			bpf_program__attach_tcx(bpf_spx_kern->progs.ipx_wrap_spx_mux,
+					ifidx, NULL);
+		if (pe->kspx_egress_link == NULL) {
+			break;
+		}
+
 		HASH_ADD_INT(ht_ifidx_to_if_prog, ifidx, pe);
 
 		printf("installed muxer/demuxer on interface %u\n", pe->ifidx);
@@ -914,6 +992,14 @@ static struct if_prog_entry *install_bpf_on_interface(__u32 ifidx)
 	if (pe->egress_link != NULL) {
 		bpf_link__detach(pe->egress_link);
 		bpf_link__destroy(pe->egress_link);
+	}
+	if (pe->kspx_ingress_link != NULL) {
+		bpf_link__detach(pe->kspx_ingress_link);
+		bpf_link__destroy(pe->kspx_ingress_link);
+	}
+	if (pe->kspx_egress_link != NULL) {
+		bpf_link__detach(pe->kspx_egress_link);
+		bpf_link__destroy(pe->kspx_egress_link);
 	}
 	free(pe);
 
@@ -1042,6 +1128,9 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 		/* close and remove all BPF objects */
 		if (bpf_kern != NULL) {
 			ipx_wrap_mux_kern__destroy(bpf_kern);
+		}
+		if (bpf_spx_kern != NULL) {
+			ipx_wrap_mux_spx_kern__destroy(bpf_spx_kern);
 		}
 	}
 
@@ -1669,6 +1758,11 @@ static bool setup_bpf(void)
 	/* load the muxer/demuxer bpf programs and maps */
 	bpf_kern = ipx_wrap_mux_kern__open_and_load();
 	if (bpf_kern == NULL) {
+		return false;
+	}
+	/* load the kernel SPX bpf programs and maps */
+	bpf_spx_kern = ipx_wrap_mux_spx_kern__open_and_load();
+	if (bpf_spx_kern == NULL) {
 		return false;
 	}
 

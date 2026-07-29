@@ -13,7 +13,7 @@ MUX_TARGETS = ipxcat ipxdiag spxinetd ipxping spxtcp ipxtap ipxsend ipxrecv
 RCON_TARGETS = rconcl
 SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd ipx_wrap_pongd
 MUXER_TARGETS = ipx_wrap_mux
-BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o
+BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o ipx_wrap_mux_spx_kern.o
 
 ifdef NDEBUG
 CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -DNDEBUG
@@ -66,7 +66,7 @@ ipx_wrap_mux_proto.o: ipx_wrap_mux_proto.c ipx_wrap_mux_proto.h ipx_wrap_common_
 ipx_wrap_service_lib.o: ipx_wrap_service_lib.c ipx_wrap_service_lib.h ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h ipx_wrap_mux_kern.skel.h
+$(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h uthash.h ipx_wrap_mux_kern.skel.h ipx_wrap_mux_spx_kern.skel.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o $(MUXER_LIBS)
 
 $(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
