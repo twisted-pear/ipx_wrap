@@ -154,6 +154,10 @@ struct ipxw_mux_spx_handle_state;
 struct ipxw_mux_spx_handle {
 	int spx_sock;
 	int conf_sock;
+	__be16 conn_id;
+	__u16 kernel:1,
+	      spxii:1,
+	      reserved:14;
 	struct ipxw_mux_spx_handle_state *last_known_state;
 };
 
