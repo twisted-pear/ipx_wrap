@@ -289,7 +289,8 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		struct ipx_addr *remote_addr, __be16 local_id, __be16
 		remote_id, __be32 prefix, int conn_fd)
 {
-	struct bpf_spx_state spx_state = {
+	struct bpf_kspx_state spx_state = {
+		.state = KSPX_NEW,
 		.remote_addr = *remote_addr,
 		.local_addr = *local_addr,
 		.remote_id = remote_id,
@@ -298,15 +299,17 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.local_alloc_no = 0,
 		.remote_expected_sequence = 0,
 		.local_current_sequence = 0,
-		.neg_size_to_local = 0,
-		.prefix = prefix
+		.neg_size_to_local = SPX_MAX_DATA_LEN_WO_SIZNG,
+		.prefix = prefix,
+		.tcp_seq = 0,
+		.tcp_ack = 0
 	};
 
 	__u32 conn_fd32 = conn_fd;
 	int err =
 		bpf_map__update_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
 				&conn_fd32, sizeof(__u32), &spx_state,
-				sizeof(struct bpf_spx_state),
+				sizeof(struct bpf_kspx_state),
 				BPF_NOEXIST);
 	if (err != 0) {
 		errno = -err;
@@ -658,6 +661,8 @@ static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
 	};
 
 	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_ingress,
+			&conn_key, sizeof(struct spx_conn_key), 0);
+	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_outstanding_conn_acks,
 			&conn_key, sizeof(struct spx_conn_key), 0);
 }
 

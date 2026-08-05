@@ -77,6 +77,27 @@ static __always_inline int parse_udphdr(struct hdr_cursor *cur, void *data_end,
 	return len;
 }
 
+static __always_inline int parse_tcphdr(struct hdr_cursor *cur, void *data_end,
+		struct tcphdr **tcphdr)
+{
+	struct tcphdr *tcph = cur->pos;
+
+	if (tcph + 1 > data_end)
+		return -1;
+
+	int len = tcph->doff * 4;
+	if(len < sizeof(*tcph))
+		return -1;
+
+	if (cur->pos + len > data_end)
+		return -1;
+
+	cur->pos += len;
+	*tcphdr = tcph;
+
+	return len;
+}
+
 static __always_inline bool is_ipx_in_ipv6(struct ipv6hdr *ip6h, void
 		*data_end)
 {

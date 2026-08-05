@@ -297,6 +297,33 @@ struct bpf_spx_state {
 	__be32 prefix;
 };
 
+enum kspx_connection_state {
+	KSPX_INVALID = 0,
+	KSPX_NEW,
+};
+
+struct bpf_kspx_wait_for_conn_ack {
+	__be16 tcp_sport;
+	__be16 tcp_dport;
+	__be32 tcp_ack;
+};
+
+struct bpf_kspx_state {
+	enum kspx_connection_state state;
+	struct ipx_addr remote_addr;
+	struct ipx_addr local_addr;
+	__be16 remote_id;
+	__be16 local_id;
+	__u16 remote_alloc_no;
+	__u16 local_alloc_no;
+	__u16 remote_expected_sequence;
+	__u16 local_current_sequence;
+	__u16 neg_size_to_local;
+	__be32 prefix;
+	__be32 tcp_seq;
+	__be32 tcp_ack;
+};
+
 static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
 {
 	__s16 res;
