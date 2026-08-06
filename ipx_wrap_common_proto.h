@@ -305,7 +305,7 @@ enum kspx_connection_state {
 struct bpf_kspx_wait_for_conn_ack {
 	__be16 tcp_sport;
 	__be16 tcp_dport;
-	__be32 tcp_ack;
+	__u32 tcp_ack;
 };
 
 struct bpf_kspx_state {
@@ -320,8 +320,10 @@ struct bpf_kspx_state {
 	__u16 local_current_sequence;
 	__u16 neg_size_to_local;
 	__be32 prefix;
-	__be32 tcp_seq;
-	__be32 tcp_ack;
+	__be16 tcp_sport;
+	__be16 tcp_dport;
+	__u32 tcp_seq;
+	__u32 tcp_ack;
 };
 
 static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)

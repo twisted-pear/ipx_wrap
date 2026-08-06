@@ -57,42 +57,54 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	/* we are only interested in SPX packets */
 	struct ethhdr *eth;
 	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
+		bpf_printk("net inspxprox: no ethhdr");
 		return TC_ACT_UNSPEC;
 	}
 	if (bpf_ntohs(eth->h_proto) != ETH_P_IPV6) {
+		bpf_printk("net inspxprox: not ipv6 %04x",
+				bpf_ntohs(eth->h_proto));
 		return TC_ACT_UNSPEC;
 	}
 
 	struct ipv6hdr *ip6h;
 	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
+		bpf_printk("net inspxprox: no ipv6hdr");
 		return TC_ACT_UNSPEC;
 	}
 	if (ip6h->nexthdr != IPPROTO_UDP) {
+		bpf_printk("net inspxprox: not udp");
 		return TC_ACT_UNSPEC;
 	}
 
 	struct udphdr *udph;
 	if (parse_udphdr(&cur, data_end, &udph) < 0) {
+		bpf_printk("net inspxprox: no udphdr");
 		return TC_ACT_UNSPEC;
 	}
 	if (!is_ipx_in_ipv6(ip6h, data_end)) {
+		bpf_printk("net inspxprox: not ipx in ipv6");
 		return TC_ACT_UNSPEC;
 	}
 
 	struct ipxhdr *ipxh;
 	if (parse_ipxhdr(&cur, data_end, &ipxh) < 0) {
+		bpf_printk("net inspxprox: no ipxhdr");
 		return TC_ACT_UNSPEC;
 	}
 
-	bpf_printk("net inspxprog: %08x", bpf_ntohl(ipxh->saddr.net));
+	bpf_printk("net inspxprog, from: %08x", bpf_ntohl(ipxh->saddr.net));
 
 	if (ipxh->type != SPX_PKT_TYPE) {
+		bpf_printk("net inspxprox: not spx");
 		return TC_ACT_UNSPEC;
 	}
 	if (cur.pos + sizeof(struct spxhdr) > data_end) {
+		bpf_printk("net inspxprox: no spxhdr");
 		return TC_ACT_UNSPEC;
 	}
 	struct spxhdr *spxh = cur.pos;
+
+	bpf_printk("net inspxprox: have spx");
 
 	/* determine if the packet is for the local machine */
 	struct bpf_fib_lookup fib_params;
@@ -110,6 +122,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 			BPF_FIB_LOOKUP_SKIP_NEIGH);
 	if (fib_res != BPF_FIB_LKUP_RET_NOT_FWDED) {
 		/* not for us */
+		bpf_printk("net inspxprox: not for us");
 		return TC_ACT_UNSPEC;
 	}
 
@@ -117,6 +130,8 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		.bind_addr = ipxh->daddr,
 		.conn_id = spxh->dst_conn_id
 	};
+
+	struct bpf_kspx_state *spx_state = NULL;
 
 	struct bpf_sock *spx_sock = NULL;
 	spx_sock = bpf_map_lookup_elem(&ipx_wrap_mux_kspx_sock_ingress,
@@ -128,20 +143,109 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 				&ipx_wrap_mux_kspx_outstanding_conn_acks,
 				&conn_key);
 		if (wait_conn_ack == NULL) {
+			bpf_printk("net inspxprox: not for outstanding conn");
 			return TC_ACT_UNSPEC;
 		}
 
 		/* conn ack, do something with it */
 		bpf_printk("got conn ack for ID %04x", spxh->dst_conn_id);
-		// TODO
 
+		struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
+			&(ip6h->saddr);
+		struct bpf_kspx_state fake_spx_state = {
+			.state = KSPX_NEW,
+			.remote_addr = ipxh->saddr,
+			.local_addr = ipxh->daddr,
+			.remote_alloc_no = spxh->alloc_no,
+			.local_alloc_no = 0,
+			.remote_expected_sequence = spxh->seq_no,
+			.local_current_sequence = 0,
+			.neg_size_to_local = SPX_MAX_DATA_LEN_WO_SIZNG,
+			.prefix = ip6_saddr->prefix,
+			.tcp_sport = wait_conn_ack->tcp_sport,
+			.tcp_dport = wait_conn_ack->tcp_dport,
+			.tcp_seq = 0,
+			.tcp_ack = bpf_htonl(wait_conn_ack->tcp_ack)
+		};
+		spx_state = &fake_spx_state;
+	} else {
+		spx_state = bpf_sk_storage_get(&ipx_wrap_mux_kspx_state,
+					spx_sock, NULL, 0);
+		bpf_sk_release(spx_sock);
+	}
+
+	if (spx_state == NULL) {
+		bpf_printk("no kernel spx state");
 		return TC_ACT_UNSPEC;
 	}
 
+	/* make room for the TCP header */
+	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
+		sizeof(struct spxhdr);
+	__s32 len_diff = sizeof(struct tcphdr) - oldhdrs_len;
+	size_t payload_len = bpf_ntohs(ip6h->payload_len) + len_diff;
+	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
+		bpf_printk("shot: adjust room");
+		return TC_ACT_SHOT;
+	}
+	bpf_skb_pull_data(skb, 0);
+
+	/* adjust pointers and reverify */
+	data_end = (void *)(long)skb->data_end;
+	data = (void *)(long)skb->data;
+
+	eth = data;
+	ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	struct tcphdr *tcph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	if (tcph + 1 > data_end) {
+		bpf_printk("shot: not enough room");
+		return TC_ACT_SHOT;
+	}
+	/* calculate and verify length */
+	if (payload_len < sizeof(struct tcphdr)) {
+		bpf_printk("shot: invalid payload len");
+		return TC_ACT_SHOT;
+	}
+	if (payload_len > MAX_DGRAM_LEN) {
+		bpf_printk("shot: invalid payload len 2");
+		return TC_ACT_SHOT;
+	}
+	if (payload_len + sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
+			skb->len) {
+		bpf_printk("shot: invalid payload len 3");
+		return TC_ACT_SHOT;
+	}
+
 	// TODO
-	bpf_sk_release(spx_sock);
 
 	return TC_ACT_UNSPEC;
+}
+
+struct mv_payload_loopctx {
+	struct __sk_buff *skb;
+	size_t last_payload_byte_offset;
+	size_t mv_offset;
+};
+
+static long mv_payload_loopfn(__u64 index, void* ctx)
+{
+	struct mv_payload_loopctx *c = ctx;
+
+	if (index > c->last_payload_byte_offset) {
+		return 1;
+	}
+
+	__u8 b;
+	__u32 src_ofs = c->last_payload_byte_offset - index;
+	if (bpf_skb_load_bytes(c->skb, src_ofs, &b, 1) < 0) {
+		return 1;
+	}
+	if (bpf_skb_store_bytes(c->skb, src_ofs + c->mv_offset, &b, 1, 0) < 0)
+	{
+		return 1;
+	}
+
+	return 0;
 }
 
 SEC("tc/egress")
@@ -236,19 +340,13 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 			 * appropriate connection ack */
 			wait_conn_ack.tcp_sport = tcph->dest;
 			wait_conn_ack.tcp_dport = tcph->source;
-			__u32 tcp_ack;
 			__builtin_add_overflow(bpf_ntohl(tcph->seq), 1,
-					&tcp_ack);
-			wait_conn_ack.tcp_ack = bpf_htonl(tcp_ack);
+					&(wait_conn_ack.tcp_ack));
 			break;
 		default:
 			bpf_printk("shot: inavlid state");
 			return TC_ACT_SHOT;
 	}
-
-	/* back up Ethernet header */
-	struct ethhdr eth_backup;
-	__builtin_memcpy(&eth_backup, eth, sizeof(struct ethhdr));
 
 	/* make room for the new headers */
 	__s32 newhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
@@ -265,6 +363,21 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		bpf_printk("shot: change tail");
 		return TC_ACT_SHOT;
 	}
+
+	/* move the payload to the end of the packet */
+	/* FIXME: this is super slow */
+	struct mv_payload_loopctx lctx = {
+		.skb = skb,
+		.last_payload_byte_offset = skb->len - (newhdrs_len + 1),
+		.mv_offset = newhdrs_len
+	};
+	__u32 nloops = skb->len - (newhdrs_len + sizeof(struct ipv6hdr) +
+			sizeof(struct ethhdr));
+	long nbytes = bpf_loop(nloops, &mv_payload_loopfn, &lctx, 0);
+	if (nbytes != nloops) {
+		return TC_ACT_SHOT;
+	}
+
 	bpf_skb_pull_data(skb, 0);
 
 	/* adjust pointers and reverify */
@@ -296,9 +409,6 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		bpf_printk("shot: invalid payload len 3");
 		return TC_ACT_SHOT;
 	}
-
-	/* restore the Ethernet header */
-	__builtin_memcpy(eth, &eth_backup, sizeof(struct ethhdr));
 
 	/* fill in IPv6 header */
 	ip6h->version = 6;
@@ -354,7 +464,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	spxh->ack_no = bpf_htons(spx_state->remote_expected_sequence);
 	spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 
-	bpf_printk("net spxprog: %08x", bpf_ntohl(ipxh->daddr.net));
+	bpf_printk("net spxprog: %08x", bpf_ntohl(ipxh->saddr.net));
 
 	/* insert the structure for the connection ack into the map */
 	if (spx_state->state == KSPX_NEW) {
