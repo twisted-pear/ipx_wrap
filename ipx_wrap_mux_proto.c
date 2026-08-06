@@ -573,28 +573,6 @@ struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
 			break;
 		}
 
-		/* bind the socket so that it can receive */
-		struct sockaddr_in6 dummy_bind = {
-			.sin6_family = AF_INET6,
-			.sin6_port = 0,
-			.sin6_flowinfo = 0,
-			.sin6_scope_id = 0
-		};
-		ipx_to_ipv6_addr(&(dummy_bind.sin6_addr),
-				&(bind_msg->bind.addr), res.ack.prefix);
-
-		if (bind(data_sock, (struct sockaddr *) &dummy_bind,
-					sizeof(dummy_bind)) < 0) {
-			/* if the bind on the data socket failed, inform the
-			 * muxer */
-			struct ipxw_mux_msg unbind_msg;
-			/* no error handling, nothing that can be done */
-			unbind_msg.type = IPXW_MUX_UNBIND;
-			send(ret.conf_sock, &unbind_msg, sizeof(unbind_msg),
-					MSG_DONTWAIT);
-			break;
-		}
-
 		switch (res.type) {
 			case IPXW_MUX_BIND_ACK:
 				close(sv_conf[1]);
@@ -1814,20 +1792,6 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 static bool ipxw_mux_spx_bind_and_connect(int spx_sock, __be32 prefix, struct
 		ipx_addr *saddr, struct ipx_addr *daddr)
 {
-	/* bind the socket so that it can receive */
-	struct sockaddr_in6 dummy_bind = {
-		.sin6_family = AF_INET6,
-		.sin6_port = 0,
-		.sin6_flowinfo = 0,
-		.sin6_scope_id = 0
-	};
-	ipx_to_ipv6_addr(&(dummy_bind.sin6_addr), saddr, prefix);
-
-	if (bind(spx_sock, (struct sockaddr *) &dummy_bind, sizeof(dummy_bind))
-			< 0) {
-		return false;
-	}
-
 	/* connect the socket so that sending without a specific
 	 * destination address works */
 	struct sockaddr_in6 dummy_connect = {

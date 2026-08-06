@@ -380,6 +380,21 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	conn_rsp->addr = bind_addr;
 	conn_rsp->err = ENOTSUP;
 
+	/* bind the socket to a dummy address */
+	struct sockaddr_in6 dummy_bind = {
+		.sin6_family = AF_INET6,
+		.sin6_port = 0,
+		.sin6_flowinfo = 0,
+		.sin6_scope_id = 0
+	};
+	ipx_to_ipv6_addr(&(dummy_bind.sin6_addr), &bind_addr,
+			e->iface->prefix);
+	if (bind(conn_fd, (struct sockaddr *) &dummy_bind, sizeof(dummy_bind))
+			< 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
 	/* check the socket type to determine if we use user space SPX or
 	 * kernel space SPX */
 	bool kernel = false;
@@ -1002,6 +1017,13 @@ static struct if_prog_entry *install_bpf_on_interface(__u32 ifidx)
 	do {
 		pe->ifidx = ifidx;
 
+		pe->kspx_ingress_link =
+			bpf_program__attach_tcx(bpf_spx_kern->progs.ipx_wrap_spx_demux,
+					ifidx, NULL);
+		if (pe->kspx_ingress_link == NULL) {
+			break;
+		}
+
 		pe->ingress_link =
 			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_demux,
 					ifidx, NULL);
@@ -1013,13 +1035,6 @@ static struct if_prog_entry *install_bpf_on_interface(__u32 ifidx)
 			bpf_program__attach_tcx(bpf_kern->progs.ipx_wrap_mux,
 					ifidx, NULL);
 		if (pe->egress_link == NULL) {
-			break;
-		}
-
-		pe->kspx_ingress_link =
-			bpf_program__attach_tcx(bpf_spx_kern->progs.ipx_wrap_spx_demux,
-					ifidx, NULL);
-		if (pe->kspx_ingress_link == NULL) {
 			break;
 		}
 
@@ -1252,24 +1267,43 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 	}
 	assert(bind_msg.type == IPXW_MUX_BIND);
 
-	/* binding failed, send error response */
-	if (!record_bind(iface, h, epoll_fd, &bind_msg.bind)) {
-		resp_msg.err.err = errno;
+	do {
+		/* bind the socket to a dummy IPv6 address */
+		struct sockaddr_in6 dummy_bind = {
+			.sin6_family = AF_INET6,
+			.sin6_port = 0,
+			.sin6_flowinfo = 0,
+			.sin6_scope_id = 0
+		};
+		ipx_to_ipv6_addr(&(dummy_bind.sin6_addr),
+				&(bind_msg.bind.addr), iface->prefix);
+		if (bind(ipxw_mux_handle_data(h), (struct sockaddr *)
+					&dummy_bind, sizeof(dummy_bind)) < 0) {
+			resp_msg.err.err = errno;
+			break;
+		}
+
+		/* binding failed, send error response */
+		if (!record_bind(iface, h, epoll_fd, &bind_msg.bind)) {
+			resp_msg.err.err = errno;
+			break;
+		}
+
+		/* binding succeeded, send ack response */
+		resp_msg.err.err = 0;
+		resp_msg.type = IPXW_MUX_BIND_ACK;
+		resp_msg.ack.prefix = iface->prefix;
 		ipxw_mux_send_bind_resp(ipxw_mux_handle_conf(h), &resp_msg);
-		ipxw_mux_handle_close(h);
 
-		return -1;
-	}
+		close(ipxw_mux_handle_data(h));
 
-	/* binding succeeded, send ack response */
-	resp_msg.err.err = 0;
-	resp_msg.type = IPXW_MUX_BIND_ACK;
-	resp_msg.ack.prefix = iface->prefix;
+		return 0;
+	} while (0);
+
 	ipxw_mux_send_bind_resp(ipxw_mux_handle_conf(h), &resp_msg);
+	ipxw_mux_handle_close(h);
 
-	close(ipxw_mux_handle_data(h));
-
-	return 0;
+	return -1;
 }
 
 static ssize_t handle_bind_msg_main(int ctrl_sock)
