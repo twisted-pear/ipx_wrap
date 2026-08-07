@@ -177,16 +177,6 @@ struct bpf_bind_entry {
 
 #define SPX_CONN_ID_UNKNOWN bpf_htons(0xFFFF)
 
-struct spxhdr {
-	__u8 connection_control;
-	__u8 datastream_type;
-	__be16 src_conn_id;
-	__be16 dst_conn_id;
-	__be16 seq_no;
-	__be16 ack_no;
-	__be16 alloc_no;
-} __attribute__((packed));
-
 struct spxii_negotiate_size_hdr {
 	__be16 negotiation_size;
 } __attribute__((packed));
@@ -318,6 +308,7 @@ struct bpf_kspx_state {
 	__u16 local_alloc_no;
 	__u16 remote_expected_sequence;
 	__u16 local_current_sequence;
+	__u16 neg_size_to_remote;
 	__u16 neg_size_to_local;
 	__be32 prefix;
 	__be16 tcp_sport;

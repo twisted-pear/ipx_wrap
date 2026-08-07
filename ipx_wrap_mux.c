@@ -299,6 +299,7 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.local_alloc_no = 0,
 		.remote_expected_sequence = 0,
 		.local_current_sequence = 0,
+		.neg_size_to_remote = SPX_MAX_DATA_LEN_WO_SIZNG,
 		.neg_size_to_local = SPX_MAX_DATA_LEN_WO_SIZNG,
 		.prefix = prefix,
 		.tcp_sport = 0,

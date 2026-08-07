@@ -45,6 +45,16 @@ struct ipxhdr {
 	struct ipx_addr saddr;
 } __attribute__((packed));
 
+struct spxhdr {
+	__u8 connection_control;
+	__u8 datastream_type;
+	__be16 src_conn_id;
+	__be16 dst_conn_id;
+	__be16 seq_no;
+	__be16 ack_no;
+	__be16 alloc_no;
+} __attribute__((packed));
+
 struct ipv6_eui64_addr {
 	__be32 prefix;
 	__be32 ipx_net;
