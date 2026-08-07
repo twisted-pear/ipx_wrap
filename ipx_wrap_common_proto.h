@@ -290,9 +290,12 @@ struct bpf_spx_state {
 enum kspx_connection_state {
 	KSPX_INVALID = 0,
 	KSPX_NEW,
+	KSPX_ESTABLISHED,
 };
 
 struct bpf_kspx_wait_for_conn_ack {
+	__be16 remote_id;
+	__be16 local_id;
 	__be16 tcp_sport;
 	__be16 tcp_dport;
 	__u32 tcp_ack;

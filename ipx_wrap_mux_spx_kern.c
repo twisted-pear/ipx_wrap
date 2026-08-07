@@ -120,6 +120,8 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		.state = KSPX_NEW,
 		.remote_addr = ipxh->saddr,
 		.local_addr = ipxh->daddr,
+		.remote_id = spxh->src_conn_id,
+		.local_id = spxh->dst_conn_id,
 		.remote_alloc_no = spxh->alloc_no,
 		.local_alloc_no = 0,
 		.remote_expected_sequence = spxh->seq_no,
@@ -177,6 +179,9 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 				bpf_printk("invalid spx connection control");
 				return TC_ACT_SHOT;
 			}
+			break;
+		case KSPX_ESTABLISHED:
+			bpf_printk("established connection in");
 			break;
 		default:
 			bpf_printk("invalid kernel spx state");
@@ -280,12 +285,33 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	if (csum_diff < 0) {
 		return TC_ACT_SHOT;
 	}
+
+	bpf_printk("tcp header constructed");
+
+	/* if the connection is new we need to record the remote conn ID */
+	if (spx_state->state == KSPX_NEW) {
+		struct bpf_kspx_wait_for_conn_ack wait_conn_ack = {
+			.remote_id = spx_state->remote_id,
+			.local_id = spx_state->local_id,
+			.tcp_sport = tcph->source,
+			.tcp_dport = tcph->dest,
+			.tcp_ack = bpf_ntohl(tcph->ack_seq)
+		};
+
+		if (bpf_map_update_elem(
+					&ipx_wrap_mux_kspx_outstanding_conn_acks,
+					&conn_key, &wait_conn_ack, BPF_ANY) <
+				0) {
+			bpf_printk("failed to store remote conn ID");
+			return TC_ACT_SHOT;
+		}
+	}
+
+	/* do csum_replace last, as it invalidates our pointers again */
 	if (bpf_l4_csum_replace(skb, (((void *) &(tcph->check)) - data), 0,
 				csum_diff, 0) != 0) {
 		return TC_ACT_SHOT;
 	}
-
-	bpf_printk("tcp header constructed");
 
 	return TC_ACT_UNSPEC;
 }
@@ -317,6 +343,69 @@ static long mv_payload_loopfn(__u64 index, void* ctx)
 	return 0;
 }
 
+static bool __always_inline wait_for_new_spx_connection(struct bpf_kspx_state
+		*spx_state, struct bpf_kspx_wait_for_conn_ack *wait_conn_ack)
+{
+	struct spx_conn_key conn_key = {
+		.bind_addr = spx_state->local_addr,
+		.conn_id = spx_state->local_id
+	};
+
+	if (bpf_map_update_elem(&ipx_wrap_mux_kspx_outstanding_conn_acks,
+				&conn_key, wait_conn_ack, BPF_ANY) < 0) {
+		return false;
+	}
+
+	return true;
+}
+
+static bool __always_inline establish_spx_connection(struct bpf_sock *spx_sock,
+		struct bpf_kspx_state *spx_state)
+{
+	struct spx_conn_key conn_key = {
+		.bind_addr = spx_state->local_addr,
+		.conn_id = spx_state->local_id
+	};
+
+	/* get the remote connection ID and store it in the state */
+	struct bpf_kspx_wait_for_conn_ack *wait_conn_ack = NULL;
+	wait_conn_ack = bpf_map_lookup_elem(
+			&ipx_wrap_mux_kspx_outstanding_conn_acks, &conn_key);
+	if (wait_conn_ack == NULL) {
+		return false;
+	}
+
+	/* for some reason we don't have the conn ID yet, abort */
+	if (wait_conn_ack->remote_id == SPX_CONN_ID_UNKNOWN) {
+		return false;
+	}
+
+	/* for some reason we already have a different conn ID in the state,
+	 * abort */
+	if (spx_state->remote_id != SPX_CONN_ID_UNKNOWN) {
+		return false;
+	}
+
+	__be16 new_remote_id = wait_conn_ack->remote_id;
+
+	/* delete wait structure for the connection ack */
+	if (bpf_map_delete_elem(&ipx_wrap_mux_kspx_outstanding_conn_acks,
+				&conn_key) < 0) {
+		return false;
+	}
+
+	/* insert the, now connected, socket into the map */
+	if (bpf_map_update_elem(&ipx_wrap_mux_kspx_sock_ingress, &conn_key,
+				spx_sock, 0) < 0) {
+		return false;
+	}
+
+	spx_state->remote_id = new_remote_id;
+	spx_state->state = KSPX_ESTABLISHED;
+
+	return true;
+}
+
 SEC("tc/egress")
 int ipx_wrap_spx_mux(struct __sk_buff *skb)
 {
@@ -332,8 +421,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	bpf_printk("Got packet for kernel SPX conn %02x",
-			bpf_ntohs(spx_state->local_id));
+	bpf_printk("Got packet for kernel SPX conn %02x", spx_state->local_id);
 
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
@@ -372,9 +460,29 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	/* check the connection state */
 	__u8 connection_control = 0;
 	__u8 datastream_type = SPX_DS_NONE;
-	struct bpf_kspx_wait_for_conn_ack wait_conn_ack;
+	struct bpf_kspx_wait_for_conn_ack wait_conn_ack = { 0 };
 	switch (spx_state->state) {
 		case KSPX_NEW:
+			/* this must be the ACK to our fake SYN/ACK, move the
+			 * connection to the established state and drop the
+			 * packet */
+			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
+							TCP_DATA_OFFSET |
+							TCP_WINDOW)) ==
+					TCP_FLAG_ACK) {
+				if (!establish_spx_connection(client_sock,
+							spx_state)) {
+					bpf_printk("conn establish failed");
+				} else {
+					bpf_printk("conn established");
+				}
+
+				/* there is no ACK to the connection response
+				 * on the SPX side, so we simply drop the
+				 * packet */
+				return TC_ACT_SHOT;
+			}
+
 			/* a new connection only gets to send SYN segments */
 			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
 							TCP_DATA_OFFSET |
@@ -395,10 +503,15 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 
 			/* we need to prepare the structure for receiving the
 			 * appropriate connection ack */
+			wait_conn_ack.remote_id = SPX_CONN_ID_UNKNOWN;
+			wait_conn_ack.local_id = spx_state->local_id;
 			wait_conn_ack.tcp_sport = tcph->dest;
 			wait_conn_ack.tcp_dport = tcph->source;
 			__builtin_add_overflow(bpf_ntohl(tcph->seq), 1,
 					&(wait_conn_ack.tcp_ack));
+			break;
+		case KSPX_ESTABLISHED:
+			bpf_printk("established connection out");
 			break;
 		default:
 			bpf_printk("shot: inavlid state");
@@ -518,18 +631,11 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 
 	/* insert the structure for the connection ack into the map */
 	if (spx_state->state == KSPX_NEW) {
-		struct spx_conn_key conn_key = {
-			.bind_addr = spx_state->local_addr,
-			.conn_id = spx_state->local_id
-		};
-
-		if (bpf_map_update_elem(
-					&ipx_wrap_mux_kspx_outstanding_conn_acks,
-					&conn_key, &wait_conn_ack, BPF_ANY) <
-				0) {
+		if (!wait_for_new_spx_connection(spx_state, &wait_conn_ack)) {
 			bpf_printk("conn req shot");
 			return TC_ACT_SHOT;
 		}
+
 		bpf_printk("conn req sent");
 	}
 

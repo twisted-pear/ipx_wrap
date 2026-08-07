@@ -186,8 +186,8 @@ ipx_wrap_spx_check_ingress(struct bpf_spx_state *spx_state, struct
 	return SPX_PASS;
 }
 
-bool __always_inline is_to_managed_sock(struct __sk_buff *skb, struct ipv6hdr
-		*ip6h, struct udphdr *udph)
+static bool __always_inline is_to_managed_sock(struct __sk_buff *skb, struct
+		ipv6hdr *ip6h, struct udphdr *udph)
 {
 	struct bpf_sock_tuple udp_sock_tuple;
 	__builtin_memset(&udp_sock_tuple, 0, sizeof(struct bpf_sock_tuple));
