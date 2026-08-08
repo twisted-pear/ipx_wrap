@@ -16,6 +16,7 @@ x-ipx-host: &service-ipx-host
   environment:
     - IPX_PREFIX=${IPX_PREFIX:-fdaabbbb}
     - SAPD_CFG=${SAPD_CFG:-samples/empty.cfg}
+  cgroup: host # sadly this is necessary for kernel SPX
 
 x-ipx-sidecar: &service-ipx-sidecar
   image: ipx-host
@@ -32,6 +33,7 @@ x-ipx-sidecar: &service-ipx-sidecar
   environment:
     - IPX_PREFIX=${IPX_PREFIX:-fdaabbbb}
     - SAPD_CFG=${SAPD_CFG:-samples/empty.cfg}
+  cgroup: host # sadly this is necessary for kernel SPX
 
 x-ipx-net: &network-ipx-net
   enable_ipv4: false
