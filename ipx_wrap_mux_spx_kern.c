@@ -359,53 +359,6 @@ static bool __always_inline wait_for_new_spx_connection(struct bpf_kspx_state
 	return true;
 }
 
-static bool __always_inline establish_spx_connection(struct bpf_sock *spx_sock,
-		struct bpf_kspx_state *spx_state)
-{
-	struct spx_conn_key conn_key = {
-		.bind_addr = spx_state->local_addr,
-		.conn_id = spx_state->local_id
-	};
-
-	/* get the remote connection ID and store it in the state */
-	struct bpf_kspx_wait_for_conn_ack *wait_conn_ack = NULL;
-	wait_conn_ack = bpf_map_lookup_elem(
-			&ipx_wrap_mux_kspx_outstanding_conn_acks, &conn_key);
-	if (wait_conn_ack == NULL) {
-		return false;
-	}
-
-	/* for some reason we don't have the conn ID yet, abort */
-	if (wait_conn_ack->remote_id == SPX_CONN_ID_UNKNOWN) {
-		return false;
-	}
-
-	/* for some reason we already have a different conn ID in the state,
-	 * abort */
-	if (spx_state->remote_id != SPX_CONN_ID_UNKNOWN) {
-		return false;
-	}
-
-	__be16 new_remote_id = wait_conn_ack->remote_id;
-
-	/* delete wait structure for the connection ack */
-	if (bpf_map_delete_elem(&ipx_wrap_mux_kspx_outstanding_conn_acks,
-				&conn_key) < 0) {
-		return false;
-	}
-
-	/* insert the, now connected, socket into the map */
-	if (bpf_map_update_elem(&ipx_wrap_mux_kspx_sock_ingress, &conn_key,
-				spx_sock, 0) < 0) {
-		return false;
-	}
-
-	spx_state->remote_id = new_remote_id;
-	spx_state->state = KSPX_ESTABLISHED;
-
-	return true;
-}
-
 SEC("tc/egress")
 int ipx_wrap_spx_mux(struct __sk_buff *skb)
 {
@@ -463,26 +416,6 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	struct bpf_kspx_wait_for_conn_ack wait_conn_ack = { 0 };
 	switch (spx_state->state) {
 		case KSPX_NEW:
-			/* this must be the ACK to our fake SYN/ACK, move the
-			 * connection to the established state and drop the
-			 * packet */
-			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
-							TCP_DATA_OFFSET |
-							TCP_WINDOW)) ==
-					TCP_FLAG_ACK) {
-				if (!establish_spx_connection(client_sock,
-							spx_state)) {
-					bpf_printk("conn establish failed");
-				} else {
-					bpf_printk("conn established");
-				}
-
-				/* there is no ACK to the connection response
-				 * on the SPX side, so we simply drop the
-				 * packet */
-				return TC_ACT_SHOT;
-			}
-
 			/* a new connection only gets to send SYN segments */
 			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
 							TCP_DATA_OFFSET |
@@ -640,6 +573,87 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	}
 
 	return TC_ACT_UNSPEC;
+}
+
+static bool __always_inline establish_spx_connection(struct bpf_sock_ops
+		*skops, struct bpf_kspx_state *spx_state)
+{
+	struct spx_conn_key conn_key = {
+		.bind_addr = spx_state->local_addr,
+		.conn_id = spx_state->local_id
+	};
+
+	/* get the remote connection ID and store it in the state */
+	struct bpf_kspx_wait_for_conn_ack *wait_conn_ack = NULL;
+	wait_conn_ack = bpf_map_lookup_elem(
+			&ipx_wrap_mux_kspx_outstanding_conn_acks, &conn_key);
+	if (wait_conn_ack == NULL) {
+		return false;
+	}
+
+	/* for some reason we don't have the conn ID yet, abort */
+	if (wait_conn_ack->remote_id == SPX_CONN_ID_UNKNOWN) {
+		return false;
+	}
+
+	/* for some reason we already have a different conn ID in the state,
+	 * abort */
+	if (spx_state->remote_id != SPX_CONN_ID_UNKNOWN) {
+		return false;
+	}
+
+	__be16 new_remote_id = wait_conn_ack->remote_id;
+
+	/* delete wait structure for the connection ack */
+	if (bpf_map_delete_elem(&ipx_wrap_mux_kspx_outstanding_conn_acks,
+				&conn_key) < 0) {
+		return false;
+	}
+
+	/* insert the, now connected, socket into the hash */
+	if (bpf_sock_hash_update(skops, &ipx_wrap_mux_kspx_sock_ingress,
+				&conn_key, BPF_NOEXIST) < 0) {
+		return false;
+	}
+
+	spx_state->remote_id = new_remote_id;
+	spx_state->state = KSPX_ESTABLISHED;
+
+	return true;
+}
+
+SEC("sockops")
+int ipx_wrap_spx_sockops(struct bpf_sock_ops *skops)
+{
+	bpf_printk("sockops: here");
+
+	struct bpf_sock *spx_sock = skops->sk;
+	if (spx_sock == NULL) {
+		bpf_printk("sockops: no socket");
+		return 0;
+	}
+
+	struct bpf_kspx_state *spx_state = bpf_sk_storage_get(
+			&ipx_wrap_mux_kspx_state, spx_sock, NULL, 0);
+	if (spx_state == NULL) {
+		bpf_printk("sockops: no state");
+		return 0;
+	}
+
+	switch(skops->op) {
+		case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
+			if (!establish_spx_connection(skops, spx_state)) {
+				bpf_printk("conn establish failed");
+			} else {
+				bpf_printk("conn established");
+			}
+
+			break;
+		default:
+			break;
+	}
+
+	return 0;
 }
 
 char _license[] SEC("license") = "GPL";

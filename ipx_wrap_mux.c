@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <net/if.h>
 #include <signal.h>
@@ -131,6 +132,7 @@ static struct if_prog_entry *ht_ifidx_to_if_prog = NULL;
 static int tmr_fd = -1;
 static struct ipx_wrap_mux_kern *bpf_kern = NULL;
 static struct ipx_wrap_mux_spx_kern *bpf_spx_kern = NULL;
+static struct bpf_link *bpf_spx_sockops = NULL;
 
 static volatile sig_atomic_t rescan_now = false;
 static volatile sig_atomic_t keep_going = true;
@@ -1196,6 +1198,10 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 		}
 
 		/* close and remove all BPF objects */
+		if (bpf_spx_sockops != NULL) {
+			bpf_link__detach(bpf_spx_sockops);
+			bpf_link__destroy(bpf_spx_sockops);
+		}
 		if (bpf_kern != NULL) {
 			ipx_wrap_mux_kern__destroy(bpf_kern);
 		}
@@ -1852,6 +1858,19 @@ static bool setup_bpf(void)
 	/* load the kernel SPX bpf programs and maps */
 	bpf_spx_kern = ipx_wrap_mux_spx_kern__open_and_load();
 	if (bpf_spx_kern == NULL) {
+		return false;
+	}
+
+	/* attach the sockops program for kernel SPX */
+	int cgroup_fd = open("/sys/fs/cgroup/", O_RDONLY);
+	if (cgroup_fd < 0) {
+		return false;
+	}
+
+	bpf_spx_sockops = bpf_program__attach_cgroup(
+			bpf_spx_kern->progs.ipx_wrap_spx_sockops, cgroup_fd);
+	close(cgroup_fd);
+	if (bpf_spx_sockops == NULL) {
 		return false;
 	}
 
