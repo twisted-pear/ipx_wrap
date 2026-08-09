@@ -58,6 +58,30 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 		exit(SPXCLIENT_ERR_CONNECT);
 	}
 
+	while (true) {
+		char buf[SPX_MAX_DATA_LEN_WO_SIZNG + 1];
+		ssize_t nrcvd = recv(spxh.spx_sock, buf,
+				SPX_MAX_DATA_LEN_WO_SIZNG, 0);
+		if (nrcvd < 0) {
+			perror("recv");
+			break;
+		}
+		if (nrcvd == 0) {
+			fprintf(stderr, "closed\n");
+			break;
+		}
+		buf[nrcvd] = '\0';
+		printf("rcvd %ld bytes:\n", nrcvd);
+		puts(buf);
+
+		ssize_t nsent = send(spxh.spx_sock, buf, nrcvd, 0);
+		if (nsent < 0) {
+			perror("sent");
+			break;
+		}
+		printf("sent %ld bytes.\n", nsent);
+	}
+
 	ipxw_mux_spx_conn_close(&spxh);
 	ipxw_mux_unbind(ipxh);
 	exit(SPXCLIENT_ERR_OK);
