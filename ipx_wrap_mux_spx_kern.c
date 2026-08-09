@@ -43,6 +43,133 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } ipx_wrap_mux_kspx_state SEC(".maps");
 
+static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh, size_t data_len)
+{
+	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
+	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
+		0;
+	__u8 datastream_type = spxh->datastream_type;
+
+	/* check if the packet fits with our connection state */
+	if (spxh->dst_conn_id != spx_state->local_id) {
+		return false;
+	}
+	if (spx_state->remote_id != SPX_CONN_ID_UNKNOWN && spxh->src_conn_id !=
+			spx_state->remote_id) {
+		return false;
+	}
+	/* handle the loss of ACK packets that we send by also acking data
+	 * packets with a seq no lower than the current epxected one (but not
+	 * letting them go through to TCP) */
+	if (spx_seq_less_than(bpf_ntohs(spxh->seq_no),
+				spx_state->remote_expected_sequence) &&
+			ack_required) {
+		// TODO: need to construct an SPX ack for packets like this...
+		return false;
+	}
+
+	if (system) {
+		if (data_len != 0) {
+			return false;
+		}
+
+		/* allow old system packets in case we get a lost ACK */
+		__u16 cur_seq = bpf_ntohs(spxh->seq_no);
+		__u16 next_seq;
+		__builtin_add_overflow(cur_seq, 1, &next_seq);
+
+		if (cur_seq != spx_state->remote_expected_sequence && next_seq
+				!= spx_state->remote_expected_sequence) {
+			return false;
+		}
+	} else {
+		if (bpf_ntohs(spxh->seq_no) !=
+				spx_state->remote_expected_sequence) {
+			return false;
+		}
+	}
+
+	/* closing the connection is always permitted */
+	if (datastream_type == SPX_DS_END_OF_CONN) {
+		return true;
+	}
+
+	if (spx_state->remote_id == SPX_CONN_ID_UNKNOWN) {
+		/* accept a new connection ID only from a first packet */
+		if (bpf_ntohs(spxh->seq_no) != 0 || bpf_ntohs(spxh->ack_no) !=
+				0) {
+			return false;
+		}
+	}
+
+	/* check the connection state */
+	switch (spx_state->state) {
+		case KSPX_NEW:
+			if ((spxh->connection_control & SPX_CC_MASK_SPX) !=
+					SPX_CC_SYSTEM_PKT) {
+				return false;
+			}
+			break;
+		case KSPX_ESTABLISHED:
+			break;
+		default:
+			return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool spx_msg_is_current_ack(const struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh)
+{
+	/* message must be an ACK */
+	if ((spxh->connection_control & SPX_CC_MASK_SPX) != SPX_CC_SYSTEM_PKT)
+	{
+		return false;
+	}
+
+	/* we want an ACK and it has to ACK the last packet we sent */
+	__u16 local_next_sequence = spx_state->local_current_sequence;
+	if (spx_state->last_sent_msg_data_len != 0) {
+		/* last msg was a non-system packet, therefore we need the ack
+		 * number to be one higher than its seq no */
+		__builtin_add_overflow(local_next_sequence, 1,
+				&local_next_sequence);
+	}
+	if (bpf_ntohs(spxh->ack_no) != local_next_sequence) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline void update_spx_state_ingress(struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh, size_t data_len)
+{
+	spx_state->remote_id = spxh->src_conn_id;
+
+	/* message is an ACK */
+	if (spx_msg_is_current_ack(spx_state, spxh)) {
+		/* increment sequence number and virtual TCP ACK no after
+		 * receiving an ACK for a non-system message */
+		if (spx_state->last_sent_msg_data_len != 0) {
+			__builtin_add_overflow(
+					spx_state->local_current_sequence, 1,
+					&(spx_state->local_current_sequence));
+			__builtin_add_overflow(spx_state->tcp_ack,
+					spx_state->last_sent_msg_data_len,
+					&(spx_state->tcp_ack));
+		}
+	} else {
+		if (data_len != 0) {
+			spx_state->last_rcvd_msg_data_len = data_len;
+		}
+	}
+
+	spx_state->remote_alloc_no = spxh->alloc_no;
+}
+
 SEC("tc/ingress")
 int ipx_wrap_spx_demux(struct __sk_buff *skb)
 {
@@ -90,6 +217,10 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	if (cur.pos + sizeof(struct spxhdr) > data_end) {
 		return TC_ACT_UNSPEC;
 	}
+	if (bpf_ntohs(ipxh->pktlen) - sizeof(struct ipxhdr) < sizeof(struct
+				spxhdr)) {
+		return TC_ACT_UNSPEC;
+	}
 	struct spxhdr *spxh = cur.pos;
 
 	/* determine if the packet is for the local machine */
@@ -120,7 +251,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		.state = KSPX_NEW,
 		.remote_addr = ipxh->saddr,
 		.local_addr = ipxh->daddr,
-		.remote_id = spxh->src_conn_id,
+		.remote_id = SPX_CONN_ID_UNKNOWN,
 		.local_id = spxh->dst_conn_id,
 		.remote_alloc_no = spxh->alloc_no,
 		.local_alloc_no = 0,
@@ -128,6 +259,8 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		.local_current_sequence = 0,
 		.neg_size_to_remote = SPX_MAX_DATA_LEN_WO_SIZNG,
 		.neg_size_to_local = SPX_MAX_DATA_LEN_WO_SIZNG,
+		.last_rcvd_msg_data_len = 0,
+		.last_sent_msg_data_len = 0,
 		.prefix = 0,
 		.tcp_sport = 0,
 		.tcp_dport = 0,
@@ -163,7 +296,13 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	} else {
 		spx_state = bpf_sk_storage_get(&ipx_wrap_mux_kspx_state,
 					spx_sock, NULL, 0);
+
+		long err = bpf_sk_assign(skb, spx_sock, 0);
 		bpf_sk_release(spx_sock);
+		if (err < 0) {
+			bpf_printk("shot: assign failed");
+			return TC_ACT_SHOT;
+		}
 	}
 
 	if (spx_state == NULL) {
@@ -171,22 +310,14 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	/* check the connection state */
-	switch (spx_state->state) {
-		case KSPX_NEW:
-			if ((spxh->connection_control & SPX_CC_MASK_SPX) !=
-					SPX_CC_SYSTEM_PKT) {
-				bpf_printk("invalid spx connection control");
-				return TC_ACT_SHOT;
-			}
-			break;
-		case KSPX_ESTABLISHED:
-			bpf_printk("established connection in");
-			break;
-		default:
-			bpf_printk("invalid kernel spx state");
-			return TC_ACT_SHOT;
+	size_t data_len = bpf_ntohs(ipxh->pktlen) - (sizeof(struct ipxhdr) +
+			sizeof(struct spxhdr));
+	if (!check_spx_msg_ingress(spx_state, spxh, data_len)) {
+		bpf_printk("shot: msg check failed");
+		return TC_ACT_SHOT;
 	}
+
+	update_spx_state_ingress(spx_state, spxh, data_len);
 
 	/* remove UDP, IPX and SPX headers, as well as the IPv6 payload length
 	 * from the checksum */
@@ -264,7 +395,10 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	tcph->ack = 1;
 	tcph->syn = spx_state->state == KSPX_NEW ? 1 : 0;
 	tcph->psh = spx_state->state != KSPX_NEW ? 1 : 0;
-	tcph->window = bpf_htons(spx_state->neg_size_to_remote);
+	tcph->window = bpf_htons(spx_state->neg_size_to_remote); // TODO:
+								 // account for
+								 // alloc no
+								 // here
 	tcph->check = bpf_htons(0);
 	tcph->urg_ptr = bpf_htons(0);
 
@@ -310,9 +444,12 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	/* do csum_replace last, as it invalidates our pointers again */
 	if (bpf_l4_csum_replace(skb, (((void *) &(tcph->check)) - data), 0,
 				csum_diff, 0) != 0) {
+		bpf_printk("shot: csum replace");
 		return TC_ACT_SHOT;
 	}
 
+	bpf_printk("passed on, seq: %d, ack: %d", spx_state->tcp_seq,
+			spx_state->tcp_ack);
 	return TC_ACT_UNSPEC;
 }
 
@@ -343,8 +480,9 @@ static long mv_payload_loopfn(__u64 index, void* ctx)
 	return 0;
 }
 
-static bool __always_inline wait_for_new_spx_connection(struct bpf_kspx_state
-		*spx_state, struct bpf_kspx_wait_for_conn_ack *wait_conn_ack)
+static bool __always_inline wait_for_new_spx_connection(const struct
+		bpf_kspx_state *spx_state, const struct
+		bpf_kspx_wait_for_conn_ack *wait_conn_ack)
 {
 	struct spx_conn_key conn_key = {
 		.bind_addr = spx_state->local_addr,
@@ -357,6 +495,80 @@ static bool __always_inline wait_for_new_spx_connection(struct bpf_kspx_state
 	}
 
 	return true;
+}
+
+static __always_inline bool check_tcp_msg_egress(const struct bpf_kspx_state
+		*spx_state, const struct tcphdr *tcph)
+{
+	/* check the connection state */
+	switch (spx_state->state) {
+		case KSPX_NEW:
+			/* a new connection only gets to send SYN segments */
+			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
+							TCP_DATA_OFFSET |
+							TCP_WINDOW)) !=
+					TCP_FLAG_SYN) {
+				return false;
+			}
+
+			break;
+		case KSPX_ESTABLISHED:
+			if ((tcp_flag_word(tcph) & TCP_FLAG_RST) != 0) {
+				bpf_printk("warn: TCP reset");
+			}
+			break;
+		default:
+			return false;
+	}
+
+	return true;
+}
+
+static __always_inline void update_spx_state_egress(struct bpf_kspx_state
+		*spx_state, const struct tcphdr *tcph, size_t data_len)
+{
+	spx_state->last_sent_msg_data_len = data_len;
+
+	/* last message has been acknowledged by TCP */
+	__s32 ack_diff;
+	__builtin_sub_overflow(bpf_ntohl(tcph->ack_seq), spx_state->tcp_seq,
+			&ack_diff);
+	if (ack_diff >= spx_state->last_rcvd_msg_data_len) {
+		/* and it was a message containing data */
+		if (spx_state->last_rcvd_msg_data_len != 0) {
+			__builtin_add_overflow(
+					spx_state->remote_expected_sequence, 1,
+					&(spx_state->remote_expected_sequence));
+			__builtin_add_overflow(spx_state->local_alloc_no, 1,
+					&(spx_state->local_alloc_no));
+		}
+		__builtin_add_overflow(spx_state->tcp_seq,
+				spx_state->last_rcvd_msg_data_len,
+				&(spx_state->tcp_seq));
+	}
+}
+
+static __always_inline void get_spx_header_params(struct bpf_kspx_state
+		*spx_state, struct tcphdr *tcph, size_t data_len, __u8
+		*connection_control, __u8 *datastream_type)
+{
+	/* we want to send an SPX connection request */
+	if (spx_state->state == KSPX_NEW) {
+		*connection_control = SPX_CC_SYSTEM_PKT |
+			SPX_CC_ACK_REQUIRED;
+		*datastream_type = SPX_DS_NONE;
+		return;
+	}
+
+	/* we have no information from TCP about whether this is a system
+	 * packet, so we infer from the payload length */
+	if (data_len == 0) {
+		*connection_control = SPX_CC_SYSTEM_PKT;
+		*datastream_type = SPX_DS_NONE;
+	} else {
+		*connection_control = SPX_CC_ACK_REQUIRED;
+		*datastream_type = SPX_DS_NONE;
+	}
 }
 
 SEC("tc/egress")
@@ -409,47 +621,37 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	if (tcph_len < 0) {
 		return TC_ACT_SHOT;
 	}
+	if (bpf_ntohs(ip6h->payload_len) < tcph_len) {
+		return TC_ACT_SHOT;
+	}
 
-	/* check the connection state */
 	__u8 connection_control = 0;
 	__u8 datastream_type = SPX_DS_NONE;
+
+	/* if the connection is new ... */
 	struct bpf_kspx_wait_for_conn_ack wait_conn_ack = { 0 };
-	switch (spx_state->state) {
-		case KSPX_NEW:
-			/* a new connection only gets to send SYN segments */
-			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
-							TCP_DATA_OFFSET |
-							TCP_WINDOW)) !=
-					TCP_FLAG_SYN) {
-				bpf_printk("not syn: %08x",
-						(tcp_flag_word(tcph) &
-						 ~(TCP_RESERVED_BITS |
-							 TCP_DATA_OFFSET |
-							 TCP_WINDOW)));
-				return TC_ACT_SHOT;
-			}
-
-			/* we want to send an SPX connection request */
-			connection_control = SPX_CC_SYSTEM_PKT |
-				SPX_CC_ACK_REQUIRED;
-			datastream_type = SPX_DS_NONE;
-
-			/* we need to prepare the structure for receiving the
-			 * appropriate connection ack */
-			wait_conn_ack.remote_id = SPX_CONN_ID_UNKNOWN;
-			wait_conn_ack.local_id = spx_state->local_id;
-			wait_conn_ack.tcp_sport = tcph->dest;
-			wait_conn_ack.tcp_dport = tcph->source;
-			__builtin_add_overflow(bpf_ntohl(tcph->seq), 1,
-					&(wait_conn_ack.tcp_ack));
-			break;
-		case KSPX_ESTABLISHED:
-			bpf_printk("established connection out");
-			break;
-		default:
-			bpf_printk("shot: inavlid state");
-			return TC_ACT_SHOT;
+	if (spx_state->state == KSPX_NEW) {
+		/* ... we need to prepare the structure for receiving the
+		 * appropriate connection ack */
+		wait_conn_ack.remote_id = SPX_CONN_ID_UNKNOWN;
+		wait_conn_ack.local_id = spx_state->local_id;
+		wait_conn_ack.tcp_sport = tcph->dest;
+		wait_conn_ack.tcp_dport = tcph->source;
+		__builtin_add_overflow(bpf_ntohl(tcph->seq), 1,
+				&(wait_conn_ack.tcp_ack));
 	}
+
+	if (!check_tcp_msg_egress(spx_state, tcph)) {
+		bpf_printk("shot: tcp check failed");
+		return TC_ACT_SHOT;
+	}
+
+	size_t data_len = bpf_ntohs(ip6h->payload_len) - tcph_len;
+	update_spx_state_egress(spx_state, tcph, data_len);
+	bpf_printk("out state updated");
+
+	get_spx_header_params(spx_state, tcph, data_len, &connection_control,
+			&datastream_type);
 
 	/* make room for the new headers */
 	__s32 newhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
@@ -603,6 +805,7 @@ static bool __always_inline establish_spx_connection(struct bpf_sock_ops
 	}
 
 	__be16 new_remote_id = wait_conn_ack->remote_id;
+	__u32 new_tcp_ack = wait_conn_ack->tcp_ack;
 
 	/* delete wait structure for the connection ack */
 	if (bpf_map_delete_elem(&ipx_wrap_mux_kspx_outstanding_conn_acks,
@@ -617,7 +820,11 @@ static bool __always_inline establish_spx_connection(struct bpf_sock_ops
 	}
 
 	spx_state->remote_id = new_remote_id;
+	spx_state->tcp_ack = new_tcp_ack;
 	spx_state->state = KSPX_ESTABLISHED;
+	/* the first ack increases the sequence number by one even though no
+	 * data was transmitted */
+	__builtin_add_overflow(spx_state->tcp_seq, 1, &(spx_state->tcp_seq));
 
 	return true;
 }

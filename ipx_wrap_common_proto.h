@@ -313,6 +313,8 @@ struct bpf_kspx_state {
 	__u16 local_current_sequence;
 	__u16 neg_size_to_remote;
 	__u16 neg_size_to_local;
+	__u16 last_rcvd_msg_data_len;
+	__u16 last_sent_msg_data_len;
 	__be32 prefix;
 	__be16 tcp_sport;
 	__be16 tcp_dport;

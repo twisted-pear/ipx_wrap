@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/tcp.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
@@ -303,6 +304,8 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.local_current_sequence = 0,
 		.neg_size_to_remote = SPX_MAX_DATA_LEN_WO_SIZNG,
 		.neg_size_to_local = SPX_MAX_DATA_LEN_WO_SIZNG,
+		.last_rcvd_msg_data_len = 0,
+		.last_sent_msg_data_len = 0,
 		.prefix = prefix,
 		.tcp_sport = 0,
 		.tcp_dport = 0,
@@ -413,6 +416,23 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		default:
 			conn_rsp->err = ENOTSUP;
 			return false;
+	}
+
+	/* set some socket options to make TCP behave a little more like SPX */
+	if (kernel) {
+		int val = 1;
+		if (setsockopt(conn_fd, IPPROTO_TCP, TCP_NODELAY, &val,
+					sizeof(val)) != 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
+
+		int maxwin = SPX_MAX_DATA_LEN_WO_SIZNG;
+		if (setsockopt(conn_fd, IPPROTO_TCP, TCP_WINDOW_CLAMP, &maxwin,
+					sizeof(maxwin)) != 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
 	}
 
 	if (e->recv_direct) {
