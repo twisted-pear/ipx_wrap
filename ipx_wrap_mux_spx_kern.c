@@ -25,7 +25,6 @@ struct {
 	__type(key, struct spx_conn_key);
 	__type(value, __u64);
 	__uint(max_entries, SPX_SOCKETS_MAX);
-	//__uint(map_flags, BPF_F_RDONLY_PROG);
 } ipx_wrap_mux_kspx_sock_ingress SEC(".maps");
 
 struct {
@@ -393,6 +392,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	tcp_flag_word(tcph) = 0;
 	tcph->doff = sizeof(struct tcphdr) / 4;
 	tcph->ack = 1;
+	tcph->urg = spx_state->state != KSPX_NEW ? 1 : 0;
 	tcph->syn = spx_state->state == KSPX_NEW ? 1 : 0;
 	tcph->psh = spx_state->state != KSPX_NEW ? 1 : 0;
 	tcph->window = bpf_htons(spx_state->neg_size_to_remote); // TODO:
@@ -516,6 +516,11 @@ static __always_inline bool check_tcp_msg_egress(const struct bpf_kspx_state
 			if ((tcp_flag_word(tcph) & TCP_FLAG_RST) != 0) {
 				bpf_printk("warn: TCP reset");
 			}
+
+			if (bpf_ntohl(tcph->seq) != spx_state->tcp_ack) {
+				bpf_printk("warn: TCP data too new");
+				return false;
+			}
 			break;
 		default:
 			return false;
@@ -524,9 +529,11 @@ static __always_inline bool check_tcp_msg_egress(const struct bpf_kspx_state
 	return true;
 }
 
-static __always_inline void update_spx_state_egress(struct bpf_kspx_state
+static __always_inline bool update_spx_state_egress(struct bpf_kspx_state
 		*spx_state, const struct tcphdr *tcph, size_t data_len)
 {
+	bool required_to_send_ack = false;
+
 	spx_state->last_sent_msg_data_len = data_len;
 
 	/* last message has been acknowledged by TCP */
@@ -541,11 +548,20 @@ static __always_inline void update_spx_state_egress(struct bpf_kspx_state
 					&(spx_state->remote_expected_sequence));
 			__builtin_add_overflow(spx_state->local_alloc_no, 1,
 					&(spx_state->local_alloc_no));
+
+			/* We have to send an ack in this case. The TCP segment
+			 * we are translating could contain data and would thus
+			 * be converted to a normal SPX data packet. If this is
+			 * the case we have to generate a separate ack SPX
+			 * message as well. */
+			required_to_send_ack = true;
 		}
 		__builtin_add_overflow(spx_state->tcp_seq,
 				spx_state->last_rcvd_msg_data_len,
 				&(spx_state->tcp_seq));
 	}
+
+	return required_to_send_ack;
 }
 
 static __always_inline void get_spx_header_params(struct bpf_kspx_state
@@ -647,7 +663,8 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	}
 
 	size_t data_len = bpf_ntohs(ip6h->payload_len) - tcph_len;
-	update_spx_state_egress(spx_state, tcph, data_len);
+	bool required_to_send_ack = update_spx_state_egress(spx_state, tcph,
+			data_len);
 	bpf_printk("out state updated");
 
 	get_spx_header_params(spx_state, tcph, data_len, &connection_control,
@@ -711,6 +728,8 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	}
 
 	/* fill in IPv6 header */
+	// TODO: remove unnecessary fills here, these should survive from the
+	// original header
 	ip6h->version = 6;
 	ip6h->priority = 0;
 	__builtin_memset(ip6h->flow_lbl, 0, sizeof(ip6h->flow_lbl));
@@ -741,7 +760,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 			/ 2);
 
 	/* fill in the UDP header. */
-	/* TODO: calculate the UDP checksum properly */
+	// TODO: calculate the UDP checksum properly
 	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
 	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
 	udph->check = bpf_htons(0xdead);
@@ -772,6 +791,39 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		}
 
 		bpf_printk("conn req sent");
+	} else if (required_to_send_ack && (connection_control &
+				SPX_CC_SYSTEM_PKT) == 0) {
+		/* we need to construct a separate ack packet, forward the data
+		 * packet first */
+		if (bpf_clone_redirect(skb, skb->ifindex, 0) != 0) {
+			bpf_printk("failed to clone data packet");
+		}
+
+		/* adjust pointers and reverify */
+		data_end = (void *)(long)skb->data_end;
+		data = (void *)(long)skb->data;
+
+		eth = data;
+		ip6h = ((void *) eth) + sizeof(struct ethhdr);
+		udph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+		ipxh = ((void *) udph) + sizeof(struct udphdr);
+		spxh = ((void *) ipxh) + sizeof(struct ipxhdr);
+		if (spxh + 1 > data_end) {
+			return TC_ACT_SHOT;
+		}
+
+		/* then turn it into an ack packet without data */
+		ip6h->payload_len = bpf_htons(payload_len - data_len);
+		udph->len = bpf_htons(payload_len - data_len);
+		ipxh->pktlen = bpf_htons(payload_len - (sizeof(struct udphdr) +
+					data_len));
+		spxh->connection_control = SPX_CC_SYSTEM_PKT;
+		spxh->datastream_type = SPX_DS_NONE;
+		if (bpf_skb_change_tail(skb, skb->len - data_len, 0) < 0) {
+			return TC_ACT_SHOT;
+		}
+
+		bpf_printk("generated ack sent");
 	}
 
 	return TC_ACT_UNSPEC;

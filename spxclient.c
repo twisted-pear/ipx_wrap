@@ -12,6 +12,7 @@ enum spxclient_error_codes {
 	SPXCLIENT_ERR_BIND,
 	SPXCLIENT_ERR_GETSOCKNAME,
 	SPXCLIENT_ERR_CONNECT,
+	SPXCLIENT_ERR_SEND,
 	SPXCLIENT_ERR_MAX
 };
 
@@ -58,10 +59,28 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 		exit(SPXCLIENT_ERR_CONNECT);
 	}
 
+	char *hello = "Hello World!\n";
+	ssize_t nsent = send(spxh.spx_sock, hello, strlen(hello), 0);
+	if (nsent < 0) {
+		perror("send");
+		ipxw_mux_spx_conn_close(&spxh);
+		ipxw_mux_unbind(ipxh);
+		exit(SPXCLIENT_ERR_SEND);
+	}
+	printf("sent %ld bytes.\n", nsent);
+	nsent = send(spxh.spx_sock, hello, strlen(hello), 0);
+	if (nsent < 0) {
+		perror("send");
+		ipxw_mux_spx_conn_close(&spxh);
+		ipxw_mux_unbind(ipxh);
+		exit(SPXCLIENT_ERR_SEND);
+	}
+	printf("sent %ld bytes.\n", nsent);
+
 	while (true) {
 		char buf[SPX_MAX_DATA_LEN_WO_SIZNG + 1];
-		ssize_t nrcvd = recv(spxh.spx_sock, buf,
-				SPX_MAX_DATA_LEN_WO_SIZNG, 0);
+		ssize_t nrcvd = read(spxh.spx_sock, buf,
+				SPX_MAX_DATA_LEN_WO_SIZNG);
 		if (nrcvd < 0) {
 			perror("recv");
 			break;
@@ -74,9 +93,15 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 		printf("rcvd %ld bytes:\n", nrcvd);
 		puts(buf);
 
-		ssize_t nsent = send(spxh.spx_sock, buf, nrcvd, 0);
+		nsent = send(spxh.spx_sock, buf, nrcvd, 0);
 		if (nsent < 0) {
-			perror("sent");
+			perror("send");
+			break;
+		}
+		printf("sent %ld bytes.\n", nsent);
+		nsent = send(spxh.spx_sock, buf, nrcvd, 0);
+		if (nsent < 0) {
+			perror("send");
 			break;
 		}
 		printf("sent %ld bytes.\n", nsent);

@@ -421,6 +421,12 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	/* set some socket options to make TCP behave a little more like SPX */
 	if (kernel) {
 		int val = 1;
+		if (setsockopt(conn_fd, SOL_SOCKET, SO_OOBINLINE, &val,
+					sizeof(val)) != 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
+
 		if (setsockopt(conn_fd, IPPROTO_TCP, TCP_NODELAY, &val,
 					sizeof(val)) != 0) {
 			conn_rsp->err = errno;
