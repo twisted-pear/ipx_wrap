@@ -392,7 +392,6 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	tcp_flag_word(tcph) = 0;
 	tcph->doff = sizeof(struct tcphdr) / 4;
 	tcph->ack = 1;
-	tcph->urg = spx_state->state != KSPX_NEW ? 1 : 0;
 	tcph->syn = spx_state->state == KSPX_NEW ? 1 : 0;
 	tcph->psh = spx_state->state != KSPX_NEW ? 1 : 0;
 	tcph->window = bpf_htons(spx_state->neg_size_to_remote); // TODO:
@@ -450,6 +449,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 
 	bpf_printk("passed on, seq: %d, ack: %d", spx_state->tcp_seq,
 			spx_state->tcp_ack);
+
 	return TC_ACT_UNSPEC;
 }
 
@@ -857,6 +857,8 @@ static bool __always_inline establish_spx_connection(struct bpf_sock_ops
 	}
 
 	__be16 new_remote_id = wait_conn_ack->remote_id;
+	__be16 new_tcp_sport = wait_conn_ack->tcp_sport;
+	__be16 new_tcp_dport = wait_conn_ack->tcp_dport;
 	__u32 new_tcp_ack = wait_conn_ack->tcp_ack;
 
 	/* delete wait structure for the connection ack */
@@ -872,6 +874,8 @@ static bool __always_inline establish_spx_connection(struct bpf_sock_ops
 	}
 
 	spx_state->remote_id = new_remote_id;
+	spx_state->tcp_sport = new_tcp_sport;
+	spx_state->tcp_dport = new_tcp_dport;
 	spx_state->tcp_ack = new_tcp_ack;
 	spx_state->state = KSPX_ESTABLISHED;
 	/* the first ack increases the sequence number by one even though no
@@ -913,6 +917,13 @@ int ipx_wrap_spx_sockops(struct bpf_sock_ops *skops)
 	}
 
 	return 0;
+}
+
+SEC("socket")
+int ipx_wrap_spx_kcm(struct __sk_buff *skb)
+{
+	bpf_printk("kcm: %d bytes", skb->len);
+	return skb->len;
 }
 
 char _license[] SEC("license") = "GPL";

@@ -660,6 +660,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 			break;
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
+		case IPXW_MUX_SPX_GET_SEQPKT:
 			msgh.msg_control = ctrl_msg.buf;
 			msgh.msg_controllen = sizeof(ctrl_msg.buf);
 
@@ -741,6 +742,11 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		case IPXW_MUX_GETSOCKNAME:
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
+		case IPXW_MUX_SPX_GET_SEQPKT_ERR:
+			break;
+		case IPXW_MUX_SPX_GET_SEQPKT_ACK:
+			// TODO: receive SCM_RIGHTS and set fd in the msg
+			// structure
 			break;
 		default:
 			errno = EOPNOTSUPP;
@@ -1499,6 +1505,7 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock)
 			case IPXW_MUX_SPX_CONNECT:
 			case IPXW_MUX_SPX_ACCEPT:
 			case IPXW_MUX_SPX_CLOSE:
+			case IPXW_MUX_SPX_GET_SEQPKT:
 				return sizeof(msg);
 			default:
 				break;
@@ -1581,6 +1588,7 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 			break;
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
+		case IPXW_MUX_SPX_GET_SEQPKT:
 			/* get ctrl msg */
 			struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
 
@@ -1634,6 +1642,7 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 {
 	size_t msg_len = sizeof(struct ipxw_mux_msg);
+	int transmitted_fd = -1;
 
 	/* check for permissible types, check their data_len if they have one
 	 * and add it to msg_len  */
@@ -1641,6 +1650,12 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 		case IPXW_MUX_GETSOCKNAME:
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
+		case IPXW_MUX_SPX_GET_SEQPKT_ERR:
+			break;
+		case IPXW_MUX_SPX_GET_SEQPKT_ACK:
+			// TODO: prepare SCM_RIGHTS reply and close socket
+			// after sending
+			transmitted_fd = msg->spx_get_seqpkt.sock;
 			break;
 		default:
 			errno = ENOTSUP;
@@ -1648,11 +1663,21 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 	}
 
 	if (msg_len > IPXW_MUX_MSG_LEN) {
+		/* close the transmitted FD regardless of whether or not we
+		 * sent it successfully */
+		if (transmitted_fd >= 0) {
+			close(transmitted_fd);
+		}
 		errno = EINVAL;
 		return -1;
 	}
 
 	ssize_t sent_len = send(conf_sock, msg, msg_len, 0);
+	/* close the transmitted FD regardless of whether or not we sent it
+	 * successfully */
+	if (transmitted_fd >= 0) {
+		close(transmitted_fd);
+	}
 	if (sent_len < 0) {
 		return -1;
 	}
@@ -1706,7 +1731,7 @@ bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h)
 
 	return (h.spx_sock < 0) || (h.conf_sock < 0) ||
 		(!h.kernel && h.last_known_state->state ==
-		 IPXW_MUX_SPX_INVALID);
+		 IPXW_MUX_SPX_INVALID) || (h.kernel && h.kcm_sock < 0);
 }
 
 bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h)
@@ -1733,8 +1758,13 @@ void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h)
 		close(h->conf_sock);
 	}
 
+	if (h->kcm_sock >= 0) {
+		close(h->kcm_sock);
+	}
+
 	h->spx_sock = -1;
 	h->conf_sock = -1;
+	h->kcm_sock = -1;
 
 	if (h->last_known_state != NULL) {
 		free(h->last_known_state);
@@ -1748,6 +1778,7 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 	struct ipxw_mux_spx_handle ret;
 	ret.spx_sock = -1;
 	ret.conf_sock = -1;
+	ret.kcm_sock = -1;
 	ret.conn_id = SPX_CONN_ID_UNKNOWN;
 	ret.kernel = kernel;
 
@@ -2212,6 +2243,28 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 					daddr)) {
 			break;
 		}
+
+		struct ipxw_mux_msg seqpkt_req;
+		seqpkt_req.type = IPXW_MUX_SPX_GET_SEQPKT;
+		seqpkt_req.spx_get_seqpkt.sock = ret.spx_sock;
+		seqpkt_req.spx_get_seqpkt.conn_id = ret.conn_id;
+
+		struct ipxw_mux_msg seqpkt_rsp;
+		seqpkt_rsp.type = IPXW_MUX_CONF;
+		seqpkt_rsp.conf.data_len = 0;
+
+		rcvd_len = ipxw_mux_send_recv_conf_msg(h, &seqpkt_req,
+				&seqpkt_rsp);
+		if (rcvd_len < 0) {
+			break;
+		}
+
+		if (seqpkt_rsp.type != IPXW_MUX_SPX_GET_SEQPKT_ACK) {
+			errno = seqpkt_rsp.spx_get_seqpkt.err;
+			break;
+		}
+
+		ret.kcm_sock = seqpkt_rsp.spx_get_seqpkt.sock;
 
 		return ret;
 	} while (0);

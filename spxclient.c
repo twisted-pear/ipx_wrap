@@ -78,9 +78,10 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 	printf("sent %ld bytes.\n", nsent);
 
 	while (true) {
+		sleep(1);
 		char buf[SPX_MAX_DATA_LEN_WO_SIZNG + 1];
-		ssize_t nrcvd = read(spxh.spx_sock, buf,
-				SPX_MAX_DATA_LEN_WO_SIZNG);
+		ssize_t nrcvd = recv(spxh.spx_sock, buf,
+				SPX_MAX_DATA_LEN_WO_SIZNG, 0);
 		if (nrcvd < 0) {
 			perror("recv");
 			break;

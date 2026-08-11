@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/kcm.h>
 #include <linux/tcp.h>
 #include <net/if.h>
 #include <signal.h>
@@ -374,6 +375,34 @@ static bool record_spx_conn_in_bpf(const struct ipx_addr *local_addr, const
 	return true;
 }
 
+static bool connect_kspx_kcm(struct bind_entry *e, struct
+		ipxw_mux_msg_spx_get_seqpkt *conn_req, int conn_fd, struct
+		ipxw_mux_msg_spx_get_seqpkt *conn_rsp)
+{
+	int kcm_fd = socket(AF_KCM, SOCK_SEQPACKET, KCMPROTO_CONNECTED);
+	if (kcm_fd < 0) {
+		perror("KCM socket");
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	struct kcm_attach kcm_att = {
+		.fd = conn_fd,
+		.bpf_fd = bpf_program__fd(
+				bpf_spx_kern->progs.ipx_wrap_spx_kcm)
+	};
+
+	if (ioctl(kcm_fd, SIOCKCMATTACH, &kcm_att) < 0) {
+		perror("KCM attach");
+		conn_rsp->err = errno;
+		close(kcm_fd);
+		return false;
+	}
+
+	conn_rsp->sock = kcm_fd;
+	return true;
+}
+
 static bool record_spx_conn(struct bind_entry *e, struct
 		ipxw_mux_msg_spx_connect *conn_req, int conn_fd, struct
 		ipxw_mux_msg_spx_connect *conn_rsp, bool accepted)
@@ -421,12 +450,6 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	/* set some socket options to make TCP behave a little more like SPX */
 	if (kernel) {
 		int val = 1;
-		if (setsockopt(conn_fd, SOL_SOCKET, SO_OOBINLINE, &val,
-					sizeof(val)) != 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
 		if (setsockopt(conn_fd, IPPROTO_TCP, TCP_NODELAY, &val,
 					sizeof(val)) != 0) {
 			conn_rsp->err = errno;
@@ -884,6 +907,27 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 				delete_spx_conn(be_conf, conn);
 			}
 			return true;
+		case IPXW_MUX_SPX_GET_SEQPKT:
+			// TODO
+			if (fd < 0) {
+				return false;
+			}
+
+			rsp_msg = calloc(1, sizeof(struct ipxw_mux_msg));
+			if (rsp_msg == NULL) {
+				close(fd);
+				return false;
+			}
+			rsp_msg->type = IPXW_MUX_SPX_GET_SEQPKT_ERR;
+
+			if (connect_kspx_kcm(be_conf, &(msg->spx_get_seqpkt),
+						fd,
+						&(rsp_msg->spx_get_seqpkt))) {
+				rsp_msg->type = IPXW_MUX_SPX_GET_SEQPKT_ACK;
+			}
+
+			close(fd);
+			break;
 		default:
 			return false;
 	}
