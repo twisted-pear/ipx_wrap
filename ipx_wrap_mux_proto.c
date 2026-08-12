@@ -645,6 +645,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	msgh.msg_namelen = 0;
 	msgh.msg_control = NULL;
 	msgh.msg_controllen = 0;
+	msgh.msg_flags = 0;
 
 	/* prepare a control message in case one is needed */
 	union {
@@ -720,10 +721,23 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	size_t expected_out_len = sizeof(struct ipxw_mux_msg) +
 		conf_out->conf.data_len;
 
+	iov.iov_base = conf_out;
+	iov.iov_len = expected_out_len;
+
+	memset(ctrl_msg.buf, 0, sizeof(ctrl_msg.buf));
+
+	msgh.msg_name = NULL;
+	msgh.msg_namelen = 0;
+	msgh.msg_control = ctrl_msg.buf;
+	msgh.msg_controllen = sizeof(ctrl_msg.buf);
+	msgh.msg_iov = &iov;
+	msgh.msg_iovlen = 1;
+	msgh.msg_flags = 0;
+
 	/* receive the response, this blocks */
 	ssize_t rcvd_len = -1;
 	do {
-		rcvd_len = recv(h.conf_sock, conf_out, expected_out_len, 0);
+		rcvd_len = recvmsg(h.conf_sock, &msgh, 0);
 	} while (rcvd_len < 0 && errno == EINTR);
 	if (rcvd_len < 0) {
 		return -1;
@@ -745,8 +759,30 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		case IPXW_MUX_SPX_GET_SEQPKT_ERR:
 			break;
 		case IPXW_MUX_SPX_GET_SEQPKT_ACK:
-			// TODO: receive SCM_RIGHTS and set fd in the msg
-			// structure
+			/* receive the KCM SOCK FD */
+
+			/* get ctrl msg */
+			struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
+
+			/* validate ctrl msg */
+			if (cmsgp == NULL) {
+				errno = EINVAL;
+				return -1;
+			}
+			if (cmsgp->cmsg_len != CMSG_LEN(sizeof(int))) {
+				errno = EINVAL;
+				return -1;
+			}
+			if (cmsgp->cmsg_level != SOL_SOCKET || cmsgp->cmsg_type
+					!= SCM_RIGHTS) {
+				errno = EINVAL;
+				return -1;
+			}
+
+			/* retrive FD */
+			memcpy(&(conf_out->spx_get_seqpkt.sock),
+					CMSG_DATA(cmsgp), sizeof(int));
+
 			break;
 		default:
 			errno = EOPNOTSUPP;
@@ -1541,6 +1577,7 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 	struct msghdr msgh;
 	msgh.msg_name = NULL;
 	msgh.msg_namelen = 0;
+	msgh.msg_flags = 0;
 
 	struct iovec iov;
 	iov.iov_base = msg;
@@ -1639,10 +1676,16 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 	return rcvd_msg_len;
 }
 
-ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
+ssize_t ipxw_mux_recv_conf(int conf_sock, struct ipxw_mux_msg *msg, int
+		*transmitted_fd)
 {
+	if (transmitted_fd == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	size_t msg_len = sizeof(struct ipxw_mux_msg);
-	int transmitted_fd = -1;
+	*transmitted_fd = -1;
 
 	/* check for permissible types, check their data_len if they have one
 	 * and add it to msg_len  */
@@ -1653,9 +1696,7 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 		case IPXW_MUX_SPX_GET_SEQPKT_ERR:
 			break;
 		case IPXW_MUX_SPX_GET_SEQPKT_ACK:
-			// TODO: prepare SCM_RIGHTS reply and close socket
-			// after sending
-			transmitted_fd = msg->spx_get_seqpkt.sock;
+			*transmitted_fd = msg->spx_get_seqpkt.sock;
 			break;
 		default:
 			errno = ENOTSUP;
@@ -1663,21 +1704,50 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg)
 	}
 
 	if (msg_len > IPXW_MUX_MSG_LEN) {
-		/* close the transmitted FD regardless of whether or not we
-		 * sent it successfully */
-		if (transmitted_fd >= 0) {
-			close(transmitted_fd);
-		}
 		errno = EINVAL;
 		return -1;
 	}
 
-	ssize_t sent_len = send(conf_sock, msg, msg_len, 0);
-	/* close the transmitted FD regardless of whether or not we sent it
-	 * successfully */
-	if (transmitted_fd >= 0) {
-		close(transmitted_fd);
+	struct iovec iov = {
+		.iov_base = msg,
+		.iov_len = msg_len
+	};
+
+	struct msghdr msgh;
+	msgh.msg_name = NULL;
+	msgh.msg_namelen = 0;
+	msgh.msg_control = NULL;
+	msgh.msg_controllen = 0;
+	msgh.msg_iov = &iov;
+	msgh.msg_iovlen = 1;
+	msgh.msg_flags = 0;
+
+	/* do we need to transmit an FD? */
+	union {
+		char buf[CMSG_SPACE(sizeof(int))]; /* Space large enough to
+						      hold one int */
+		struct cmsghdr align;
+	} ctrl_msg;
+	memset(ctrl_msg.buf, 0, sizeof(ctrl_msg.buf));
+	if (*transmitted_fd >= 0) {
+		msgh.msg_control = ctrl_msg.buf;
+		msgh.msg_controllen = sizeof(ctrl_msg.buf);
+
+		/* prepare ctrl msg header */
+		struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
+		if (cmsgp == NULL) {
+			errno = EINVAL;
+			return -1;
+		}
+		cmsgp->cmsg_level = SOL_SOCKET;
+		cmsgp->cmsg_type = SCM_RIGHTS;
+
+		/* store the fd we want to send */
+		cmsgp->cmsg_len = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(cmsgp), transmitted_fd, sizeof(int));
 	}
+
+	ssize_t sent_len = sendmsg(conf_sock, &msgh, 0);
 	if (sent_len < 0) {
 		return -1;
 	}

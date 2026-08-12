@@ -60,7 +60,7 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 	}
 
 	char *hello = "Hello World!\n";
-	ssize_t nsent = send(spxh.spx_sock, hello, strlen(hello), 0);
+	ssize_t nsent = send(spxh.kcm_sock, hello, strlen(hello), 0);
 	if (nsent < 0) {
 		perror("send");
 		ipxw_mux_spx_conn_close(&spxh);
@@ -68,7 +68,7 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 		exit(SPXCLIENT_ERR_SEND);
 	}
 	printf("sent %ld bytes.\n", nsent);
-	nsent = send(spxh.spx_sock, hello, strlen(hello), 0);
+	nsent = send(spxh.kcm_sock, hello, strlen(hello), 0);
 	if (nsent < 0) {
 		perror("send");
 		ipxw_mux_spx_conn_close(&spxh);
@@ -78,9 +78,8 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 	printf("sent %ld bytes.\n", nsent);
 
 	while (true) {
-		sleep(1);
 		char buf[SPX_MAX_DATA_LEN_WO_SIZNG + 1];
-		ssize_t nrcvd = recv(spxh.spx_sock, buf,
+		ssize_t nrcvd = recv(spxh.kcm_sock, buf,
 				SPX_MAX_DATA_LEN_WO_SIZNG, 0);
 		if (nrcvd < 0) {
 			perror("recv");
@@ -94,13 +93,13 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 		printf("rcvd %ld bytes:\n", nrcvd);
 		puts(buf);
 
-		nsent = send(spxh.spx_sock, buf, nrcvd, 0);
+		nsent = send(spxh.kcm_sock, buf, nrcvd, 0);
 		if (nsent < 0) {
 			perror("send");
 			break;
 		}
 		printf("sent %ld bytes.\n", nsent);
-		nsent = send(spxh.spx_sock, buf, nrcvd, 0);
+		nsent = send(spxh.kcm_sock, buf, nrcvd, 0);
 		if (nsent < 0) {
 			perror("send");
 			break;

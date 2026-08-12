@@ -138,7 +138,8 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 		(*handle_conf_msg_cb)(int conf_sock, struct ipxw_mux_msg *msg,
 			int fd, void *ctx), void *conf_ctx);
 
-ssize_t ipxw_mux_recv_conf(int conf_sock, const struct ipxw_mux_msg *msg);
+ssize_t ipxw_mux_recv_conf(int conf_sock, struct ipxw_mux_msg *msg, int
+		*transmitted_fd);
 
 /* SPX client API */
 

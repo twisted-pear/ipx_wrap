@@ -379,7 +379,8 @@ static bool connect_kspx_kcm(struct bind_entry *e, struct
 		ipxw_mux_msg_spx_get_seqpkt *conn_req, int conn_fd, struct
 		ipxw_mux_msg_spx_get_seqpkt *conn_rsp)
 {
-	int kcm_fd = socket(AF_KCM, SOCK_SEQPACKET, KCMPROTO_CONNECTED);
+	// TODO: check socket state for sanity before attaching to KCM
+	int kcm_fd = socket(AF_KCM, SOCK_DGRAM, KCMPROTO_CONNECTED);
 	if (kcm_fd < 0) {
 		perror("KCM socket");
 		conn_rsp->err = errno;
@@ -731,8 +732,6 @@ static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
 
 	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_ingress,
 			&conn_key, sizeof(struct spx_conn_key), 0);
-	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_outstanding_conn_acks,
-			&conn_key, sizeof(struct spx_conn_key), 0);
 }
 
 static void delete_spx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
@@ -993,7 +992,8 @@ static ssize_t conf_rsp(struct bind_entry *be, int epoll_fd)
 	}
 
 	struct ipxw_mux_msg *msg = STAILQ_FIRST(&be->conf_queue);
-	ssize_t err = ipxw_mux_recv_conf(be->conf_sock, msg);
+	int transmitted_fd = -1;
+	ssize_t err = ipxw_mux_recv_conf(be->conf_sock, msg, &transmitted_fd);
 	if (err < 0) {
 		/* recoverable errors, don't dequeue the message but try again
 		 * later */
@@ -1005,6 +1005,11 @@ static ssize_t conf_rsp(struct bind_entry *be, int epoll_fd)
 		/* other error, make sure to get rid of the message */
 	}
 
+	/* if we attempted to transmit an FD, we close it here as we are
+	 * getting rid of the message */
+	if (transmitted_fd >= 0) {
+		close(transmitted_fd);
+	}
 	STAILQ_REMOVE_HEAD(&be->conf_queue, q_entry);
 	free(msg);
 

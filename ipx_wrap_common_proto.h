@@ -307,12 +307,9 @@ enum kspx_connection_state {
 	KSPX_ESTABLISHED,
 };
 
-struct bpf_kspx_wait_for_conn_ack {
-	__be16 remote_id;
-	__be16 local_id;
+struct bpf_kspx_ingress_lookup {
 	__be16 tcp_sport;
 	__be16 tcp_dport;
-	__u32 tcp_ack;
 };
 
 struct bpf_kspx_state {
