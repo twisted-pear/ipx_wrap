@@ -1801,7 +1801,7 @@ bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h)
 
 	return (h.spx_sock < 0) || (h.conf_sock < 0) ||
 		(!h.kernel && h.last_known_state->state ==
-		 IPXW_MUX_SPX_INVALID) || (h.kernel && h.kcm_sock < 0);
+		 IPXW_MUX_SPX_INVALID);
 }
 
 bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h)
@@ -1828,13 +1828,8 @@ void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h)
 		close(h->conf_sock);
 	}
 
-	if (h->kcm_sock >= 0) {
-		close(h->kcm_sock);
-	}
-
 	h->spx_sock = -1;
 	h->conf_sock = -1;
-	h->kcm_sock = -1;
 
 	if (h->last_known_state != NULL) {
 		free(h->last_known_state);
@@ -1848,7 +1843,6 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 	struct ipxw_mux_spx_handle ret;
 	ret.spx_sock = -1;
 	ret.conf_sock = -1;
-	ret.kcm_sock = -1;
 	ret.conn_id = SPX_CONN_ID_UNKNOWN;
 	ret.kernel = kernel;
 
@@ -1867,7 +1861,7 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 
 	int spx_sock = -1;
 	if (kernel) {
-		spx_sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+		spx_sock = socket(AF_INET6, SOCK_SEQPACKET, IPPROTO_SCTP);
 	} else {
 		spx_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	}
@@ -2313,28 +2307,6 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 					daddr)) {
 			break;
 		}
-
-		struct ipxw_mux_msg seqpkt_req;
-		seqpkt_req.type = IPXW_MUX_SPX_GET_SEQPKT;
-		seqpkt_req.spx_get_seqpkt.sock = ret.spx_sock;
-		seqpkt_req.spx_get_seqpkt.conn_id = ret.conn_id;
-
-		struct ipxw_mux_msg seqpkt_rsp;
-		seqpkt_rsp.type = IPXW_MUX_CONF;
-		seqpkt_rsp.conf.data_len = 0;
-
-		rcvd_len = ipxw_mux_send_recv_conf_msg(h, &seqpkt_req,
-				&seqpkt_rsp);
-		if (rcvd_len < 0) {
-			break;
-		}
-
-		if (seqpkt_rsp.type != IPXW_MUX_SPX_GET_SEQPKT_ACK) {
-			errno = seqpkt_rsp.spx_get_seqpkt.err;
-			break;
-		}
-
-		ret.kcm_sock = seqpkt_rsp.spx_get_seqpkt.sock;
 
 		return ret;
 	} while (0);

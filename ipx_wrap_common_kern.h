@@ -1,6 +1,8 @@
 #ifndef __IPX_WRAP_COMMON_KERN_H__
 #define __IPX_WRAP_COMMON_KERN_H__
 
+#define SCTP_MAX_CHUNKSIZE 4096 // FIXME: this will do for our purposes but is
+				// very ugly
 #define ETH_ALEN 6
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
@@ -94,6 +96,48 @@ static __always_inline int parse_tcphdr(struct hdr_cursor *cur, void *data_end,
 
 	cur->pos += len;
 	*tcphdr = tcph;
+
+	return len;
+}
+
+static __always_inline int parse_sctphdr(struct hdr_cursor *cur, void
+		*data_end, struct sctphdr **sctphdr)
+{
+	struct sctphdr *sctph = cur->pos;
+
+	if (sctph + 1 > data_end)
+		return -1;
+
+	cur->pos = sctph + 1;
+	*sctphdr = sctph;
+
+	return sizeof(struct sctphdr);
+}
+
+static __always_inline int parse_sctp_chunk(struct hdr_cursor *cur, void
+		*data_end, struct sctp_chunkhdr **sctp_chunkhdr)
+{
+	struct sctp_chunkhdr *sctp_chunkh = cur->pos;
+
+	if (sctp_chunkh + 1 > data_end)
+		return -1;
+
+	size_t len = bpf_ntohs(sctp_chunkh->length);
+	/* hack so that the verifier knows this value's bounds */
+	asm volatile("%0 &= 0xffff" : "=r"(len) : "0"(len));
+	if (len > SCTP_MAX_CHUNKSIZE)
+		return -1;
+
+	int padding_bytes = (len % 4 == 0) ? 0 : (4 - (len % 4));
+	size_t actual_len = len + padding_bytes;
+	if (len < sizeof(struct sctp_chunkhdr))
+		return -1;
+
+	if (cur->pos + actual_len > data_end)
+		return -1;
+
+	cur->pos += actual_len;
+	*sctp_chunkhdr = sctp_chunkh;
 
 	return len;
 }

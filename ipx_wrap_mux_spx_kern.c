@@ -20,48 +20,21 @@
 
 #define TCP_WINDOW bpf_htonl(0x0000FFFF)
 
+// TODO: implement locking for this data structure!
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct spx_conn_key);
-	__type(value, struct bpf_kspx_ingress_lookup);
+	__type(value, struct bpf_kspx_state);
 	__uint(max_entries, SPX_SOCKETS_MAX);
-} ipx_wrap_mux_kspx_sock_ingress SEC(".maps");
+} ipx_wrap_mux_kspx_state SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
 	__type(key, __u32);
-	__type(value, struct bpf_kspx_state);
+	__type(value, struct spx_conn_key);
 	__uint(max_entries, 0);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} ipx_wrap_mux_kspx_state SEC(".maps");
-
-static __always_inline struct bpf_sock *look_up_tcp_sock(struct __sk_buff *skb,
-		const struct ipv6hdr *ip6h, const struct ipxhdr *ipxh, const
-		struct spxhdr *spxh)
-{
-	struct spx_conn_key conn_key = {
-		.bind_addr = ipxh->daddr,
-		.conn_id = spxh->dst_conn_id
-	};
-
-	struct bpf_kspx_ingress_lookup *ingress_lookup =
-		bpf_map_lookup_elem(&ipx_wrap_mux_kspx_sock_ingress,
-				&conn_key);
-	if (ingress_lookup == NULL) {
-		return NULL;
-	}
-
-	struct bpf_sock_tuple tcp_tuple;
-	__builtin_memset(&tcp_tuple, 0, sizeof(struct bpf_sock_tuple));
-	tcp_tuple.ipv6.dport = ingress_lookup->tcp_dport;
-	tcp_tuple.ipv6.sport = ingress_lookup->tcp_sport;
-	__builtin_memcpy(tcp_tuple.ipv6.saddr, &(ip6h->saddr),
-			sizeof(tcp_tuple.ipv6.saddr));
-	__builtin_memcpy(tcp_tuple.ipv6.daddr, &(ip6h->daddr),
-			sizeof(tcp_tuple.ipv6.daddr));
-	return bpf_skc_lookup_tcp(skb, &tcp_tuple, sizeof(tcp_tuple.ipv6), -1,
-			0);
-}
+} ipx_wrap_mux_kspx_sock_key SEC(".maps");
 
 static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
@@ -177,9 +150,8 @@ static __always_inline void update_spx_state_ingress(struct bpf_kspx_state
 			__builtin_add_overflow(
 					spx_state->local_current_sequence, 1,
 					&(spx_state->local_current_sequence));
-			__builtin_add_overflow(spx_state->tcp_ack,
-					spx_state->last_sent_msg_data_len,
-					&(spx_state->tcp_ack));
+			__builtin_add_overflow(spx_state->sctp_tsn_ack, 1,
+					&(spx_state->sctp_tsn_ack));
 		}
 	} else {
 		if (data_len != 0) {
@@ -199,7 +171,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	struct hdr_cursor cur;
 	cur.pos = data;
 
-	/* TODO: intercept TCP segments to one of our managed sockets */
+	/* TODO: intercept SCTP packets to one of our managed sockets */
 
 	/* we are only interested in SPX packets */
 	struct ethhdr *eth;
@@ -262,24 +234,14 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	struct bpf_sock *spx_sock = look_up_tcp_sock(skb, ip6h, ipxh, spxh);
-	if (spx_sock == NULL) {
-		bpf_printk("no kernel spx socket");
-		return TC_ACT_UNSPEC;
-	}
-
-	struct bpf_kspx_state *spx_state = bpf_sk_storage_get(
-			&ipx_wrap_mux_kspx_state, spx_sock, NULL, 0);
-
-	long err = bpf_sk_assign(skb, spx_sock, 0);
-	bpf_sk_release(spx_sock);
-	if (err < 0) {
-		bpf_printk("shot: assign failed");
-		return TC_ACT_SHOT;
-	}
+	struct spx_conn_key conn_key = {
+		.bind_addr = ipxh->daddr,
+		.conn_id = spxh->dst_conn_id
+	};
+	struct bpf_kspx_state *spx_state = bpf_map_lookup_elem(
+			&ipx_wrap_mux_kspx_state, &conn_key);
 
 	if (spx_state == NULL) {
-		// TODO: remove ingress_lookup structure if no state?
 		bpf_printk("no kernel spx state");
 		return TC_ACT_SHOT;
 	}
@@ -360,10 +322,10 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	/* fill in the new headers */
 	ip6h->nexthdr = IPPROTO_TCP;
 	ip6h->payload_len = bpf_htons(payload_len);
-	tcph->source = spx_state->tcp_sport;
-	tcph->dest = spx_state->tcp_dport;
-	tcph->seq = bpf_htonl(spx_state->tcp_seq);
-	tcph->ack_seq = bpf_htonl(spx_state->tcp_ack);
+	tcph->source = spx_state->sctp_sport;
+	tcph->dest = spx_state->sctp_dport;
+	tcph->seq = bpf_htonl(spx_state->sctp_tsn);
+	tcph->ack_seq = bpf_htonl(spx_state->sctp_tsn_ack);
 	tcp_flag_word(tcph) = 0;
 	tcph->doff = sizeof(struct tcphdr) / 4;
 	tcph->ack = 1;
@@ -403,13 +365,13 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	bpf_printk("passed on, seq: %d, ack: %d", spx_state->tcp_seq,
-			spx_state->tcp_ack);
+	bpf_printk("passed on, seq: %d, ack: %d", spx_state->sctp_tsn,
+			spx_state->sctp_tsn_ack);
 
 	return TC_ACT_UNSPEC;
 }
 
-struct mv_payload_loopctx {
+/*struct mv_payload_loopctx {
 	struct __sk_buff *skb;
 	size_t last_payload_byte_offset;
 	size_t mv_offset;
@@ -434,116 +396,183 @@ static long mv_payload_loopfn(__u64 index, void* ctx)
 	}
 
 	return 0;
+}*/
+
+static __always_inline bool check_for_chunk_type(__u8 chunk_type, const struct
+		sctp_chunkhdr *chunk1, const struct sctp_chunkhdr *chunk2)
+{
+	if (chunk1->type == chunk_type) {
+		return true;
+	}
+
+	if (chunk2 != NULL) {
+		if (chunk2->type == chunk_type) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
-static bool __always_inline install_ingress_lookup(const struct bpf_kspx_state
-		*spx_state)
+static __always_inline bool check_sctp_msg_egress(const struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, const struct
+		sctp_chunkhdr *chunk1, const struct sctp_chunkhdr *chunk2)
 {
-	struct spx_conn_key conn_key = {
-		.bind_addr = spx_state->local_addr,
-		.conn_id = spx_state->local_id
-	};
+	switch (spx_state->state) {
+		case KSPX_NEW:
+			/* only an init chunk is allowed for new connections */
+			if (chunk1->type != SCTP_CID_INIT || chunk2 != NULL) {
+				return false;
+			}
 
-	struct bpf_kspx_ingress_lookup ingress_lookup = {
-		.tcp_sport = spx_state->tcp_sport,
-		.tcp_dport = spx_state->tcp_dport
-	};
+			return true;
+		case KSPX_ESTABLISHED:
+			break;
+		default:
+			return false;
+	}
 
-	if (bpf_map_update_elem(&ipx_wrap_mux_kspx_sock_ingress, &conn_key,
-				&ingress_lookup, BPF_ANY) < 0) {
+	if (sctph->source != spx_state->sctp_dport || sctph->dest !=
+			spx_state->sctp_sport) {
+		return false;
+	}
+	if (sctph->vtag != spx_state->sctp_svtag) {
+		return false;
+	}
+
+	if (check_for_chunk_type(SCTP_CID_ERROR, chunk1, chunk2)) {
+		bpf_printk("warn: error chunk");
+		return false;
+	}
+	if (check_for_chunk_type(SCTP_CID_ABORT, chunk1, chunk2)) {
+		bpf_printk("warn: abort chunk");
+		return false;
+	}
+
+	/* this is not allowed */
+	if (chunk1->type == SCTP_CID_DATA && chunk2 != NULL) {
+		bpf_printk("warn: chunks after data");
+		return false;
+	}
+
+	/* we can't handle multiple data chunks */
+	if (chunk1->type == SCTP_CID_DATA && (chunk2 != NULL && chunk2->type ==
+				SCTP_CID_DATA)) {
+		bpf_printk("warn: multiple data chunks");
 		return false;
 	}
 
 	return true;
 }
 
-static __always_inline bool check_tcp_msg_egress(const struct bpf_kspx_state
-		*spx_state, const struct tcphdr *tcph)
+static __always_inline bool get_ack_tsn(const struct sctp_chunkhdr *chunk1,
+		void *data_end, bool *have_ack_tsn, __u32 *ack_tsn)
 {
-	/* check the connection state */
-	switch (spx_state->state) {
-		case KSPX_NEW:
-			/* a new connection only gets to send SYN segments */
-			if ((tcp_flag_word(tcph) & ~(TCP_RESERVED_BITS |
-							TCP_DATA_OFFSET |
-							TCP_WINDOW)) !=
-					TCP_FLAG_SYN) {
-				return false;
-			}
+	*ack_tsn = 0;
+	*have_ack_tsn = false;
 
-			break;
-		case KSPX_ESTABLISHED:
-			if ((tcp_flag_word(tcph) & TCP_FLAG_RST) != 0) {
-				bpf_printk("warn: TCP reset");
-			}
-
-			if (bpf_ntohl(tcph->seq) != spx_state->tcp_ack) {
-				bpf_printk("warn: TCP data too new");
-				return false;
-			}
-			break;
-		default:
-			return false;
+	if (chunk1->type != SCTP_CID_SACK) {
+		return true;
 	}
+	if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
+			sizeof(struct sctp_sackhdr)) {
+		return true;
+	}
+
+	const struct sctp_sackhdr *sackh = (const struct sctp_sackhdr
+			*) (chunk1 + 1);
+	if (sackh + 1 > data_end) {
+		return false;
+	}
+
+	*ack_tsn = bpf_ntohl(sackh->cum_tsn_ack);
+	*have_ack_tsn = true;
+	return true;
+}
+
+static __always_inline bool get_data(const struct sctphdr *sctph, const struct
+		sctp_chunkhdr *chunk1, const struct sctp_chunkhdr *chunk2, void
+		*data_end, size_t *data_ofs, size_t *data_len, size_t
+		*padding_bytes)
+{
+	*data_ofs = 0;
+	*data_len = 0;
+	*padding_bytes = 0;
+
+	const struct sctp_chunkhdr *chunkh = NULL;
+	if (chunk1->type == SCTP_CID_DATA) {
+		chunkh = chunk1;
+	} else {
+		if (chunk2 != NULL && chunk2->type == SCTP_CID_DATA) {
+			chunkh = chunk2;
+		}
+	}
+
+	/* no data chunk, mark the entire SCTP header for deletion */
+	if (chunkh == NULL) {
+		bpf_printk("no data");
+		*data_ofs = sizeof(struct sctphdr);
+		size_t chunk1_len = bpf_ntohs(chunk1->length);
+		size_t chunk1_padding = (chunk1_len % 4 == 0) ? 0 : (4 -
+				(chunk1_len % 4));
+		*data_ofs += chunk1_len + chunk1_padding;
+		if (chunk2 != NULL) {
+			size_t chunk2_len = bpf_ntohs(chunk2->length);
+			size_t chunk2_padding = (chunk2_len % 4 == 0) ? 0 : (4
+					- (chunk2_len % 4));
+			*data_ofs += chunk2_len + chunk2_padding;
+		}
+		return true;
+	}
+
+	/* we have data */
+	size_t data_overhead = sizeof(struct sctp_chunkhdr) + sizeof(struct
+			sctp_datahdr);
+	size_t chunk_len = bpf_ntohs(chunkh->length);
+	*data_ofs = (((void *) chunkh) - ((void *) sctph)) + data_overhead;
+	*data_len = chunk_len - data_overhead;
+	*padding_bytes = (chunk_len % 4 == 0) ? 0 : (4 - (chunk_len % 4));
 
 	return true;
 }
 
-static __always_inline bool update_spx_state_egress(struct bpf_kspx_state
-		*spx_state, const struct tcphdr *tcph, size_t data_len)
+static __always_inline void update_spx_state_egress(struct bpf_kspx_state
+		*spx_state, __u32 tsn_ack, size_t data_len, __be32
+		initial_vtag)
 {
-	bool required_to_send_ack = false;
-
-	spx_state->last_sent_msg_data_len = data_len;
-
-	/* last message has been acknowledged by TCP */
-	__s32 ack_diff;
-	__builtin_sub_overflow(bpf_ntohl(tcph->ack_seq), spx_state->tcp_seq,
-			&ack_diff);
-	if (ack_diff >= spx_state->last_rcvd_msg_data_len) {
-		/* and it was a message containing data */
-		if (spx_state->last_rcvd_msg_data_len != 0) {
-			__builtin_add_overflow(
-					spx_state->remote_expected_sequence, 1,
-					&(spx_state->remote_expected_sequence));
-			__builtin_add_overflow(spx_state->local_alloc_no, 1,
-					&(spx_state->local_alloc_no));
-
-			/* We have to send an ack in this case. The TCP segment
-			 * we are translating could contain data and would thus
-			 * be converted to a normal SPX data packet. If this is
-			 * the case we have to generate a separate ack SPX
-			 * message as well. */
-			required_to_send_ack = true;
-		}
-		__builtin_add_overflow(spx_state->tcp_seq,
-				spx_state->last_rcvd_msg_data_len,
-				&(spx_state->tcp_seq));
+	if (spx_state->state == KSPX_NEW) {
+		spx_state->sctp_svtag = initial_vtag;
 	}
 
-	return required_to_send_ack;
+	/* last message has been acknowledged by SCTP */
+	if (sctp_tsn_less_than(spx_state->sctp_tsn, tsn_ack)) {
+		__builtin_add_overflow(spx_state->remote_expected_sequence, 1,
+				&(spx_state->remote_expected_sequence));
+		__builtin_add_overflow(spx_state->local_alloc_no, 1,
+				&(spx_state->local_alloc_no));
+		spx_state->sctp_tsn = tsn_ack;
+	}
+
+	/* we have data */
+	if (data_len != 0) {
+		spx_state->last_sent_msg_data_len = data_len;
+	}
 }
 
-static __always_inline void get_spx_header_params(struct bpf_kspx_state
-		*spx_state, struct tcphdr *tcph, size_t data_len, __u8
-		*connection_control, __u8 *datastream_type)
+static __always_inline void get_spx_packet_info_egress(struct bpf_kspx_state
+		*spx_state, size_t data_len, __u8 *connection_control, __u8
+		*datastream_type)
 {
-	/* we want to send an SPX connection request */
+	*connection_control = 0;
+	*datastream_type = 0;
+
 	if (spx_state->state == KSPX_NEW) {
-		*connection_control = SPX_CC_SYSTEM_PKT |
-			SPX_CC_ACK_REQUIRED;
-		*datastream_type = SPX_DS_NONE;
+		*connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
 		return;
 	}
 
-	/* we have no information from TCP about whether this is a system
-	 * packet, so we infer from the payload length */
 	if (data_len == 0) {
-		*connection_control = SPX_CC_SYSTEM_PKT;
-		*datastream_type = SPX_DS_NONE;
-	} else {
-		*connection_control = SPX_CC_ACK_REQUIRED;
-		*datastream_type = SPX_DS_NONE;
+		*connection_control |= SPX_CC_SYSTEM_PKT;
 	}
 }
 
@@ -555,14 +584,20 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	struct bpf_kspx_state *spx_state =
-		bpf_sk_storage_get(&ipx_wrap_mux_kspx_state, client_sock, NULL,
-				0);
+	struct spx_conn_key *conn_key = bpf_sk_storage_get(
+			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0);
+	if (conn_key == NULL) {
+		return TC_ACT_UNSPEC;
+	}
+
+	struct bpf_kspx_state *spx_state = bpf_map_lookup_elem(
+			&ipx_wrap_mux_kspx_state, conn_key);
 	if (spx_state == NULL) {
 		return TC_ACT_UNSPEC;
 	}
 
-	bpf_printk("Got packet for kernel SPX conn %02x", spx_state->local_id);
+	bpf_printk("Got packet for kernel SPX conn %02x",
+			bpf_ntohs(spx_state->local_id));
 
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
@@ -588,74 +623,81 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	if (parse_ip6hdr(&cur, data_end, &ip6h) < 0) {
 		return TC_ACT_SHOT;
 	}
-	if (ip6h->nexthdr != IPPROTO_TCP) {
+	if (ip6h->nexthdr != IPPROTO_SCTP) {
 		return TC_ACT_UNSPEC;
 	}
 
-	struct tcphdr *tcph;
-	int tcph_len = parse_tcphdr(&cur, data_end, &tcph);
-	if (tcph_len < 0) {
+	bpf_printk("got SCTP packet");
+
+	struct sctphdr *sctph;
+	if (parse_sctphdr(&cur, data_end, &sctph) < 0) {
 		return TC_ACT_SHOT;
 	}
-	if (bpf_ntohs(ip6h->payload_len) < tcph_len) {
+
+	/* there should be at least one SCTP chunk, parse it */
+	struct sctp_chunkhdr *chunk1;
+	if (parse_sctp_chunk(&cur, data_end, &chunk1) < 0) {
 		return TC_ACT_SHOT;
 	}
+
+	/* try to parse a second chunk */
+	struct sctp_chunkhdr *chunk2 = NULL;
+	if (parse_sctp_chunk(&cur, data_end, &chunk2) >= 0) {
+		bpf_printk("have second chunk");
+	}
+
+	/* we only support two chunks per packet */
+	if (chunk2 != NULL) {
+		struct sctp_chunkhdr *chunk3 = NULL;
+		if (parse_sctp_chunk(&cur, data_end, &chunk3) >= 0) {
+			bpf_printk("have third chunk, shot");
+			return TC_ACT_SHOT;
+		}
+	}
+
+	if (!check_sctp_msg_egress(spx_state, sctph, chunk1, chunk2)) {
+		bpf_printk("shot: SCTP msg check");
+		return TC_ACT_SHOT;
+	}
+
+	__be32 initial_vtag = bpf_htonl(0);
+
+	bool have_ack_tsn = false;
+	__u32 ack_tsn = 0;
+	if (!get_ack_tsn(chunk1, data_end, &have_ack_tsn, &ack_tsn)) {
+		return TC_ACT_SHOT;
+	}
+
+	size_t data_ofs = 0;
+	size_t data_len = 0;
+	size_t padding_bytes = 0;
+	if (!get_data(sctph, chunk1, chunk2, data_end, &data_ofs, &data_len,
+				&padding_bytes)) {
+		return TC_ACT_SHOT;
+	}
+
+	bpf_printk("data len: %u, data_ofs: %u, padding: %u", data_len,
+			data_ofs, padding_bytes);
+
+	update_spx_state_egress(spx_state, ack_tsn, data_len, initial_vtag);
 
 	__u8 connection_control = 0;
-	__u8 datastream_type = SPX_DS_NONE;
-
-	/* if the connection is new ... */
-	if (spx_state->state == KSPX_NEW) {
-		/* ... we need to update the state with the information
-		 * necessary to look up the TCP socket */
-		spx_state->tcp_sport = tcph->dest;
-		spx_state->tcp_dport = tcph->source;
-		__builtin_add_overflow(bpf_ntohl(tcph->seq), 1,
-				&(spx_state->tcp_ack));
-	}
-
-	if (!check_tcp_msg_egress(spx_state, tcph)) {
-		bpf_printk("shot: tcp check failed");
-		return TC_ACT_SHOT;
-	}
-
-	size_t data_len = bpf_ntohs(ip6h->payload_len) - tcph_len;
-	bool required_to_send_ack = update_spx_state_egress(spx_state, tcph,
-			data_len);
-	bpf_printk("out state updated");
-
-	get_spx_header_params(spx_state, tcph, data_len, &connection_control,
+	__u8 datastream_type = 0;
+	get_spx_packet_info_egress(spx_state, data_len, &connection_control,
 			&datastream_type);
 
 	/* make room for the new headers */
 	__s32 newhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr);
-	__s32 len_diff = newhdrs_len - tcph_len;
-	size_t payload_len = bpf_ntohs(ip6h->payload_len) + len_diff;
-	if (bpf_skb_adjust_room(skb, -tcph_len, BPF_ADJ_ROOM_NET, 0) < 0) {
+	__s32 len_diff = newhdrs_len - data_ofs;
+	size_t payload_len = bpf_ntohs(ip6h->payload_len) + len_diff -
+		padding_bytes;
+	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
 		return TC_ACT_SHOT;
 	}
-	/* we have to do a change_tail here instead of an adjust room, so that
-	 * offloading gets reset */
-	if (bpf_skb_change_tail(skb, skb->len + newhdrs_len, 0) < 0) {
+	if (bpf_skb_change_tail(skb, skb->len - padding_bytes, 0) < 0) {
 		return TC_ACT_SHOT;
 	}
-
-	/* move the payload to the end of the packet */
-	/* FIXME: this is super slow */
-	struct mv_payload_loopctx lctx = {
-		.skb = skb,
-		.last_payload_byte_offset = skb->len - (newhdrs_len + 1),
-		.mv_offset = newhdrs_len
-	};
-	__u32 nloops = skb->len - (newhdrs_len + sizeof(struct ipv6hdr) +
-			sizeof(struct ethhdr));
-	long nbytes = bpf_loop(nloops, &mv_payload_loopfn, &lctx, 0);
-	if (nbytes != nloops) {
-		bpf_printk("shot: copy fail");
-		return TC_ACT_SHOT;
-	}
-
 	bpf_skb_pull_data(skb, 0);
 
 	/* adjust pointers and reverify */
@@ -740,95 +782,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	spxh->ack_no = bpf_htons(spx_state->remote_expected_sequence);
 	spxh->alloc_no = bpf_htons(spx_state->local_alloc_no);
 
-	/* insert the structure for the connection ack into the map */
-	if (spx_state->state == KSPX_NEW) {
-		if (!install_ingress_lookup(spx_state)) {
-			bpf_printk("conn req shot");
-			return TC_ACT_SHOT;
-		}
-
-		bpf_printk("conn req sent");
-	} else if (required_to_send_ack && (connection_control &
-				SPX_CC_SYSTEM_PKT) == 0) {
-		/* we need to construct a separate ack packet, forward the data
-		 * packet first */
-		if (bpf_clone_redirect(skb, skb->ifindex, 0) != 0) {
-			bpf_printk("failed to clone data packet");
-		}
-
-		/* adjust pointers and reverify */
-		data_end = (void *)(long)skb->data_end;
-		data = (void *)(long)skb->data;
-
-		eth = data;
-		ip6h = ((void *) eth) + sizeof(struct ethhdr);
-		udph = ((void *) ip6h) + sizeof(struct ipv6hdr);
-		ipxh = ((void *) udph) + sizeof(struct udphdr);
-		spxh = ((void *) ipxh) + sizeof(struct ipxhdr);
-		if (spxh + 1 > data_end) {
-			return TC_ACT_SHOT;
-		}
-
-		/* then turn it into an ack packet without data */
-		ip6h->payload_len = bpf_htons(payload_len - data_len);
-		udph->len = bpf_htons(payload_len - data_len);
-		ipxh->pktlen = bpf_htons(payload_len - (sizeof(struct udphdr) +
-					data_len));
-		spxh->connection_control = SPX_CC_SYSTEM_PKT;
-		spxh->datastream_type = SPX_DS_NONE;
-		if (bpf_skb_change_tail(skb, skb->len - data_len, 0) < 0) {
-			return TC_ACT_SHOT;
-		}
-
-		bpf_printk("generated ack sent");
-	}
-
 	return TC_ACT_UNSPEC;
-}
-
-static bool __always_inline establish_spx_connection(struct bpf_sock_ops
-		*skops, struct bpf_kspx_state *spx_state)
-{
-	spx_state->state = KSPX_ESTABLISHED;
-	/* the first ack increases the sequence number by one even though no
-	 * data was transmitted */
-	__builtin_add_overflow(spx_state->tcp_seq, 1, &(spx_state->tcp_seq));
-
-	return true;
-}
-
-SEC("sockops")
-int ipx_wrap_spx_sockops(struct bpf_sock_ops *skops)
-{
-	bpf_printk("sockops: here");
-
-	struct bpf_sock *spx_sock = skops->sk;
-	if (spx_sock == NULL) {
-		bpf_printk("sockops: no socket");
-		return 0;
-	}
-
-	struct bpf_kspx_state *spx_state = bpf_sk_storage_get(
-			&ipx_wrap_mux_kspx_state, spx_sock, NULL, 0);
-	if (spx_state == NULL) {
-		bpf_printk("sockops: no state");
-		return 0;
-	}
-
-	switch(skops->op) {
-		case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
-			if (!establish_spx_connection(skops, spx_state)) {
-				bpf_printk("conn establish failed");
-			} else {
-				bpf_printk("conn established");
-			}
-
-			break;
-		default:
-			break;
-	}
-
-	return 0;
 }
 
 SEC("socket")

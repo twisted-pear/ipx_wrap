@@ -307,11 +307,6 @@ enum kspx_connection_state {
 	KSPX_ESTABLISHED,
 };
 
-struct bpf_kspx_ingress_lookup {
-	__be16 tcp_sport;
-	__be16 tcp_dport;
-};
-
 struct bpf_kspx_state {
 	enum kspx_connection_state state;
 	struct ipx_addr remote_addr;
@@ -327,15 +322,24 @@ struct bpf_kspx_state {
 	__u16 last_rcvd_msg_data_len;
 	__u16 last_sent_msg_data_len;
 	__be32 prefix;
-	__be16 tcp_sport;
-	__be16 tcp_dport;
-	__u32 tcp_seq;
-	__u32 tcp_ack;
+	__be16 sctp_sport;
+	__be16 sctp_dport;
+	__be32 sctp_svtag;
+	__be32 sctp_dvtag;
+	__u32 sctp_tsn;
+	__u32 sctp_tsn_ack;
 };
 
 static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
 {
 	__s16 res;
+	__builtin_sub_overflow(a, b, &res);
+	return res < 0;
+}
+
+static __always_inline bool sctp_tsn_less_than(__u32 a, __u32 b)
+{
+	__s32 res;
 	__builtin_sub_overflow(a, b, &res);
 	return res < 0;
 }

@@ -134,7 +134,6 @@ static struct if_prog_entry *ht_ifidx_to_if_prog = NULL;
 static int tmr_fd = -1;
 static struct ipx_wrap_mux_kern *bpf_kern = NULL;
 static struct ipx_wrap_mux_spx_kern *bpf_spx_kern = NULL;
-static struct bpf_link *bpf_spx_sockops = NULL;
 
 static volatile sig_atomic_t rescan_now = false;
 static volatile sig_atomic_t keep_going = true;
@@ -293,6 +292,11 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		struct ipx_addr *remote_addr, __be16 local_id, __be16
 		remote_id, __be32 prefix, int conn_fd)
 {
+	struct spx_conn_key spx_key = {
+		.bind_addr = *local_addr,
+		.conn_id = local_id
+	};
+
 	struct bpf_kspx_state spx_state = {
 		.state = KSPX_NEW,
 		.remote_addr = *remote_addr,
@@ -308,19 +312,32 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.last_rcvd_msg_data_len = 0,
 		.last_sent_msg_data_len = 0,
 		.prefix = prefix,
-		.tcp_sport = 0,
-		.tcp_dport = 0,
-		.tcp_seq = 0,
-		.tcp_ack = 0
+		.sctp_sport = htons(0),
+		.sctp_dport = htons(0),
+		.sctp_svtag = htonl(0),
+		.sctp_dvtag = htonl(0),
+		.sctp_tsn = 0,
+		.sctp_tsn_ack = 0
 	};
 
-	__u32 conn_fd32 = conn_fd;
-	int err =
-		bpf_map__update_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
-				&conn_fd32, sizeof(__u32), &spx_state,
-				sizeof(struct bpf_kspx_state),
-				BPF_NOEXIST);
+	int err = bpf_map__update_elem(
+			bpf_spx_kern->maps.ipx_wrap_mux_kspx_state, &spx_key,
+			sizeof(struct spx_conn_key), &spx_state, sizeof(struct
+				bpf_kspx_state), BPF_NOEXIST);
 	if (err != 0) {
+		errno = -err;
+		return false;
+	}
+
+	__u32 conn_fd32 = conn_fd;
+	err = bpf_map__update_elem(
+			bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_key,
+			&conn_fd32, sizeof(__u32), &spx_key, sizeof(struct
+				spx_conn_key), BPF_NOEXIST);
+	if (err != 0) {
+		bpf_map__delete_elem(
+				bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
+				&spx_key, sizeof(struct spx_conn_key), 0);
 		errno = -err;
 		return false;
 	}
@@ -440,7 +457,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		case SOCK_DGRAM:
 			kernel = false;
 			break;
-		case SOCK_STREAM:
+		case SOCK_SEQPACKET:
 			kernel = true;
 			break;
 		default:
@@ -448,21 +465,9 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			return false;
 	}
 
-	/* set some socket options to make TCP behave a little more like SPX */
+	/* set socket options to make SCTP behave a little more like SPX */
 	if (kernel) {
-		int val = 1;
-		if (setsockopt(conn_fd, IPPROTO_TCP, TCP_NODELAY, &val,
-					sizeof(val)) != 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		int maxwin = SPX_MAX_DATA_LEN_WO_SIZNG;
-		if (setsockopt(conn_fd, IPPROTO_TCP, TCP_WINDOW_CLAMP, &maxwin,
-					sizeof(maxwin)) != 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
+		// TODO
 	}
 
 	if (e->recv_direct) {
@@ -730,7 +735,7 @@ static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
 		.conn_id = local_id
 	};
 
-	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_ingress,
+	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
 			&conn_key, sizeof(struct spx_conn_key), 0);
 }
 
@@ -1273,10 +1278,6 @@ static _Noreturn void cleanup_and_exit(struct if_entry *iface, int epoll_fd,
 		}
 
 		/* close and remove all BPF objects */
-		if (bpf_spx_sockops != NULL) {
-			bpf_link__detach(bpf_spx_sockops);
-			bpf_link__destroy(bpf_spx_sockops);
-		}
 		if (bpf_kern != NULL) {
 			ipx_wrap_mux_kern__destroy(bpf_kern);
 		}
@@ -1933,19 +1934,6 @@ static bool setup_bpf(void)
 	/* load the kernel SPX bpf programs and maps */
 	bpf_spx_kern = ipx_wrap_mux_spx_kern__open_and_load();
 	if (bpf_spx_kern == NULL) {
-		return false;
-	}
-
-	/* attach the sockops program for kernel SPX */
-	int cgroup_fd = open("/sys/fs/cgroup/", O_RDONLY);
-	if (cgroup_fd < 0) {
-		return false;
-	}
-
-	bpf_spx_sockops = bpf_program__attach_cgroup(
-			bpf_spx_kern->progs.ipx_wrap_spx_sockops, cgroup_fd);
-	close(cgroup_fd);
-	if (bpf_spx_sockops == NULL) {
 		return false;
 	}
 

@@ -155,7 +155,6 @@ struct ipxw_mux_spx_handle_state;
 struct ipxw_mux_spx_handle {
 	int spx_sock;
 	int conf_sock;
-	int kcm_sock;
 	__be16 conn_id;
 	__u16 kernel:1,
 	      spxii:1,
@@ -163,8 +162,8 @@ struct ipxw_mux_spx_handle {
 	struct ipxw_mux_spx_handle_state *last_known_state;
 };
 
-#define ipxw_mux_spx_handle_init { .spx_sock = -1, .conf_sock = -1, .kcm_sock = \
-	-1, .kernel = false, .spxii = false, .last_known_state = NULL }
+#define ipxw_mux_spx_handle_init { .spx_sock = -1, .conf_sock = -1, .kernel = \
+	false, .spxii = false, .last_known_state = NULL }
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
 bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h);
