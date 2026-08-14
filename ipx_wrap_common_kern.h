@@ -3,6 +3,8 @@
 
 #define SCTP_MAX_CHUNKSIZE 4096 // FIXME: this will do for our purposes but is
 				// very ugly
+#define SCTP_MAX_PKT_LEN (((MAX_DGRAM_LEN - (sizeof(struct ipv6hdr) + \
+					sizeof(struct ethhdr))) / 4) * 4)
 #define ETH_ALEN 6
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
