@@ -139,10 +139,6 @@ static bool sctp_csum_calc(const struct sctphdr *sctph, void *data_end, size_t
 		.crc32 =  0xffffffffUL
 	};
 
-	if (payload_len > SCTP_MAX_PKT_LEN) {
-		return false;
-	}
-
 	long nloops = bpf_loop(payload_len, &sctp_csum_loopfn, &ctx, 0);
 	if (nloops != payload_len) {
 		return false;
@@ -541,7 +537,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		bpf_printk("shot: invalid payload len");
 		return TC_ACT_SHOT;
 	}
-	if (payload_len > MAX_DGRAM_LEN) {
+	if (payload_len > SCTP_MAX_PKT_LEN) {
 		bpf_printk("shot: invalid payload len 2");
 		return TC_ACT_SHOT;
 	}
