@@ -15,10 +15,8 @@
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 
-/* from linux/tcp.h */
-#define tcp_flag_word(tp) (((union tcp_word_hdr *)(tp))->words[3])
-
-#define TCP_WINDOW bpf_htonl(0x0000FFFF)
+#define SCTP_STATE_COOKIE_LEN 4
+#define SCTP_RWND_DUMMY 1500
 
 // TODO: implement locking for this data structure!
 struct {
@@ -162,6 +160,133 @@ static __always_inline void update_spx_state_ingress(struct bpf_kspx_state
 	spx_state->remote_alloc_no = spxh->alloc_no;
 }
 
+static __always_inline void sctp_get_info(const struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh, size_t data_len, size_t
+		*sctp_len, size_t *sctp_padding_bytes, __u8 *sctp_chunk_type)
+{
+	/* default is an abort chunk with no error causes */
+	*sctp_len = sizeof(struct sctphdr) + sizeof(struct sctp_chunkhdr);
+	*sctp_padding_bytes = 0;
+	*sctp_chunk_type = SCTP_CID_ABORT;
+
+	/* room for an init-ack */
+	if (spx_state->state == KSPX_NEW) {
+		*sctp_len += sizeof(struct sctp_inithdr) + sizeof(struct
+				sctp_paramhdr) + SCTP_STATE_COOKIE_LEN;
+		*sctp_padding_bytes = 0;
+		*sctp_chunk_type = SCTP_CID_INIT_ACK;
+		return;
+	}
+
+	/* room for a data chunk */
+	if (data_len != 0) {
+		*sctp_len += sizeof(struct sctp_datahdr);
+		*sctp_padding_bytes = (data_len % 4 == 0) ? 0 : (4 - data_len %
+				4);
+		*sctp_chunk_type = SCTP_CID_DATA;
+		return;
+	}
+
+	/* room for a sack chunk */
+	*sctp_len += sizeof(struct sctp_sackhdr);
+	*sctp_padding_bytes = 0;
+	*sctp_chunk_type = SCTP_CID_SACK;
+}
+
+static __always_inline bool fill_init_ack_chunk(const struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, void *data_end)
+{
+	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph + 1);
+	struct sctp_inithdr *init = (struct sctp_inithdr *) (chunk + 1);
+	struct sctp_paramhdr *param = (struct sctp_paramhdr *) (init + 1);
+	__u8 *cookie = (__u8 *) (param + 1);
+	if (cookie + SCTP_STATE_COOKIE_LEN > data_end) {
+		return false;
+	}
+
+	chunk->type = SCTP_CID_INIT_ACK;
+	chunk->flags = 0;
+	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) + sizeof(struct
+				sctp_inithdr) + sizeof(struct sctp_paramhdr) +
+			SCTP_STATE_COOKIE_LEN);
+	init->init_tag = spx_state->sctp_svtag;
+	init->a_rwnd = SCTP_RWND_DUMMY;
+	init->num_inbound_streams = bpf_htons(1);
+	init->num_outbound_streams = bpf_htons(1);
+	init->initial_tsn = bpf_htonl(spx_state->sctp_tsn);
+	param->type = SCTP_PARAM_STATE_COOKIE;
+	param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
+			SCTP_STATE_COOKIE_LEN);
+	__u32 cval = bpf_get_prandom_u32();
+_Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval), "SCTP state cookie too short");
+	__builtin_memset(cookie, 0, SCTP_STATE_COOKIE_LEN);
+	__builtin_memcpy(cookie, &cval, sizeof(cval));
+
+	return true;
+}
+
+static __always_inline bool fill_data_chunk(const struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, void *data_end, size_t
+		data_len)
+{
+	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph + 1);
+	struct sctp_datahdr *data = (struct sctp_datahdr *) (chunk + 1);
+	if (data + 1 > data_end) {
+		return false;
+	}
+
+	chunk->type = SCTP_CID_DATA;
+	chunk->flags = (0 << 3) | /* I-bit */
+		       (0 << 2) | /* U-bit */
+		       (1 << 1) | /* B-bit */
+		       (1 << 0) ; /* E-bit */
+	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) + sizeof(struct
+				sctp_datahdr) + data_len);
+	data->tsn = bpf_htonl(spx_state->sctp_tsn);
+	data->stream = bpf_htons(0);
+	data->ssn = bpf_htons(spx_state->sctp_tsn);
+	data->ppid = bpf_htonl(0);
+
+	return true;
+}
+
+static __always_inline bool fill_sack_chunk(const struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, void *data_end)
+{
+	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph + 1);
+	struct sctp_sackhdr *sack = (struct sctp_sackhdr *) (chunk + 1);
+	if (sack + 1 > data_end) {
+		return false;
+	}
+
+	chunk->type = SCTP_CID_SACK;
+	chunk->flags = 0;
+	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) + sizeof(struct
+				sctp_sackhdr));
+	sack->cum_tsn_ack = bpf_htonl(spx_state->sctp_tsn_ack);
+	sack->a_rwnd = SCTP_RWND_DUMMY;
+	sack->num_gap_ack_blocks = bpf_htons(0);
+	sack->num_dup_tsns = bpf_htons(0);
+
+	return true;
+}
+
+static __always_inline bool fill_abort_chunk(const struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, void *data_end)
+{
+	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph + 1);
+	if (chunk + 1 > data_end) {
+		return false;
+	}
+
+	chunk->type = SCTP_CID_ABORT;
+	/* if we have a verification tag, set the LSB */
+	chunk->flags = (spx_state->sctp_dvtag == bpf_htonl(0)) ? 0 : 1;
+	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr));
+
+	return true;
+}
+
 SEC("tc/ingress")
 int ipx_wrap_spx_demux(struct __sk_buff *skb)
 {
@@ -243,7 +368,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 
 	if (spx_state == NULL) {
 		bpf_printk("no kernel spx state");
-		return TC_ACT_SHOT;
+		return TC_ACT_UNSPEC;
 	}
 
 	size_t data_len = bpf_ntohs(ipxh->pktlen) - (sizeof(struct ipxhdr) +
@@ -255,40 +380,24 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 
 	update_spx_state_ingress(spx_state, spxh, data_len);
 
-	/* remove UDP, IPX and SPX headers, as well as the IPv6 payload length
-	 * from the checksum */
-	__s64 csum_diff = csum_del_spxhdr(spxh, 0);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	csum_diff = csum_del_ipxhdr(ipxh, csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	csum_diff = csum_del((__be32 *) udph, sizeof(struct udphdr),
-			csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	__be32 pktlen_be32 = bpf_htonl(bpf_ntohs(ip6h->payload_len) &
-			0x0000FFFF);
-	csum_diff = csum_del(&pktlen_be32, sizeof(pktlen_be32), csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	__be32 nexthdr_be32 = bpf_htonl(IPPROTO_UDP & 0x000000FF);
-	csum_diff = csum_del(&nexthdr_be32, sizeof(nexthdr_be32), csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
+	size_t sctp_len = 0;
+	size_t sctp_padding_bytes = 0;
+	__u8 sctp_chunk_type = SCTP_CID_DATA;
+	sctp_get_info(spx_state, spxh, data_len, &sctp_len,
+			&sctp_padding_bytes, &sctp_chunk_type);
 
 	/* make room for the TCP header */
 	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr);
-	__s32 len_diff = sizeof(struct tcphdr) - oldhdrs_len;
-	size_t payload_len = bpf_ntohs(ip6h->payload_len) + len_diff;
+	__s32 len_diff = sctp_len - oldhdrs_len;
+	size_t payload_len = bpf_ntohs(ip6h->payload_len) + len_diff +
+		sctp_padding_bytes;
 	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
 		bpf_printk("shot: adjust room");
+		return TC_ACT_SHOT;
+	}
+	if (bpf_skb_change_tail(skb, skb->len + sctp_padding_bytes, 0) < 0) {
+		bpf_printk("shot: change tail");
 		return TC_ACT_SHOT;
 	}
 	bpf_skb_pull_data(skb, 0);
@@ -299,8 +408,8 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 
 	eth = data;
 	ip6h = ((void *) eth) + sizeof(struct ethhdr);
-	struct tcphdr *tcph = ((void *) ip6h) + sizeof(struct ipv6hdr);
-	if (tcph + 1 > data_end) {
+	struct sctphdr *sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	if (sctph + 1 > data_end) {
 		bpf_printk("shot: not enough room");
 		return TC_ACT_SHOT;
 	}
@@ -320,55 +429,42 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	}
 
 	/* fill in the new headers */
-	ip6h->nexthdr = IPPROTO_TCP;
+	ip6h->nexthdr = IPPROTO_SCTP;
 	ip6h->payload_len = bpf_htons(payload_len);
-	tcph->source = spx_state->sctp_sport;
-	tcph->dest = spx_state->sctp_dport;
-	tcph->seq = bpf_htonl(spx_state->sctp_tsn);
-	tcph->ack_seq = bpf_htonl(spx_state->sctp_tsn_ack);
-	tcp_flag_word(tcph) = 0;
-	tcph->doff = sizeof(struct tcphdr) / 4;
-	tcph->ack = 1;
-	tcph->syn = spx_state->state == KSPX_NEW ? 1 : 0;
-	tcph->psh = spx_state->state != KSPX_NEW ? 1 : 0;
-	tcph->window = bpf_htons(spx_state->neg_size_to_remote); // TODO:
-								 // account for
-								 // alloc no
-								 // here
-	tcph->check = bpf_htons(0);
-	tcph->urg_ptr = bpf_htons(0);
-
-	/* add the new headers into the checksum */
-	pktlen_be32 = bpf_htonl(bpf_ntohs(ip6h->payload_len) &
-			0x0000FFFF);
-	csum_diff = csum_add(&pktlen_be32, sizeof(pktlen_be32), csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	nexthdr_be32 = bpf_htonl(IPPROTO_TCP & 0x000000FF);
-	csum_diff = csum_add(&nexthdr_be32, sizeof(nexthdr_be32), csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
-	}
-	csum_diff = csum_add((__be32 *) tcph, sizeof(struct tcphdr),
-			csum_diff);
-	if (csum_diff < 0) {
-		return TC_ACT_SHOT;
+	sctph->vtag = spx_state->sctp_dvtag;
+	sctph->source = spx_state->sctp_sport;
+	sctph->dest = spx_state->sctp_dport;
+	sctph->checksum = 0;
+	switch (sctp_chunk_type) {
+		case SCTP_CID_DATA:
+			if (fill_data_chunk(spx_state, sctph, data_end,
+						data_len)) {
+				return TC_ACT_SHOT;
+			}
+			break;
+		case SCTP_CID_SACK:
+			if (!fill_sack_chunk(spx_state, sctph, data_end)) {
+				return TC_ACT_SHOT;
+			}
+			break;
+		case SCTP_CID_INIT_ACK:
+			if (!fill_init_ack_chunk(spx_state, sctph, data_end)) {
+				return TC_ACT_SHOT;
+			}
+			break;
+		default:
+			bpf_printk("warn: assoc aborted");
+			if (!fill_abort_chunk(spx_state, sctph, data_end)) {
+				return TC_ACT_SHOT;
+			}
+			break;
 	}
 
-	bpf_printk("tcp header constructed");
+	// TODO calculate CRC32c checksum
 
-	/* do csum_replace last, as it invalidates our pointers again */
-	if (bpf_l4_csum_replace(skb, (((void *) &(tcph->check)) - data), 0,
-				csum_diff, 0) != 0) {
-		bpf_printk("shot: csum replace");
-		return TC_ACT_SHOT;
-	}
-
-	bpf_printk("passed on, seq: %d, ack: %d", spx_state->sctp_tsn,
-			spx_state->sctp_tsn_ack);
-
-	return TC_ACT_UNSPEC;
+	bpf_printk("sctp packet constructed");
+	return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	//return TC_ACT_UNSPEC;
 }
 
 /*struct mv_payload_loopctx {
@@ -465,10 +561,34 @@ static __always_inline bool check_sctp_msg_egress(const struct bpf_kspx_state
 	return true;
 }
 
+static __always_inline bool get_initial_vtag(const struct sctp_chunkhdr
+		*chunk1, void *data_end, bool *have_initial_vtag, __be32
+		*initial_vtag)
+{
+	*have_initial_vtag = false;
+
+	if (chunk1->type != SCTP_CID_INIT) {
+		return true;
+	}
+	if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
+			sizeof(struct sctp_inithdr)) {
+		return true;
+	}
+
+	const struct sctp_inithdr *inith = (const struct sctp_inithdr *)
+		(chunk1 + 1);
+	if (inith + 1 > data_end) {
+		return false;
+	}
+
+	*initial_vtag = inith->init_tag;
+	*have_initial_vtag = true;
+	return true;
+}
+
 static __always_inline bool get_ack_tsn(const struct sctp_chunkhdr *chunk1,
 		void *data_end, bool *have_ack_tsn, __u32 *ack_tsn)
 {
-	*ack_tsn = 0;
 	*have_ack_tsn = false;
 
 	if (chunk1->type != SCTP_CID_SACK) {
@@ -537,11 +657,14 @@ static __always_inline bool get_data(const struct sctphdr *sctph, const struct
 }
 
 static __always_inline void update_spx_state_egress(struct bpf_kspx_state
-		*spx_state, __u32 tsn_ack, size_t data_len, __be32
-		initial_vtag)
+		*spx_state, const struct sctphdr *sctph, __u32 tsn_ack, size_t
+		data_len, __be32 initial_vtag)
 {
 	if (spx_state->state == KSPX_NEW) {
-		spx_state->sctp_svtag = initial_vtag;
+		spx_state->sctp_dvtag = initial_vtag;
+		spx_state->sctp_svtag = bpf_get_prandom_u32();
+		spx_state->sctp_sport = sctph->dest;
+		spx_state->sctp_dport = sctph->source;
 	}
 
 	/* last message has been acknowledged by SCTP */
@@ -660,10 +783,15 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	__be32 initial_vtag = bpf_htonl(0);
+	bool have_initial_vtag = false;
+	__be32 initial_vtag = spx_state->sctp_dvtag;
+	if (!get_initial_vtag(chunk1, data_end, &have_initial_vtag,
+				&initial_vtag)) {
+		return TC_ACT_SHOT;
+	}
 
 	bool have_ack_tsn = false;
-	__u32 ack_tsn = 0;
+	__u32 ack_tsn = spx_state->sctp_tsn;
 	if (!get_ack_tsn(chunk1, data_end, &have_ack_tsn, &ack_tsn)) {
 		return TC_ACT_SHOT;
 	}
@@ -679,7 +807,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	bpf_printk("data len: %u, data_ofs: %u, padding: %u", data_len,
 			data_ofs, padding_bytes);
 
-	update_spx_state_egress(spx_state, ack_tsn, data_len, initial_vtag);
+	update_spx_state_egress(spx_state, sctph, ack_tsn, data_len, initial_vtag);
 
 	__u8 connection_control = 0;
 	__u8 datastream_type = 0;
