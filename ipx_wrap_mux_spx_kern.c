@@ -163,10 +163,12 @@ static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 
 	/* check if the packet fits with our connection state */
 	if (spxh->dst_conn_id != spx_state->local_id) {
+		bpf_printk("msgchk: local id");
 		return false;
 	}
 	if (spx_state->remote_id != SPX_CONN_ID_UNKNOWN && spxh->src_conn_id !=
 			spx_state->remote_id) {
+		bpf_printk("msgchk: remote id");
 		return false;
 	}
 	/* handle the loss of ACK packets that we send by also acking data
@@ -175,12 +177,14 @@ static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 	if (spx_seq_less_than(bpf_ntohs(spxh->seq_no),
 				spx_state->remote_expected_sequence) &&
 			ack_required) {
+		bpf_printk("msgchk: stale retrans");
 		// TODO: need to construct an SPX ack for packets like this...
 		return false;
 	}
 
 	if (system) {
 		if (data_len != 0) {
+			bpf_printk("msgchk: sys with data");
 			return false;
 		}
 
@@ -191,11 +195,13 @@ static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 
 		if (cur_seq != spx_state->remote_expected_sequence && next_seq
 				!= spx_state->remote_expected_sequence) {
+			bpf_printk("msgchk: sys invalid seq no");
 			return false;
 		}
 	} else {
 		if (bpf_ntohs(spxh->seq_no) !=
 				spx_state->remote_expected_sequence) {
+			bpf_printk("msgchk: data invalid seq no");
 			return false;
 		}
 	}
@@ -209,6 +215,7 @@ static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 		/* accept a new connection ID only from a first packet */
 		if (bpf_ntohs(spxh->seq_no) != 0 || bpf_ntohs(spxh->ack_no) !=
 				0) {
+			bpf_printk("msgchk: unknown id no zero");
 			return false;
 		}
 	}
@@ -218,12 +225,14 @@ static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 		case KSPX_NEW:
 			if ((spxh->connection_control & SPX_CC_MASK_SPX) !=
 					SPX_CC_SYSTEM_PKT) {
+				bpf_printk("msgchk: invalid new");
 				return false;
 			}
 			break;
 		case KSPX_ESTABLISHED:
 			break;
 		default:
+			bpf_printk("msgchk: invalid state");
 			return false;
 	}
 
@@ -261,7 +270,7 @@ static __always_inline void update_spx_state_ingress(struct bpf_kspx_state
 
 	/* message is an ACK */
 	if (spx_msg_is_current_ack(spx_state, spxh)) {
-		/* increment sequence number and virtual TCP ACK no after
+		/* increment sequence number and virtual SCTP ACK no after
 		 * receiving an ACK for a non-system message */
 		if (spx_state->last_sent_msg_data_len != 0) {
 			__builtin_add_overflow(
@@ -329,7 +338,7 @@ static __always_inline bool fill_init_ack_chunk(const struct bpf_kspx_state
 				sctp_inithdr) + sizeof(struct sctp_paramhdr) +
 			SCTP_STATE_COOKIE_LEN);
 	init->init_tag = spx_state->sctp_svtag;
-	init->a_rwnd = SCTP_RWND_DUMMY;
+	init->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 	init->num_inbound_streams = bpf_htons(1);
 	init->num_outbound_streams = bpf_htons(1);
 	init->initial_tsn = bpf_htonl(spx_state->sctp_tsn);
@@ -383,7 +392,7 @@ static __always_inline bool fill_sack_chunk(const struct bpf_kspx_state
 	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) + sizeof(struct
 				sctp_sackhdr));
 	sack->cum_tsn_ack = bpf_htonl(spx_state->sctp_tsn_ack);
-	sack->a_rwnd = SCTP_RWND_DUMMY;
+	sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 	sack->num_gap_ack_blocks = bpf_htons(0);
 	sack->num_dup_tsns = bpf_htons(0);
 
@@ -504,13 +513,16 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	__u8 sctp_chunk_type = SCTP_CID_DATA;
 	sctp_get_info(spx_state, spxh, data_len, &sctp_len,
 			&sctp_padding_bytes, &sctp_chunk_type);
+	bpf_printk("sctp len: %u, padding: %u", sctp_len, sctp_padding_bytes);
 
 	/* make room for the TCP header */
 	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr);
 	__s32 len_diff = sctp_len - oldhdrs_len;
+	bpf_printk("diff: %d", len_diff);
 	size_t payload_len = bpf_ntohs(ip6h->payload_len) + len_diff +
 		sctp_padding_bytes;
+	bpf_printk("new payload: %d", payload_len);
 	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
 		bpf_printk("shot: adjust room");
 		return TC_ACT_SHOT;
@@ -556,8 +568,10 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	sctph->checksum = bpf_htonl(0);
 	switch (sctp_chunk_type) {
 		case SCTP_CID_DATA:
-			if (fill_data_chunk(spx_state, sctph, data_end,
+			bpf_printk("trying to create data chunk");
+			if (!fill_data_chunk(spx_state, sctph, data_end,
 						data_len)) {
+				bpf_printk("trying to create data chunk: shot");
 				return TC_ACT_SHOT;
 			}
 			break;
@@ -588,35 +602,10 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	sctph->checksum = bpf_htonl(csum);
 
 	bpf_printk("sctp packet constructed");
-	return TC_ACT_UNSPEC;
+	// TODO: remove again
+	return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	//return TC_ACT_UNSPEC;
 }
-
-/*struct mv_payload_loopctx {
-	struct __sk_buff *skb;
-	size_t last_payload_byte_offset;
-	size_t mv_offset;
-};
-
-static long mv_payload_loopfn(__u64 index, void* ctx)
-{
-	struct mv_payload_loopctx *c = ctx;
-
-	if (index > c->last_payload_byte_offset) {
-		return 1;
-	}
-
-	__u8 b;
-	__u32 src_ofs = c->last_payload_byte_offset - index;
-	if (bpf_skb_load_bytes(c->skb, src_ofs, &b, 1) < 0) {
-		return 1;
-	}
-	if (bpf_skb_store_bytes(c->skb, src_ofs + c->mv_offset, &b, 1, 0) < 0)
-	{
-		return 1;
-	}
-
-	return 0;
-}*/
 
 static __always_inline bool check_for_chunk_type(__u8 chunk_type, const struct
 		sctp_chunkhdr *chunk1, const struct sctp_chunkhdr *chunk2)
@@ -640,7 +629,15 @@ static __always_inline bool check_sctp_msg_egress(const struct bpf_kspx_state
 {
 	switch (spx_state->state) {
 		case KSPX_NEW:
-			/* only an init chunk is allowed for new connections */
+			/* once we have received a connection ack, a cookie
+			 * echo is expected/allowed */
+			if (chunk1->type == SCTP_CID_COOKIE_ECHO && chunk2 ==
+					NULL) {
+				break;
+			}
+
+			/* otherwise only an init chunk is allowed for new
+			 * connections */
 			if (chunk1->type != SCTP_CID_INIT || chunk2 != NULL) {
 				return false;
 			}
@@ -670,26 +667,20 @@ static __always_inline bool check_sctp_msg_egress(const struct bpf_kspx_state
 	}
 
 	/* this is not allowed */
-	if (chunk1->type == SCTP_CID_DATA && chunk2 != NULL) {
+	if (chunk1->type == SCTP_CID_DATA && chunk2 != NULL && chunk2->type !=
+			SCTP_CID_DATA) {
 		bpf_printk("warn: chunks after data");
-		return false;
-	}
-
-	/* we can't handle multiple data chunks */
-	if (chunk1->type == SCTP_CID_DATA && (chunk2 != NULL && chunk2->type ==
-				SCTP_CID_DATA)) {
-		bpf_printk("warn: multiple data chunks");
 		return false;
 	}
 
 	return true;
 }
 
-static __always_inline bool get_initial_vtag(const struct sctp_chunkhdr
-		*chunk1, void *data_end, bool *have_initial_vtag, __be32
-		*initial_vtag)
+static __always_inline bool get_init(const struct sctp_chunkhdr *chunk1, void
+		*data_end, bool *have_init, __be32 *initial_vtag, __u32
+		*initial_tsn)
 {
-	*have_initial_vtag = false;
+	*have_init = false;
 
 	if (chunk1->type != SCTP_CID_INIT) {
 		return true;
@@ -706,7 +697,31 @@ static __always_inline bool get_initial_vtag(const struct sctp_chunkhdr
 	}
 
 	*initial_vtag = inith->init_tag;
-	*have_initial_vtag = true;
+	*initial_tsn = bpf_ntohl(inith->initial_tsn);
+	*have_init = true;
+	return true;
+}
+
+static __always_inline bool get_cookie_echo(const struct sctp_chunkhdr *chunk1,
+		void *data_end, bool *have_cookie_echo)
+{
+	*have_cookie_echo = false;
+	if (chunk1->type != SCTP_CID_COOKIE_ECHO) {
+		return true;
+	}
+
+	if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
+			SCTP_STATE_COOKIE_LEN) {
+		return true;
+	}
+
+	const __u8 *cookie = (const __u8 *) (chunk1 + 1);
+	if (cookie + SCTP_STATE_COOKIE_LEN > data_end) {
+		return false;
+	}
+
+	/* we don't check the actual cookie value, since we do not care */
+	*have_cookie_echo = true;
 	return true;
 }
 
@@ -735,69 +750,68 @@ static __always_inline bool get_ack_tsn(const struct sctp_chunkhdr *chunk1,
 }
 
 static __always_inline bool get_data(const struct sctphdr *sctph, const struct
-		sctp_chunkhdr *chunk1, const struct sctp_chunkhdr *chunk2, void
-		*data_end, size_t *data_ofs, size_t *data_len, size_t
-		*padding_bytes)
+		sctp_chunkhdr *chunk1, void *data_end, size_t *data_ofs, size_t
+		*data_len, size_t *padding_bytes)
 {
 	*data_ofs = 0;
 	*data_len = 0;
 	*padding_bytes = 0;
 
-	const struct sctp_chunkhdr *chunkh = NULL;
-	if (chunk1->type == SCTP_CID_DATA) {
-		chunkh = chunk1;
-	} else {
-		if (chunk2 != NULL && chunk2->type == SCTP_CID_DATA) {
-			chunkh = chunk2;
-		}
-	}
-
-	/* no data chunk, mark the entire SCTP header for deletion */
-	if (chunkh == NULL) {
-		bpf_printk("no data");
-		*data_ofs = sizeof(struct sctphdr);
-		size_t chunk1_len = bpf_ntohs(chunk1->length);
-		size_t chunk1_padding = (chunk1_len % 4 == 0) ? 0 : (4 -
-				(chunk1_len % 4));
-		*data_ofs += chunk1_len + chunk1_padding;
-		if (chunk2 != NULL) {
-			size_t chunk2_len = bpf_ntohs(chunk2->length);
-			size_t chunk2_padding = (chunk2_len % 4 == 0) ? 0 : (4
-					- (chunk2_len % 4));
-			*data_ofs += chunk2_len + chunk2_padding;
-		}
+	/* we only handle data in the first chunk, mark the entire SCTP header
+	 * for deletion */
+	if (chunk1->type != SCTP_CID_DATA) {
+		*data_ofs = data_end - ((void *) sctph);
 		return true;
 	}
 
 	/* we have data */
+	const struct sctp_datahdr *data = (const struct sctp_datahdr *) (chunk1
+			+ 1);
+	if (data + 1 > data_end) {
+		return false;
+	}
+	bpf_printk("sending tsn: %u", bpf_ntohl(data->tsn));
+
 	size_t data_overhead = sizeof(struct sctp_chunkhdr) + sizeof(struct
 			sctp_datahdr);
-	size_t chunk_len = bpf_ntohs(chunkh->length);
-	*data_ofs = (((void *) chunkh) - ((void *) sctph)) + data_overhead;
+	size_t chunk_len = bpf_ntohs(chunk1->length);
+	*data_ofs = (((void *) chunk1) - ((void *) sctph)) + data_overhead;
+	void *first_data_end = ((void *) chunk1) + chunk_len;
 	*data_len = chunk_len - data_overhead;
-	*padding_bytes = (chunk_len % 4 == 0) ? 0 : (4 - (chunk_len % 4));
+	*padding_bytes = data_end - first_data_end;
 
 	return true;
 }
 
 static __always_inline void update_spx_state_egress(struct bpf_kspx_state
 		*spx_state, const struct sctphdr *sctph, __u32 tsn_ack, size_t
-		data_len, __be32 initial_vtag)
+		data_len, __be32 initial_vtag, __u32 initial_tsn, bool
+		have_cookie_echo)
 {
+	if (have_cookie_echo) {
+		spx_state->state = KSPX_ESTABLISHED;
+		return;
+	}
+
 	if (spx_state->state == KSPX_NEW) {
 		spx_state->sctp_dvtag = initial_vtag;
 		spx_state->sctp_svtag = bpf_get_prandom_u32();
 		spx_state->sctp_sport = sctph->dest;
 		spx_state->sctp_dport = sctph->source;
+		__builtin_sub_overflow(initial_tsn, 1,
+				&(spx_state->sctp_tsn_ack));
+		return;
 	}
 
 	/* last message has been acknowledged by SCTP */
-	if (sctp_tsn_less_than(spx_state->sctp_tsn, tsn_ack)) {
+	if (spx_state->sctp_tsn == tsn_ack) {
 		__builtin_add_overflow(spx_state->remote_expected_sequence, 1,
 				&(spx_state->remote_expected_sequence));
 		__builtin_add_overflow(spx_state->local_alloc_no, 1,
 				&(spx_state->local_alloc_no));
-		spx_state->sctp_tsn = tsn_ack;
+		__builtin_add_overflow(spx_state->sctp_tsn, 1,
+				&(spx_state->sctp_tsn));
+		bpf_printk("reseq now %d", spx_state->remote_expected_sequence);
 	}
 
 	/* we have data */
@@ -820,6 +834,8 @@ static __always_inline void get_spx_packet_info_egress(struct bpf_kspx_state
 
 	if (data_len == 0) {
 		*connection_control |= SPX_CC_SYSTEM_PKT;
+	} else {
+		*connection_control |= SPX_CC_ACK_REQUIRED;
 	}
 }
 
@@ -840,7 +856,8 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	struct bpf_kspx_state *spx_state = bpf_map_lookup_elem(
 			&ipx_wrap_mux_kspx_state, conn_key);
 	if (spx_state == NULL) {
-		return TC_ACT_UNSPEC;
+		/* SPX connection is already closed, the conn_key is stale */
+		return TC_ACT_SHOT;
 	}
 
 	bpf_printk("Got packet for kernel SPX conn %02x",
@@ -893,13 +910,9 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		bpf_printk("have second chunk");
 	}
 
-	/* we only support two chunks per packet */
+	bpf_printk("chunk1: %d", chunk1->type);
 	if (chunk2 != NULL) {
-		struct sctp_chunkhdr *chunk3 = NULL;
-		if (parse_sctp_chunk(&cur, data_end, &chunk3) >= 0) {
-			bpf_printk("have third chunk, shot");
-			return TC_ACT_SHOT;
-		}
+		bpf_printk("chunk2: %d", chunk2->type);
 	}
 
 	if (!check_sctp_msg_egress(spx_state, sctph, chunk1, chunk2)) {
@@ -907,15 +920,22 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	bool have_initial_vtag = false;
+	bool have_init = false;
 	__be32 initial_vtag = spx_state->sctp_dvtag;
-	if (!get_initial_vtag(chunk1, data_end, &have_initial_vtag,
-				&initial_vtag)) {
+	__u32 initial_tsn = spx_state->sctp_tsn_ack;
+	if (!get_init(chunk1, data_end, &have_init, &initial_vtag,
+				&initial_tsn)) {
+		return TC_ACT_SHOT;
+	}
+
+	bool have_cookie_echo = false;
+	if (!get_cookie_echo(chunk1, data_end, &have_cookie_echo)) {
 		return TC_ACT_SHOT;
 	}
 
 	bool have_ack_tsn = false;
-	__u32 ack_tsn = spx_state->sctp_tsn;
+	__u32 ack_tsn;
+	__builtin_sub_overflow(spx_state->sctp_tsn, 1, &ack_tsn);
 	if (!get_ack_tsn(chunk1, data_end, &have_ack_tsn, &ack_tsn)) {
 		return TC_ACT_SHOT;
 	}
@@ -923,7 +943,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	size_t data_ofs = 0;
 	size_t data_len = 0;
 	size_t padding_bytes = 0;
-	if (!get_data(sctph, chunk1, chunk2, data_end, &data_ofs, &data_len,
+	if (!get_data(sctph, chunk1, data_end, &data_ofs, &data_len,
 				&padding_bytes)) {
 		return TC_ACT_SHOT;
 	}
@@ -931,7 +951,62 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	bpf_printk("data len: %u, data_ofs: %u, padding: %u", data_len,
 			data_ofs, padding_bytes);
 
-	update_spx_state_egress(spx_state, sctph, ack_tsn, data_len, initial_vtag);
+	update_spx_state_egress(spx_state, sctph, ack_tsn, data_len,
+			initial_vtag, initial_tsn, have_cookie_echo);
+
+	if (have_cookie_echo) {
+		/* reflect the packet as a cookie ack */
+		bpf_printk("reflecting cookie echo");
+
+		/* swap Ethernet addrs */
+		__u8 eth_dest_backup[ETH_ALEN];
+		__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
+		__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+		__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+
+		/* swap the IPv6 addrs */
+		struct in6_addr ip6_dest_backup;
+		__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr),
+				sizeof(struct in6_addr));
+		__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
+					in6_addr));
+		__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup,
+				sizeof(struct in6_addr));
+
+		/* adjust the payload length */
+		size_t payload_len = sizeof(struct sctphdr) + sizeof(struct
+				sctp_chunkhdr);
+		ip6h->payload_len = bpf_htons(payload_len);
+
+		/* create the SCTP cookie ack */
+		sctph->source = spx_state->sctp_sport;
+		sctph->dest = spx_state->sctp_dport;
+		sctph->vtag = spx_state->sctp_dvtag;
+		sctph->checksum = bpf_htonl(0);
+		chunk1->type = SCTP_CID_COOKIE_ACK;
+		chunk1->flags = 0;
+		chunk1->length = bpf_htons(sizeof(struct sctp_chunkhdr));
+
+		/* calculate CRC32c checksum */
+		__u32 csum = 0;
+		if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
+			bpf_printk("sctp checksum calculation failed");
+			return TC_ACT_SHOT;
+		}
+		sctph->checksum = bpf_htonl(csum);
+
+		if (bpf_skb_change_tail(skb, payload_len + sizeof(struct
+						ipv6hdr) + sizeof(struct
+							ethhdr), 0) < 0) {
+			return TC_ACT_SHOT;
+		}
+
+		/* mark the packet for reinjection so that the interface
+		 * program accepts it */
+		((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
+			SPX_TO_SCTP_REINJECT_MARK;
+		return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	}
 
 	__u8 connection_control = 0;
 	__u8 datastream_type = 0;
@@ -947,7 +1022,8 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
 		return TC_ACT_SHOT;
 	}
-	if (bpf_skb_change_tail(skb, skb->len - padding_bytes, 0) < 0) {
+	if (bpf_skb_change_tail(skb, payload_len + sizeof(struct ipv6hdr) +
+				sizeof(struct ethhdr), 0) < 0) {
 		return TC_ACT_SHOT;
 	}
 	bpf_skb_pull_data(skb, 0);

@@ -1861,7 +1861,7 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 
 	int spx_sock = -1;
 	if (kernel) {
-		spx_sock = socket(AF_INET6, SOCK_SEQPACKET, IPPROTO_SCTP);
+		spx_sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_SCTP);
 	} else {
 		spx_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	}

@@ -39,19 +39,6 @@ struct {
 #endif
 } ipx_wrap_if_config SEC(".maps");
 
-struct bpf_cb_mark_info {
-	union {
-		__u32 cb[5];
-		struct {
-			__u32 mark;
-			__u32 unused[4];
-		} __attribute__((packed));
-	};
-} __attribute__((packed));
-
-_Static_assert(sizeof(struct bpf_cb_mark_info) == (sizeof(__u32) * 5),
-		"bpf_cb_mark_info has invalid size");
-
 #define IPX_TO_IPV6_REINJECT_MARK 0x47744701
 #define IPX_TO_IPV6UDP_REINJECT_MARK 0x47744702
 
@@ -410,7 +397,8 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	/* packet was already processed and reinjected, just accept */
 	__u32 cb_mark = ((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark;
 	if (cb_mark == IPX_TO_IPV6_REINJECT_MARK || cb_mark ==
-			IPX_TO_IPV6UDP_REINJECT_MARK) {
+			IPX_TO_IPV6UDP_REINJECT_MARK || cb_mark ==
+			SPX_TO_SCTP_REINJECT_MARK) {
 		return TC_ACT_OK;
 	}
 

@@ -2,8 +2,10 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
+#include <sys/socket.h>
 #include <linux/kcm.h>
-#include <linux/tcp.h>
+#include <linux/sctp.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
@@ -13,7 +15,6 @@
 #include <sys/prctl.h>
 #include <sys/queue.h>
 #include <sys/random.h>
-#include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -457,7 +458,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		case SOCK_DGRAM:
 			kernel = false;
 			break;
-		case SOCK_SEQPACKET:
+		case SOCK_STREAM:
 			kernel = true;
 			break;
 		default:
@@ -468,6 +469,24 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	/* set socket options to make SCTP behave a little more like SPX */
 	if (kernel) {
 		// TODO
+		int val = 1;
+		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_DISABLE_FRAGMENTS,
+					&val, sizeof(val)) < 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
+
+		struct sctp_rtoinfo rtoi = {
+			.srto_assoc_id = SCTP_FUTURE_ASSOC,
+			.srto_initial = 10,
+			.srto_min = 10,
+			.srto_max = SPX_ABORT_TMO_TICKS * TICKS_MS
+		};
+		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RTOINFO, &rtoi,
+					sizeof(rtoi)) < 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
 	}
 
 	if (e->recv_direct) {

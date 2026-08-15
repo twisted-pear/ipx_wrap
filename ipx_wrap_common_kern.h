@@ -1,6 +1,21 @@
 #ifndef __IPX_WRAP_COMMON_KERN_H__
 #define __IPX_WRAP_COMMON_KERN_H__
 
+struct bpf_cb_mark_info {
+	union {
+		__u32 cb[5];
+		struct {
+			__u32 mark;
+			__u32 unused[4];
+		} __attribute__((packed));
+	};
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct bpf_cb_mark_info) == (sizeof(__u32) * 5),
+		"bpf_cb_mark_info has invalid size");
+
+#define SPX_TO_SCTP_REINJECT_MARK 0x47744703
+
 #define SCTP_MAX_CHUNKSIZE 4096 // FIXME: this will do for our purposes but is
 				// very ugly
 #define SCTP_MAX_PKT_LEN (((MAX_DGRAM_LEN - (sizeof(struct ipv6hdr) + \
