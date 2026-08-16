@@ -305,9 +305,11 @@ enum kspx_connection_state {
 	KSPX_INVALID = 0,
 	KSPX_NEW,
 	KSPX_ESTABLISHED,
+	KSPX_MAX
 };
 
 struct bpf_kspx_state {
+	struct bpf_spin_lock lock;
 	enum kspx_connection_state state;
 	struct ipx_addr remote_addr;
 	struct ipx_addr local_addr;

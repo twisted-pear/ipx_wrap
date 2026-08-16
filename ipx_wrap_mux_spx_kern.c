@@ -153,6 +153,34 @@ static bool sctp_csum_calc(const struct sctphdr *sctph, void *data_end, size_t
 	return true;
 }
 
+#include "ipx_wrap_mux_spx_states.h"
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__type(key, enum kspx_connection_state);
+	__uint(max_entries, KSPX_MAX);
+	__array(values, __u32 (void *));
+} kspx_states_ingress SEC(".maps") = {
+	.values = {
+		[KSPX_INVALID] = (void *) &kspx_state_ingress_INVALID,
+		[KSPX_NEW] = (void *) &kspx_state_ingress_NEW,
+		//[KSPX_ESTABLISHED] = (void *) &kspx_state_ingress_ESTABLISHED,
+	},
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__type(key, enum kspx_connection_state);
+	__uint(max_entries, KSPX_MAX);
+	__array(values, __u32 (void *));
+} kspx_states_egress SEC(".maps") = {
+	.values = {
+		[KSPX_INVALID] = (void *) &kspx_state_egress_INVALID,
+		//[KSPX_NEW] = (void *) &kspx_state_egress_NEW,
+		//[KSPX_ESTABLISHED] = (void *) &kspx_state_egress_ESTABLISHED,
+	},
+};
+
 static __always_inline bool check_spx_msg_ingress(const struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
 {
@@ -493,11 +521,12 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	};
 	struct bpf_kspx_state *spx_state = bpf_map_lookup_elem(
 			&ipx_wrap_mux_kspx_state, &conn_key);
-
 	if (spx_state == NULL) {
 		bpf_printk("no kernel spx state");
 		return TC_ACT_UNSPEC;
 	}
+
+	bpf_tail_call(skb, &kspx_states_ingress, spx_state->state);
 
 	size_t data_len = bpf_ntohs(ipxh->pktlen) - (sizeof(struct ipxhdr) +
 			sizeof(struct spxhdr));
@@ -515,7 +544,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 			&sctp_padding_bytes, &sctp_chunk_type);
 	bpf_printk("sctp len: %u, padding: %u", sctp_len, sctp_padding_bytes);
 
-	/* make room for the TCP header */
+	/* make room for the SCTP header */
 	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
 		sizeof(struct spxhdr);
 	__s32 len_diff = sctp_len - oldhdrs_len;
@@ -891,8 +920,6 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
-	bpf_printk("got SCTP packet");
-
 	struct sctphdr *sctph;
 	if (parse_sctphdr(&cur, data_end, &sctph) < 0) {
 		return TC_ACT_SHOT;
@@ -903,6 +930,8 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	if (parse_sctp_chunk(&cur, data_end, &chunk1) < 0) {
 		return TC_ACT_SHOT;
 	}
+
+	bpf_tail_call(skb, &kspx_states_egress, spx_state->state);
 
 	/* try to parse a second chunk */
 	struct sctp_chunkhdr *chunk2 = NULL;
