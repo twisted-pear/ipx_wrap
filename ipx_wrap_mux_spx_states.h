@@ -93,8 +93,6 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 	\
 	update_state_ingress_##state_name(spx_state, spxh, data_len); \
 	\
-	put_kspx_state(spx_state); \
-	\
 	struct ingress_transform_info info = { \
 		.sctp_sport = spx_state->sctp_sport, \
 		.sctp_dport = spx_state->sctp_dport, \
@@ -103,6 +101,7 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 		.sctp_tsn = spx_state->sctp_tsn, \
 		.sctp_tsn_ack = spx_state->sctp_tsn_ack \
 	}; \
+	put_kspx_state(spx_state); \
 	if (!transform_ingress_##state_name(skb, spxh, data_len, &info)) { \
 		POSTAMBLE_UNLOCKED_INGRESS(TC_ACT_SHOT, \
 				"transformation failed"); \
