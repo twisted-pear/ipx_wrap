@@ -21,6 +21,33 @@ static __always_inline bool get_ingress_pointers(struct __sk_buff *skb, struct
 	return true;
 }
 
+static __always_inline bool get_egress_pointers(struct __sk_buff *skb, struct
+		ethhdr **eth, struct ipv6hdr **ip6h, struct sctphdr **sctph,
+		struct sctp_chunkhdr **chunk1, struct sctp_chunkhdr **chunk2,
+		void **data_end)
+{
+	*data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	*eth = data;
+	*ip6h = (void *) (*eth + 1);
+	*sctph = (void *) (*ip6h + 1);
+
+	struct hdr_cursor cur = {
+		.pos = *sctph + 1
+	};
+
+	/* at least one chunk is required */
+	if (parse_sctp_chunk(&cur, *data_end, chunk1) < 0) {
+		return false;
+	}
+
+	*chunk2 = NULL;
+	parse_sctp_chunk(&cur, *data_end, chunk2);
+
+	return true;
+}
+
 static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 		spx_conn_key *key)
 {
@@ -83,6 +110,60 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 #define EXIT_INGRESS(verdict, message) \
 	put_kspx_state(spx_state); \
 	EXIT_UNLOCKED_INGRESS(verdict, message)
+
+#define ENTER_EGRESS(state_var) \
+	bpf_printk("%s: begin", __func__); \
+	\
+	struct bpf_sock *client_sock = skb->sk; \
+	if (client_sock == NULL) { \
+		bpf_printk("%s: shot, failed to get socket", __func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
+	struct spx_conn_key *conn_key = bpf_sk_storage_get( \
+			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0); \
+	if (conn_key == NULL) { \
+		bpf_printk("%s: shot, failed to get connection key", \
+				__func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
+	struct bpf_kspx_state *spx_state = get_kspx_state(conn_key); \
+	if (spx_state == NULL) { \
+		/* SPX connection is already closed, the conn_key is stale */ \
+		bpf_printk("%s: shot, failed to get state", __func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
+	if (spx_state->state != state_var) { \
+		/* This can happen if the state is changed immediately after \
+		 * it was selected in the main program but before the \
+		 * tail-call is called. There is nothing we can do here. */ \
+		put_kspx_state(spx_state); \
+		bpf_printk("%s: shot, unexpected state", __func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
+	struct ethhdr *eth; \
+	struct ipv6hdr *ip6h; \
+	struct sctphdr *sctph; \
+	struct sctp_chunkhdr *chunk1; \
+	struct sctp_chunkhdr *chunk2; \
+	void *data_end; \
+	if (!get_egress_pointers(skb, &eth, &ip6h, &sctph, &chunk1, &chunk2, \
+				&data_end)) { \
+		put_kspx_state(spx_state); \
+		bpf_printk("%s: shot, failed to get pointers", __func__); \
+		return TC_ACT_SHOT; \
+	}
+
+#define EXIT_UNLOCKED_EGRESS(verdict, message) \
+	bpf_printk("%s: " message, __func__); \
+	return verdict;
+
+#define EXIT_EGRESS(verdict, message) \
+	put_kspx_state(spx_state); \
+	EXIT_UNLOCKED_EGRESS(verdict, message)
 
 #define GENERIC_INGRESS(state_name) \
 	ENTER_INGRESS(KSPX_##state_name); \
@@ -476,9 +557,9 @@ int kspx_state_ingress_NEW(struct __sk_buff *skb)
 SEC("tc/egress")
 int kspx_state_egress_NEW(struct __sk_buff *skb)
 {
-	bpf_printk("%s: begin", __func__);
-	bpf_printk("%s: end", __func__);
-	return TC_ACT_SHOT;
+	ENTER_EGRESS(KSPX_NEW);
+	// TODO
+	EXIT_EGRESS(TC_ACT_SHOT, "end");
 }
 
 SEC("tc/ingress")
@@ -490,9 +571,9 @@ int kspx_state_ingress_ESTABLISHED(struct __sk_buff *skb)
 SEC("tc/egress")
 int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 {
-	bpf_printk("%s: begin", __func__);
-	bpf_printk("%s: end", __func__);
-	return TC_ACT_SHOT;
+	ENTER_EGRESS(KSPX_NEW);
+	// TODO
+	EXIT_EGRESS(TC_ACT_SHOT, "end");
 }
 
 #endif /* __IPX_WRAP_MUX_SPX_STATES_H__ */
