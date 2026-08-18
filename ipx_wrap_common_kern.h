@@ -6,7 +6,7 @@ struct bpf_cb_mark_info {
 		__u32 cb[5];
 		struct {
 			__u32 mark;
-			__u32 unused[4];
+			struct spx_conn_key spx_conn_key;
 		} __attribute__((packed));
 	};
 } __attribute__((packed));

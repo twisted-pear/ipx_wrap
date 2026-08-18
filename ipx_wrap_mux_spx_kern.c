@@ -18,7 +18,6 @@
 #define SCTP_STATE_COOKIE_LEN 4
 #define SCTP_RWND_DUMMY 1500
 
-// TODO: implement locking for this data structure!
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct spx_conn_key);
@@ -272,13 +271,29 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 SEC("tc/egress")
 int ipx_wrap_spx_mux(struct __sk_buff *skb)
 {
-	struct bpf_sock *client_sock = skb->sk;
-	if (client_sock == NULL) {
-		return TC_ACT_UNSPEC;
+	struct bpf_cb_mark_info cbi;
+	cbi.cb[0] = skb->cb[0];
+	cbi.cb[1] = skb->cb[1];
+	cbi.cb[2] = skb->cb[2];
+	cbi.cb[3] = skb->cb[3];
+	cbi.cb[4] = skb->cb[4];
+
+	struct spx_conn_key *conn_key = NULL;
+	/* Check if this is the tail end of an already handled SCTP packet. In
+	 * this case the socket association is lost and we need to look up the
+	 * connection key from the CB */
+	if (cbi.mark == SCTP_TAIL_REINJECT_MARK) {
+		conn_key = &(cbi.spx_conn_key);
+	} else {
+		struct bpf_sock *client_sock = skb->sk;
+		if (client_sock == NULL) {
+			return TC_ACT_UNSPEC;
+		}
+
+		conn_key = bpf_sk_storage_get(&ipx_wrap_mux_kspx_sock_key,
+				client_sock, NULL, 0);
 	}
 
-	struct spx_conn_key *conn_key = bpf_sk_storage_get(
-			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0);
 	if (conn_key == NULL) {
 		return TC_ACT_UNSPEC;
 	}

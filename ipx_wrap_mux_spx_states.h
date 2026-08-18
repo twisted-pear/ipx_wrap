@@ -1,6 +1,86 @@
 #ifndef __IPX_WRAP_MUX_SPX_STATES_H__
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
+#define SCTP_TAIL_REINJECT_MARK 0x47744704
+
+/* scratch space to store the SCTP header and up to one SCTP chunk */
+struct bpf_kspx_scratch {
+	union {
+		__be32 buf[(sizeof(struct sctphdr) / 4) + (SCTP_MAX_CHUNKSIZE /
+				4)];
+		struct {
+			struct sctphdr sctph;
+			struct sctp_chunkhdr chunk1;
+			__u8 data[SCTP_MAX_CHUNKSIZE - sizeof(struct
+					sctp_chunkhdr)];
+		} __attribute__((packed));
+	};
+} __attribute__((packed));
+_Static_assert(sizeof(struct bpf_kspx_scratch) == sizeof(struct sctphdr) +
+		SCTP_MAX_CHUNKSIZE, "bpf_kspx_scratch has invalid size");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
+	__type(value, struct bpf_kspx_scratch);
+	__uint(max_entries, 1);
+} ipx_wrap_mux_kspx_egress_scratch SEC(".maps");
+
+/* SCTP chunks are always a multiple of 4 bytes long and so is the header */
+struct sctp_pkt_cpy_loopctx {
+	const __u32 *source;
+	__u32 *target;
+	size_t len;
+	const void *source_end;
+	const void *target_end;
+};
+
+static long sctp_pkt_cpy_loopfn(__u64 index, void *ctx)
+{
+	struct sctp_pkt_cpy_loopctx *c = ctx;
+	if (index >= c->len) {
+		return 1;
+	}
+
+	const __u32 *src = c->source + index;
+	if (src + 1 > c->source_end) {
+		return 1;
+	}
+
+	__u32 *dst = c->target + index;
+	if (dst + 1 > c->target_end) {
+		return 1;
+	}
+
+	*dst = *src;
+
+	return 0;
+}
+
+static __always_inline bool sctp_pkt_cpy(struct sctphdr *dst, const struct
+		sctphdr *src, size_t len, const void *dst_end, const void
+		*src_end)
+{
+	if (len % 4 != 0) {
+		return false;
+	}
+
+	struct sctp_pkt_cpy_loopctx ctx = {
+		.source = (const __u32 *) src,
+		.target = (__u32 *) dst,
+		.len = len / 4,
+		.source_end = src_end,
+		.target_end = dst_end
+	};
+
+	long nloops = bpf_loop(len / 4, &sctp_pkt_cpy_loopfn, &ctx, 0);
+	if (nloops != len / 4) {
+		return false;
+	}
+
+	return true;
+}
+
 static __always_inline bool get_ingress_pointers(struct __sk_buff *skb, struct
 		ethhdr **eth, struct ipv6hdr **ip6h, struct udphdr **udph,
 		struct ipxhdr **ipxh, struct spxhdr **spxh, void **data_end)
@@ -783,11 +863,6 @@ static __always_inline bool admit_egress_ESTABLISHED(const struct
 		return false;
 	}
 
-	/* we can only handle SACK and DATA chunks right now */
-	if (chunk1->type != SCTP_CID_SACK && chunk1->type != SCTP_CID_DATA) {
-		return false;
-	}
-
 	/* this is not allowed */
 	if (chunk1->type == SCTP_CID_DATA && chunk2 != NULL && chunk2->type !=
 			SCTP_CID_DATA) {
@@ -801,6 +876,11 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
 		struct sctp_chunkhdr *chunk1, void *data_end)
 {
+	/* we can only handle SACK and DATA chunks right now */
+	if (chunk1->type != SCTP_CID_SACK && chunk1->type != SCTP_CID_DATA) {
+		return true; /* no state modification */
+	}
+
 	/* SACK chunk */
 	if (chunk1->type == SCTP_CID_SACK) {
 		const struct sctp_sackhdr *sackh = (const struct sctp_sackhdr
@@ -851,15 +931,149 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 	return true;
 }
 
-static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
-		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, const
-		struct egress_transform_info *info)
+static __always_inline bool reinject_additional_chunks(struct __sk_buff *skb,
+		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, struct
+		sctp_chunkhdr *chunk2)
 {
+	__u32 scratch_key = 0;
+	struct bpf_kspx_scratch *scratch = bpf_map_lookup_elem(
+			&ipx_wrap_mux_kspx_egress_scratch, &scratch_key);
+	if (scratch == NULL) {
+		return false;
+	}
+
+	/* only one chunk, nothing to do */
+	if (chunk2 == NULL) {
+		return true;
+	}
+
+	/* determine the size of the chunk */
+	size_t chunk1_len = ((void *) chunk2) - ((void *) chunk1);
+	if (chunk1_len > SCTP_MAX_CHUNKSIZE) {
+		return false;
+	}
+
+	void *data_end = (void *)(long)skb->data_end;
+	if (((void *) chunk1) + chunk1_len > data_end) {
+		return false;
+	}
+
+	/* save SCTP header and first chunk away */
+	void *map_end = ((void *) scratch) + sizeof(struct bpf_kspx_scratch);
+	if (!sctp_pkt_cpy(&(scratch->sctph), sctph, sizeof(struct sctphdr) +
+				chunk1_len, map_end, data_end)) {
+		return false;
+	}
+
+	/* remove the first chunk from the packet */
+	if (bpf_skb_adjust_room(skb, chunk1_len, BPF_ADJ_ROOM_NET, 0) < 0) {
+		return false;
+	}
+	bpf_skb_pull_data(skb, 0);
+
+	/* adjust pointers and reverify */
+	data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	struct ethhdr *eth = data;
+	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	if (sctph + 1 > data_end) {
+		return false;
+	}
+
+	/* restore the SCTP header */
+	__builtin_memcpy(sctph, &(scratch->sctph), sizeof(struct sctphdr));
+
+	/* adjust the IPv6 header */
+	size_t payload_len = bpf_ntohs(ip6h->payload_len) - chunk1_len;
+	ip6h->payload_len = bpf_htons(payload_len);
+
+	/* reinject the modifed packet with the subsequent chunks */
+	if (bpf_clone_redirect(skb, skb->ifindex, 0) < 0) {
+		return false;
+	}
+
+	/* restore the first chunk in its own SCTP packet */
+	size_t common_headers_len = sizeof(struct ethhdr) + sizeof(struct
+			ipv6hdr) + sizeof(struct sctphdr);
+	size_t len_diff = chunk1_len - (skb->len - common_headers_len);
+	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
+		return false;
+	}
+	bpf_skb_pull_data(skb, 0);
+
+	/* adjust pointers and reverify */
+	data_end = (void *)(long)skb->data_end;
+	data = (void *)(long)skb->data;
+
+	eth = data;
+	ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	if (ip6h + 1 > data_end) {
+		return false;
+	}
+	sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	chunk1 = ((void *) sctph) + sizeof(struct sctphdr);
+	if (((void *) chunk1) + chunk1_len > data_end) {
+		return false;
+	}
+
+	/* copy back the first chunk and the original SCTP header */
+	if (!sctp_pkt_cpy(sctph, &(scratch->sctph), sizeof(struct sctphdr) +
+				chunk1_len, data_end, map_end)) {
+		return false;
+	}
+
+	/* adjust the IPv6 header */
+	ip6h->payload_len = bpf_htons(chunk1_len + sizeof(struct sctphdr));
+
+	return true;
+}
+
+static __always_inline void mark_sctp_tail(struct __sk_buff *skb, const struct
+		egress_transform_info *info)
+{
+	struct bpf_cb_mark_info cbi = {
+		.mark = SCTP_TAIL_REINJECT_MARK,
+		.spx_conn_key.bind_addr = info->local_addr,
+		.spx_conn_key.conn_id = info->local_id
+	};
+
+	skb->cb[0] = cbi.cb[0];
+	skb->cb[1] = cbi.cb[1];
+	skb->cb[2] = cbi.cb[2];
+	skb->cb[3] = cbi.cb[3];
+	skb->cb[4] = cbi.cb[4];
+}
+
+static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
+		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, struct
+		sctp_chunkhdr *chunk2, const struct egress_transform_info
+		*info)
+{
+	/* mark the SKB, so that when we reinject a copy of it, we can find the
+	 * SPX state again */
+	mark_sctp_tail(skb, info);
+
+	/* if more than one chunk exists, reinject all but the first chunk into
+	 * the egress path */
+	if (!reinject_additional_chunks(skb, sctph, chunk1, chunk2)) {
+		return false;
+	}
+
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
 	struct ipv6hdr *ip6h = data + sizeof(struct ethhdr);
-	if (ip6h + 1 > data_end) {
+	sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	chunk1 = ((void *) sctph) + sizeof(struct sctphdr);
+	if (chunk1 + 1 > data_end) {
 		return false;
+	}
+
+	/* we can only handle SACK and DATA chunks right now */
+	if (chunk1->type != SCTP_CID_SACK && chunk1->type != SCTP_CID_DATA) {
+		bpf_printk("unknown chunk type %d", chunk1->type);
+		return false; /* drop only this chunk */
 	}
 
 	size_t data_ofs = 0;
@@ -1034,7 +1248,6 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 		.sctp_dvtag = spx_state->sctp_dvtag
 	};
 	put_kspx_state(spx_state);
-	bpf_printk("ofs: %u", spx_state->local_sequence_offset);
 
 	/* init chunk */
 	if (chunk1->type == SCTP_CID_INIT) {
@@ -1091,7 +1304,7 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 	};
 	put_kspx_state(spx_state);
 
-	if (!transform_egress_ESTABLISHED(skb, sctph, chunk1, &info)) {
+	if (!transform_egress_ESTABLISHED(skb, sctph, chunk1, chunk2, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT,
 				"transformation failed");
 	}

@@ -63,6 +63,11 @@ struct ipv6_eui64_addr {
 	__u8 ipx_node_snd[3];
 } __attribute__((packed));
 
+struct spx_conn_key {
+	struct ipx_addr bind_addr;
+	__be16 conn_id;
+} __attribute__((packed));
+
 static __always_inline void ipx_to_ipv6_addr(struct in6_addr *dst, const struct
 		ipx_addr *src, __be32 prefix)
 {
