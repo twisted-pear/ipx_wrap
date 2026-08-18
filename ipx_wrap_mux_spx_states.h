@@ -180,7 +180,8 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 		.sctp_svtag = spx_state->sctp_svtag, \
 		.sctp_dvtag = spx_state->sctp_dvtag, \
 		.sctp_tsn = spx_state->sctp_tsn, \
-		.local_sequence_offset = spx_state->local_sequence_offset \
+		.local_sequence_offset = spx_state->local_sequence_offset, \
+		.local_current_sequence = spx_state->last_sent_sequence \
 	}; \
 	put_kspx_state(spx_state); \
 	if (!transform_ingress_##state_name(skb, spxh, data_len, &info)) { \
@@ -199,6 +200,7 @@ struct ingress_transform_info {
 	__be32 sctp_dvtag;
 	__u32 sctp_tsn;
 	__u32 local_sequence_offset;
+	__u16 local_current_sequence;
 };
 
 struct egress_transform_info {
@@ -502,6 +504,17 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		__u32 cum_tsn_ack;
 		__builtin_add_overflow(info->local_sequence_offset, spx_ack,
 				&cum_tsn_ack);
+		/* compensate for old SPX acks */
+		__u32 prev_cum_tsn_ack;
+		__builtin_add_overflow(info->local_sequence_offset,
+				info->local_current_sequence,
+				&prev_cum_tsn_ack);
+		if (spx_seq_less_than(spx_ack, info->local_current_sequence) &&
+				sctp_tsn_less_than(cum_tsn_ack,
+					prev_cum_tsn_ack)) {
+			__builtin_sub_overflow(cum_tsn_ack, 0x10000,
+					&cum_tsn_ack);
+		}
 		sack->cum_tsn_ack = bpf_htonl(cum_tsn_ack);
 		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 		sack->num_gap_ack_blocks = bpf_htons(0);
@@ -597,10 +610,7 @@ static __always_inline bool update_state_egress_NEW(struct bpf_kspx_state
 		spx_state->sctp_svtag = bpf_htonl(initial_source_vtag);
 		spx_state->sctp_sport = sctph->dest;
 		spx_state->sctp_dport = sctph->source;
-		/* We increase the offset by 0x10000 on the first data chunk
-		 * going out. */
-		__builtin_sub_overflow(initial_tsn, 0x10000,
-				&(spx_state->local_sequence_offset));
+		spx_state->local_sequence_offset = initial_tsn;
 
 		return true;
 	}
@@ -821,14 +831,18 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		return false;
 	}
 
-	/* if the SPX sequence number wrapped around, increase the offset */
+	/* if the SPX seq no increased but the total TSN decreased, we assume
+	 * the SPX seq no wrapped and increase the TSN offset */
+	__u32 cur_tsn = bpf_ntohl(datah->tsn);
+	__u32 prev_tsn;
+	__builtin_add_overflow(spx_state->local_sequence_offset,
+			spx_state->last_sent_sequence, &prev_tsn);
 	__u32 spx_sequence_u32;
-	__builtin_sub_overflow(bpf_ntohl(datah->tsn),
-			spx_state->local_sequence_offset, &spx_sequence_u32);
+	__builtin_sub_overflow(cur_tsn, spx_state->local_sequence_offset,
+			&spx_sequence_u32);
 	__u16 spx_sequence_u16 = spx_sequence_u32;
-	/* FIXME: this is very fragile and fails if we somehow miss a DATA
-	 * chunk */
-	if (spx_sequence_u16 == 0) {
+	if (spx_seq_less_than(spx_state->last_sent_sequence, spx_sequence_u16)
+			&& sctp_tsn_less_than(cur_tsn, prev_tsn)) {
 		__builtin_add_overflow(spx_state->local_sequence_offset,
 				0x10000, &(spx_state->local_sequence_offset));
 	}
