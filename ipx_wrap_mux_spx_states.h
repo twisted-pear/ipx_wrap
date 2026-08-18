@@ -180,7 +180,7 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 		.sctp_svtag = spx_state->sctp_svtag, \
 		.sctp_dvtag = spx_state->sctp_dvtag, \
 		.sctp_tsn = spx_state->sctp_tsn, \
-		.sctp_tsn_ack = spx_state->sctp_tsn_ack \
+		.local_sequence_offset = spx_state->local_sequence_offset \
 	}; \
 	put_kspx_state(spx_state); \
 	if (!transform_ingress_##state_name(skb, spxh, data_len, &info)) { \
@@ -192,37 +192,13 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 	EXIT_UNLOCKED_INGRESS(verdict, "end"); \
 	//EXIT_UNLOCKED_INGRESS(TC_ACT_UNSPEC, "end");
 
-static __always_inline bool spx_msg_is_current_ack(const struct bpf_kspx_state
-		*spx_state, const struct spxhdr *spxh)
-{
-	/* message must be an ACK */
-	if ((spxh->connection_control & SPX_CC_MASK_SPX) != SPX_CC_SYSTEM_PKT)
-	{
-		return false;
-	}
-
-	/* we want an ACK and it has to ACK the last packet we sent */
-	__u16 local_next_sequence = spx_state->local_current_sequence;
-	if (spx_state->last_sent_msg_data_len != 0) {
-		/* last msg was a non-system packet, therefore we need the ack
-		 * number to be one higher than its seq no */
-		__builtin_add_overflow(local_next_sequence, 1,
-				&local_next_sequence);
-	}
-	if (bpf_ntohs(spxh->ack_no) != local_next_sequence) {
-		return false;
-	}
-
-	return true;
-}
-
 struct ingress_transform_info {
 	__be16 sctp_sport;
 	__be16 sctp_dport;
 	__be32 sctp_svtag;
 	__be32 sctp_dvtag;
 	__u32 sctp_tsn;
-	__u32 sctp_tsn_ack;
+	__u32 local_sequence_offset;
 };
 
 struct egress_transform_info {
@@ -413,21 +389,8 @@ static __always_inline void update_state_ingress_ESTABLISHED(struct
 		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
 		data_len)
 {
-	/* message is an ACK */
-	if (spx_msg_is_current_ack(spx_state, spxh)) {
-		/* increment sequence number and virtual SCTP ACK no after
-		 * receiving an ACK for a non-system message */
-		if (spx_state->last_sent_msg_data_len != 0) {
-			__builtin_add_overflow(
-					spx_state->local_current_sequence, 1,
-					&(spx_state->local_current_sequence));
-			__builtin_add_overflow(spx_state->sctp_tsn_ack, 1,
-					&(spx_state->sctp_tsn_ack));
-		}
-	} else {
-		if (data_len != 0) {
-			spx_state->last_rcvd_msg_data_len = data_len;
-		}
+	if (data_len != 0) {
+		spx_state->last_rcvd_msg_data_len = data_len;
 	}
 
 	spx_state->remote_alloc_no = spxh->alloc_no;
@@ -441,6 +404,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	size_t sctp_len = sizeof(struct sctphdr) + sizeof(struct
 			sctp_chunkhdr);
 	size_t sctp_padding_bytes = 0;
+	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
 
 	if (data_len != 0) {
 		/* room for a data chunk */
@@ -532,7 +496,13 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		chunk->flags = 0;
 		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
 				sizeof(struct sctp_sackhdr));
-		sack->cum_tsn_ack = bpf_htonl(info->sctp_tsn_ack);
+		/* subtract 1 from the ack no because SPX acks the "next
+		 * expected" packet, while SCTP acks the "last seen" one */
+		__builtin_sub_overflow(spx_ack, 1, &spx_ack);
+		__u32 cum_tsn_ack;
+		__builtin_add_overflow(info->local_sequence_offset, spx_ack,
+				&cum_tsn_ack);
+		sack->cum_tsn_ack = bpf_htonl(cum_tsn_ack);
 		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 		sack->num_gap_ack_blocks = bpf_htons(0);
 		sack->num_dup_tsns = bpf_htons(0);
@@ -627,8 +597,10 @@ static __always_inline bool update_state_egress_NEW(struct bpf_kspx_state
 		spx_state->sctp_svtag = bpf_htonl(initial_source_vtag);
 		spx_state->sctp_sport = sctph->dest;
 		spx_state->sctp_dport = sctph->source;
-		__builtin_sub_overflow(initial_tsn, 1,
-				&(spx_state->sctp_tsn_ack));
+		/* We increase the offset by 0x10000 on the first data chunk
+		 * going out. */
+		__builtin_sub_overflow(initial_tsn, 0x10000,
+				&(spx_state->local_sequence_offset));
 
 		return true;
 	}
@@ -781,7 +753,7 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 	spxh->datastream_type = SPX_DS_NONE;
 	spxh->src_conn_id = info->local_id;
 	spxh->dst_conn_id = info->remote_id;
-	spxh->seq_no = bpf_htons(info->local_current_sequence);
+	spxh->seq_no = bpf_htons(0);
 	spxh->ack_no = bpf_htons(info->remote_expected_sequence);
 	spxh->alloc_no = bpf_htons(info->local_alloc_no);
 
@@ -849,14 +821,18 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		return false;
 	}
 
-	size_t data_overhead = sizeof(struct sctp_chunkhdr) + sizeof(struct
-			sctp_datahdr);
-	size_t chunk_len = bpf_ntohs(chunk1->length);
-	size_t data_len = chunk_len - data_overhead;
-
-	if (data_len != 0) {
-		spx_state->last_sent_msg_data_len = data_len;
+	/* if the SPX sequence number wrapped around, increase the offset */
+	__u32 spx_sequence_u32;
+	__builtin_sub_overflow(bpf_ntohl(datah->tsn),
+			spx_state->local_sequence_offset, &spx_sequence_u32);
+	__u16 spx_sequence_u16 = spx_sequence_u32;
+	/* FIXME: this is very fragile and fails if we somehow miss a DATA
+	 * chunk */
+	if (spx_sequence_u16 == 0) {
+		__builtin_add_overflow(spx_state->local_sequence_offset,
+				0x10000, &(spx_state->local_sequence_offset));
 	}
+	spx_state->last_sent_sequence = spx_sequence_u16;
 
 	return true;
 }
@@ -1035,7 +1011,7 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 		.remote_addr = spx_state->remote_addr,
 		.local_id = spx_state->local_id,
 		.remote_id = spx_state->remote_id,
-		.local_current_sequence = spx_state->local_current_sequence,
+		.local_current_sequence = 0,
 		.remote_expected_sequence =
 			spx_state->remote_expected_sequence,
 		.local_alloc_no = spx_state->local_alloc_no,
@@ -1044,6 +1020,7 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 		.sctp_dvtag = spx_state->sctp_dvtag
 	};
 	put_kspx_state(spx_state);
+	bpf_printk("ofs: %u", spx_state->local_sequence_offset);
 
 	/* init chunk */
 	if (chunk1->type == SCTP_CID_INIT) {
@@ -1090,7 +1067,7 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 		.remote_addr = spx_state->remote_addr,
 		.local_id = spx_state->local_id,
 		.remote_id = spx_state->remote_id,
-		.local_current_sequence = spx_state->local_current_sequence,
+		.local_current_sequence = spx_state->last_sent_sequence,
 		.remote_expected_sequence =
 			spx_state->remote_expected_sequence,
 		.local_alloc_no = spx_state->local_alloc_no,

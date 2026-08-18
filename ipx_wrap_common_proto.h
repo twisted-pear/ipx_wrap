@@ -318,18 +318,17 @@ struct bpf_kspx_state {
 	__u16 remote_alloc_no;
 	__u16 local_alloc_no;
 	__u16 remote_expected_sequence;
-	__u16 local_current_sequence;
+	__u32 local_sequence_offset;
+	__u16 last_sent_sequence;
 	__u16 neg_size_to_remote;
 	__u16 neg_size_to_local;
 	__u16 last_rcvd_msg_data_len;
-	__u16 last_sent_msg_data_len;
 	__be32 prefix;
 	__be16 sctp_sport;
 	__be16 sctp_dport;
 	__be32 sctp_svtag;
 	__be32 sctp_dvtag;
 	__u32 sctp_tsn;
-	__u32 sctp_tsn_ack;
 };
 
 static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
