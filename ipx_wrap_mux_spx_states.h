@@ -81,6 +81,39 @@ static __always_inline bool sctp_pkt_cpy(struct sctphdr *dst, const struct
 	return true;
 }
 
+static __always_inline bool fill_conn_key(struct __sk_buff *skb, struct
+		spx_conn_key *conn_key)
+{
+	struct bpf_cb_mark_info cbi;
+	cbi.cb[0] = skb->cb[0];
+	cbi.cb[1] = skb->cb[1];
+	cbi.cb[2] = skb->cb[2];
+	cbi.cb[3] = skb->cb[3];
+	cbi.cb[4] = skb->cb[4];
+
+	/* Check if this is the tail end of an already handled SCTP packet. In
+	 * this case the socket association is lost and we need to look up the
+	 * connection key from the CB */
+	if (cbi.mark == SCTP_TAIL_REINJECT_MARK) {
+		*conn_key = cbi.spx_conn_key;
+		return true;
+	}
+
+	struct bpf_sock *client_sock = skb->sk;
+	if (client_sock == NULL) {
+		return false;
+	}
+
+	struct spx_conn_key *sock_conn_key = bpf_sk_storage_get(
+			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0);
+	if (sock_conn_key == NULL) {
+		return false;
+	}
+
+	*conn_key = *sock_conn_key;
+	return true;
+}
+
 static __always_inline bool get_ingress_pointers(struct __sk_buff *skb, struct
 		ethhdr **eth, struct ipv6hdr **ip6h, struct udphdr **udph,
 		struct ipxhdr **ipxh, struct spxhdr **spxh, void **data_end)
@@ -194,21 +227,14 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 #define ENTER_EGRESS(state_var) \
 	bpf_printk("%s: begin", __func__); \
 	\
-	struct bpf_sock *client_sock = skb->sk; \
-	if (client_sock == NULL) { \
-		bpf_printk("%s: shot, failed to get socket", __func__); \
-		return TC_ACT_SHOT; \
-	} \
-	\
-	struct spx_conn_key *conn_key = bpf_sk_storage_get( \
-			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0); \
-	if (conn_key == NULL) { \
+	struct spx_conn_key conn_key; \
+	if (!fill_conn_key(skb, &conn_key)) { \
 		bpf_printk("%s: shot, failed to get connection key", \
 				__func__); \
 		return TC_ACT_SHOT; \
 	} \
 	\
-	struct bpf_kspx_state *spx_state = get_kspx_state(conn_key); \
+	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
 		/* SPX connection is already closed, the conn_key is stale */ \
 		bpf_printk("%s: shot, failed to get state", __func__); \
@@ -299,6 +325,7 @@ struct egress_transform_info {
 	struct ipx_addr remote_addr;
 	__be16 local_id;
 	__be16 remote_id;
+	__u32 local_sequence_offset;
 	__u16 local_current_sequence;
 	__u16 remote_expected_sequence;
 	__u16 local_alloc_no;
@@ -492,11 +519,26 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		*skb, struct spxhdr *spxh, size_t data_len, const struct
 		ingress_transform_info *info)
 {
-	size_t sctp_len = sizeof(struct sctphdr) + sizeof(struct
-			sctp_chunkhdr);
+	size_t sctp_len = sizeof(struct sctphdr);
+	size_t chunk_start_ofs = sizeof(struct sctphdr);
 	size_t sctp_padding_bytes = 0;
 	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
 
+	/* also insert a HEARTBEAT_ACK chunk, if necessary */
+	size_t hb_ack_ofs = 0;
+	if (info->outstanding_heartbeat_len != 0) {
+		hb_ack_ofs = sctp_len;
+
+		size_t hb_ack_len = info->outstanding_heartbeat_len;
+		if (hb_ack_len % 4 != 0) {
+			hb_ack_len += 4 - (hb_ack_len % 4);
+		}
+
+		sctp_len += hb_ack_len;
+		chunk_start_ofs += hb_ack_len;
+	}
+
+	sctp_len += sizeof(struct sctp_chunkhdr);
 	if (data_len != 0) {
 		/* room for a data chunk */
 		sctp_len += sizeof(struct sctp_datahdr);
@@ -506,18 +548,6 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		/* room for a sack chunk */
 		sctp_len += sizeof(struct sctp_sackhdr);
 		sctp_padding_bytes = 0;
-	}
-
-	/* also append a HEARTBEAT_ACK chunk, if necessary */
-	size_t hb_ack_ofs = 0;
-	if (info->outstanding_heartbeat_len != 0) {
-		hb_ack_ofs = sctp_len + data_len + sctp_padding_bytes;
-
-		size_t hb_ack_len = info->outstanding_heartbeat_len;
-		if (hb_ack_len % 4 != 0) {
-			hb_ack_len += 4 - (hb_ack_len % 4);
-		}
-		sctp_padding_bytes += hb_ack_len;
 	}
 
 	/* make room for the SCTP header */
@@ -564,64 +594,6 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	sctph->dest = info->sctp_dport;
 	sctph->checksum = bpf_htonl(0);
 
-	if (data_len != 0) {
-		/* create the data chunk */
-		struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph +
-				1);
-		struct sctp_datahdr *data = (struct sctp_datahdr *) (chunk +
-				1);
-		if (data + 1 > data_end) {
-			return false;
-		}
-
-		chunk->type = SCTP_CID_DATA;
-		chunk->flags = (0 << 3) | /* I-bit */
-			       (0 << 2) | /* U-bit */
-			       (1 << 1) | /* B-bit */
-			       (1 << 0) ; /* E-bit */
-		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_datahdr) + data_len);
-		data->tsn = bpf_htonl(info->sctp_tsn);
-		data->stream = bpf_htons(0);
-		data->ssn = bpf_htons(info->sctp_tsn);
-		data->ppid = bpf_htonl(0);
-	} else {
-		/* create the sack chunk */
-		struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph +
-				1);
-		struct sctp_sackhdr *sack = (struct sctp_sackhdr *) (chunk +
-				1);
-		if (sack + 1 > data_end) {
-			return false;
-		}
-
-		chunk->type = SCTP_CID_SACK;
-		chunk->flags = 0;
-		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_sackhdr));
-		/* subtract 1 from the ack no because SPX acks the "next
-		 * expected" packet, while SCTP acks the "last seen" one */
-		__builtin_sub_overflow(spx_ack, 1, &spx_ack);
-		__u32 cum_tsn_ack;
-		__builtin_add_overflow(info->local_sequence_offset, spx_ack,
-				&cum_tsn_ack);
-		/* compensate for old SPX acks */
-		__u32 prev_cum_tsn_ack;
-		__builtin_add_overflow(info->local_sequence_offset,
-				info->local_current_sequence,
-				&prev_cum_tsn_ack);
-		if (spx_seq_less_than(spx_ack, info->local_current_sequence) &&
-				sctp_tsn_less_than(cum_tsn_ack,
-					prev_cum_tsn_ack)) {
-			__builtin_sub_overflow(cum_tsn_ack, 0x10000,
-					&cum_tsn_ack);
-		}
-		sack->cum_tsn_ack = bpf_htonl(cum_tsn_ack);
-		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
-		sack->num_gap_ack_blocks = bpf_htons(0);
-		sack->num_dup_tsns = bpf_htons(0);
-	}
-
 	/* fill in the HEARTBEAT_ACK chunk if necessary */
 	if (info->outstanding_heartbeat_len != 0) {
 		/* FIXME: this exists solely to appease the verifier */
@@ -664,6 +636,67 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		}
 
 		hb_ack_chunk->type = SCTP_CID_HEARTBEAT_ACK;
+	}
+
+	/* FIXME: this exists solely to appease the verifier */
+	if (chunk_start_ofs > SCTP_MAX_CHUNKSIZE * 2) {
+		return false;
+	}
+	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (((void *)
+				sctph) + chunk_start_ofs);
+	if (data_len != 0) {
+		/* create the data chunk */
+		struct sctp_datahdr *data = (struct sctp_datahdr *) (chunk +
+				1);
+		if (data + 1 > data_end) {
+			return false;
+		}
+
+		chunk->type = SCTP_CID_DATA;
+		chunk->flags = (0 << 3) | /* I-bit */
+			       (0 << 2) | /* U-bit */
+			       (1 << 1) | /* B-bit */
+			       (1 << 0) ; /* E-bit */
+		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
+				sizeof(struct sctp_datahdr) + data_len);
+		data->tsn = bpf_htonl(info->sctp_tsn);
+		data->stream = bpf_htons(0);
+		data->ssn = bpf_htons(info->sctp_tsn);
+		data->ppid = bpf_htonl(0);
+	} else {
+		/* create the sack chunk */
+		struct sctp_sackhdr *sack = (struct sctp_sackhdr *) (chunk +
+				1);
+		if (sack + 1 > data_end) {
+			return false;
+		}
+
+		chunk->type = SCTP_CID_SACK;
+		chunk->flags = 0;
+		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
+				sizeof(struct sctp_sackhdr));
+		/* subtract 1 from the ack no because SPX acks the "next
+		 * expected" packet, while SCTP acks the "last seen" one */
+		__builtin_sub_overflow(spx_ack, 1, &spx_ack);
+		__u32 cum_tsn_ack;
+		__builtin_add_overflow(info->local_sequence_offset, spx_ack,
+				&cum_tsn_ack);
+		/* compensate for old SPX acks */
+		__u32 prev_cum_tsn_ack;
+		__builtin_add_overflow(info->local_sequence_offset,
+				info->local_current_sequence,
+				&prev_cum_tsn_ack);
+		// TODO: fix this condition
+		/*if (spx_seq_less_than(spx_ack, info->local_current_sequence) &&
+				sctp_tsn_less_than(cum_tsn_ack,
+					prev_cum_tsn_ack)) {
+			__builtin_sub_overflow(cum_tsn_ack, 0x10000,
+					&cum_tsn_ack);
+		}*/
+		sack->cum_tsn_ack = bpf_htonl(cum_tsn_ack);
+		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
+		sack->num_gap_ack_blocks = bpf_htons(0);
+		sack->num_dup_tsns = bpf_htons(0);
 	}
 
 	/* calculate CRC32c checksum */
@@ -1066,7 +1099,7 @@ static __always_inline bool reinject_additional_chunks(struct __sk_buff *skb,
 	}
 
 	/* remove the first chunk from the packet */
-	if (bpf_skb_adjust_room(skb, chunk1_len, BPF_ADJ_ROOM_NET, 0) < 0) {
+	if (bpf_skb_adjust_room(skb, -chunk1_len, BPF_ADJ_ROOM_NET, 0) < 0) {
 		return false;
 	}
 	bpf_skb_pull_data(skb, 0);
@@ -1090,8 +1123,12 @@ static __always_inline bool reinject_additional_chunks(struct __sk_buff *skb,
 	ip6h->payload_len = bpf_htons(payload_len);
 
 	/* reinject the modifed packet with the subsequent chunks */
-	if (bpf_clone_redirect(skb, skb->ifindex, 0) < 0) {
+	long err = bpf_clone_redirect(skb, skb->ifindex, 0);
+	if (err < 0) {
 		return false;
+	}
+	if (err > 0) {
+		bpf_printk("failed to reinject SCTP packet");
 	}
 
 	/* restore the first chunk in its own SCTP packet */
@@ -1133,11 +1170,19 @@ static __always_inline bool reinject_additional_chunks(struct __sk_buff *skb,
 static __always_inline void mark_sctp_tail(struct __sk_buff *skb, const struct
 		egress_transform_info *info)
 {
-	struct bpf_cb_mark_info cbi = {
-		.mark = SCTP_TAIL_REINJECT_MARK,
-		.spx_conn_key.bind_addr = info->local_addr,
-		.spx_conn_key.conn_id = info->local_id
-	};
+	struct bpf_cb_mark_info cbi;
+	cbi.cb[0] = skb->cb[0];
+	cbi.cb[1] = skb->cb[1];
+	cbi.cb[2] = skb->cb[2];
+	cbi.cb[3] = skb->cb[3];
+	cbi.cb[4] = skb->cb[4];
+
+	bpf_printk("reinject depth: %d", cbi.reinject_ctr);
+
+	cbi.mark = SCTP_TAIL_REINJECT_MARK;
+	cbi.spx_conn_key.bind_addr = info->local_addr;
+	cbi.spx_conn_key.conn_id = info->local_id;
+	cbi.reinject_ctr++;
 
 	skb->cb[0] = cbi.cb[0];
 	skb->cb[1] = cbi.cb[1];
@@ -1157,9 +1202,10 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 
 	/* if more than one chunk exists, reinject all but the first chunk into
 	 * the egress path */
-	if (!reinject_additional_chunks(skb, sctph, chunk1, chunk2)) {
+	// TODO: fix reinjection logic, something is amiss here
+	/*if (!reinject_additional_chunks(skb, sctph, chunk1, chunk2)) {
 		return false;
-	}
+	}*/
 
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
@@ -1170,7 +1216,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 		return false;
 	}
 
-	/* we can only handle SACK and DATA chunks right now */
+	/* we can only handle SACK, HEARTBEAT and DATA chunks right now */
 	if (chunk1->type != SCTP_CID_SACK && chunk1->type != SCTP_CID_DATA &&
 			chunk1->type != SCTP_CID_HEARTBEAT) {
 		bpf_printk("unknown chunk type %d", chunk1->type);
@@ -1181,6 +1227,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	size_t padding_bytes = 0;
 	__u8 connection_control = 0;
 	__u8 datastream_type = SPX_DS_NONE;
+	__u16 seq_no = info->local_current_sequence;
 
 	/* SACK chunk */
 	if (chunk1->type == SCTP_CID_SACK) {
@@ -1198,6 +1245,12 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 
 	/* DATA chunk */
 	} else {
+		struct sctp_datahdr *datah = ((void *) chunk1) + sizeof(struct
+				sctp_chunkhdr);
+		if (datah + 1 > data_end) {
+			return false;
+		}
+
 		size_t data_overhead = sizeof(struct sctp_chunkhdr) +
 			sizeof(struct sctp_datahdr);
 		size_t chunk_len = bpf_ntohs(chunk1->length);
@@ -1208,6 +1261,9 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 
 		connection_control = SPX_CC_ACK_REQUIRED;
 		datastream_type = SPX_DS_NONE;
+		__builtin_sub_overflow(bpf_ntohl(datah->tsn),
+				info->local_sequence_offset, &seq_no);
+		bpf_printk("tsn: %u", bpf_ntohl(datah->tsn));
 	}
 
 	/* make room for the new headers */
@@ -1297,7 +1353,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	spxh->datastream_type = datastream_type;
 	spxh->src_conn_id = info->local_id;
 	spxh->dst_conn_id = info->remote_id;
-	spxh->seq_no = bpf_htons(info->local_current_sequence);
+	spxh->seq_no = bpf_htons(seq_no);
 	spxh->ack_no = bpf_htons(info->remote_expected_sequence);
 	spxh->alloc_no = bpf_htons(info->local_alloc_no);
 
@@ -1347,6 +1403,7 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 		.remote_addr = spx_state->remote_addr,
 		.local_id = spx_state->local_id,
 		.remote_id = spx_state->remote_id,
+		.local_sequence_offset = spx_state->local_sequence_offset,
 		.local_current_sequence = 0,
 		.remote_expected_sequence =
 			spx_state->remote_expected_sequence,
@@ -1402,6 +1459,7 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 		.remote_addr = spx_state->remote_addr,
 		.local_id = spx_state->local_id,
 		.remote_id = spx_state->remote_id,
+		.local_sequence_offset = spx_state->local_sequence_offset,
 		.local_current_sequence = spx_state->last_sent_sequence,
 		.remote_expected_sequence =
 			spx_state->remote_expected_sequence,
