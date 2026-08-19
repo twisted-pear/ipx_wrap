@@ -318,6 +318,8 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.sctp_svtag = htonl(0),
 		.sctp_dvtag = htonl(0),
 		.sctp_tsn = 0,
+		.outstanding_heartbeat_len = 0,
+		.heartbeat_buf = { 0 }
 	};
 
 	int err = bpf_map__update_elem(
@@ -479,7 +481,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			.srto_assoc_id = SCTP_FUTURE_ASSOC,
 			.srto_initial = 10,
 			.srto_min = 10,
-			.srto_max = SPX_ABORT_TMO_TICKS * TICKS_MS
+			.srto_max = SPX_KEEP_ALIVE_TMO_TICKS * TICKS_MS
 		};
 		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RTOINFO, &rtoi,
 					sizeof(rtoi)) < 0) {

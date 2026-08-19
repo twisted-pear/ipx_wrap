@@ -303,6 +303,8 @@ enum kspx_connection_state {
 	KSPX_MAX
 };
 
+#define SCTP_MAX_HEARTBEAT_CHUNK_LEN 64
+
 struct bpf_kspx_state {
 	struct bpf_spin_lock lock;
 	enum kspx_connection_state state;
@@ -324,6 +326,8 @@ struct bpf_kspx_state {
 	__be32 sctp_svtag;
 	__be32 sctp_dvtag;
 	__u32 sctp_tsn;
+	__u16 outstanding_heartbeat_len;
+	__u8 heartbeat_buf[SCTP_MAX_HEARTBEAT_CHUNK_LEN];
 };
 
 static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)

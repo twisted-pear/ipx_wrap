@@ -18,6 +18,9 @@
 #define SCTP_STATE_COOKIE_LEN 4
 #define SCTP_RWND_DUMMY 1500
 
+_Static_assert(SCTP_MAX_HEARTBEAT_CHUNK_LEN > sizeof(struct sctp_chunkhdr),
+		"SCTP_MAX_HEARTBEAT_CHUNK_LEN too small");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct spx_conn_key);
