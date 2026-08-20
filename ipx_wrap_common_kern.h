@@ -7,7 +7,6 @@ struct bpf_cb_mark_info {
 		struct {
 			__u32 mark;
 			struct spx_conn_key spx_conn_key;
-			__u16 reinject_ctr;
 		} __attribute__((packed));
 	};
 } __attribute__((packed));

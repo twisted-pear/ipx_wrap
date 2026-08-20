@@ -1,118 +1,8 @@
 #ifndef __IPX_WRAP_MUX_SPX_STATES_H__
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
-#define SCTP_TAIL_REINJECT_MARK 0x47744704
-
-/* scratch space to store the SCTP header and up to one SCTP chunk */
-struct bpf_kspx_scratch {
-	union {
-		__be32 buf[(sizeof(struct sctphdr) / 4) + (SCTP_MAX_CHUNKSIZE /
-				4)];
-		struct {
-			struct sctphdr sctph;
-			struct sctp_chunkhdr chunk1;
-			__u8 data[SCTP_MAX_CHUNKSIZE - sizeof(struct
-					sctp_chunkhdr)];
-		} __attribute__((packed));
-	};
-} __attribute__((packed));
-_Static_assert(sizeof(struct bpf_kspx_scratch) == sizeof(struct sctphdr) +
-		SCTP_MAX_CHUNKSIZE, "bpf_kspx_scratch has invalid size");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, __u32);
-	__type(value, struct bpf_kspx_scratch);
-	__uint(max_entries, 1);
-} ipx_wrap_mux_kspx_egress_scratch SEC(".maps");
-
-/* SCTP chunks are always a multiple of 4 bytes long and so is the header */
-struct sctp_pkt_cpy_loopctx {
-	const __u32 *source;
-	__u32 *target;
-	size_t len;
-	const void *source_end;
-	const void *target_end;
-};
-
-static long sctp_pkt_cpy_loopfn(__u64 index, void *ctx)
-{
-	struct sctp_pkt_cpy_loopctx *c = ctx;
-	if (index >= c->len) {
-		return 1;
-	}
-
-	const __u32 *src = c->source + index;
-	if (src + 1 > c->source_end) {
-		return 1;
-	}
-
-	__u32 *dst = c->target + index;
-	if (dst + 1 > c->target_end) {
-		return 1;
-	}
-
-	*dst = *src;
-
-	return 0;
-}
-
-static __always_inline bool sctp_pkt_cpy(struct sctphdr *dst, const struct
-		sctphdr *src, size_t len, const void *dst_end, const void
-		*src_end)
-{
-	if (len % 4 != 0) {
-		return false;
-	}
-
-	struct sctp_pkt_cpy_loopctx ctx = {
-		.source = (const __u32 *) src,
-		.target = (__u32 *) dst,
-		.len = len / 4,
-		.source_end = src_end,
-		.target_end = dst_end
-	};
-
-	long nloops = bpf_loop(len / 4, &sctp_pkt_cpy_loopfn, &ctx, 0);
-	if (nloops != len / 4) {
-		return false;
-	}
-
-	return true;
-}
-
-static __always_inline bool fill_conn_key(struct __sk_buff *skb, struct
-		spx_conn_key *conn_key)
-{
-	struct bpf_cb_mark_info cbi;
-	cbi.cb[0] = skb->cb[0];
-	cbi.cb[1] = skb->cb[1];
-	cbi.cb[2] = skb->cb[2];
-	cbi.cb[3] = skb->cb[3];
-	cbi.cb[4] = skb->cb[4];
-
-	/* Check if this is the tail end of an already handled SCTP packet. In
-	 * this case the socket association is lost and we need to look up the
-	 * connection key from the CB */
-	if (cbi.mark == SCTP_TAIL_REINJECT_MARK) {
-		*conn_key = cbi.spx_conn_key;
-		return true;
-	}
-
-	struct bpf_sock *client_sock = skb->sk;
-	if (client_sock == NULL) {
-		return false;
-	}
-
-	struct spx_conn_key *sock_conn_key = bpf_sk_storage_get(
-			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0);
-	if (sock_conn_key == NULL) {
-		return false;
-	}
-
-	*conn_key = *sock_conn_key;
-	return true;
-}
+#define SCTP_HEAD_REINJECT_MARK 0x47744704
+#define SCTP_MAX_CHUNKS 16
 
 static __always_inline bool get_ingress_pointers(struct __sk_buff *skb, struct
 		ethhdr **eth, struct ipv6hdr **ip6h, struct udphdr **udph,
@@ -158,6 +48,142 @@ static __always_inline bool get_egress_pointers(struct __sk_buff *skb, struct
 	*chunk2 = NULL;
 	parse_sctp_chunk(&cur, *data_end, chunk2);
 
+	return true;
+}
+
+static __always_inline bool is_reinjected(struct __sk_buff *skb)
+{
+	__u32 cb_mark = ((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark;
+	return (cb_mark == SCTP_HEAD_REINJECT_MARK);
+}
+
+static __always_inline void mark_reinjected(struct __sk_buff *skb, const struct
+		spx_conn_key *conn_key)
+{
+	struct bpf_cb_mark_info cbi;
+	cbi.cb[0] = skb->cb[0];
+	cbi.cb[1] = skb->cb[1];
+	cbi.cb[2] = skb->cb[2];
+	cbi.cb[3] = skb->cb[3];
+	cbi.cb[4] = skb->cb[4];
+
+	cbi.mark = SCTP_HEAD_REINJECT_MARK;
+	cbi.spx_conn_key.bind_addr = conn_key->bind_addr;
+	cbi.spx_conn_key.conn_id = conn_key->conn_id;
+
+	skb->cb[0] = cbi.cb[0];
+	skb->cb[1] = cbi.cb[1];
+	skb->cb[2] = cbi.cb[2];
+	skb->cb[3] = cbi.cb[3];
+	skb->cb[4] = cbi.cb[4];
+}
+
+static __always_inline bool flatten_sctp(struct __sk_buff *skb, struct
+		spx_conn_key *conn_key)
+{
+	struct ethhdr *eth;
+	struct ipv6hdr *ip6h;
+	struct sctphdr *sctph;
+	struct sctp_chunkhdr *chunk1;
+	struct sctp_chunkhdr *chunk2;
+	void *data_end;
+	if (!get_egress_pointers(skb, &eth, &ip6h, &sctph, &chunk1, &chunk2,
+				&data_end)) {
+		return false;
+	}
+
+	/* only have one chunk, nothing to do */
+	if (chunk2 == NULL) {
+		return true;
+	}
+
+	/* packet was already copied and reinjected, delete all but the first
+	 * chunk */
+	if (is_reinjected(skb)) {
+		size_t tail_len = data_end - ((void *) chunk2);
+		size_t payload_len = bpf_ntohs(ip6h->payload_len) - tail_len;
+		ip6h->payload_len = bpf_htons(payload_len);
+		if (bpf_skb_change_tail(skb, skb->len - tail_len, 0) < 0) {
+			return false;
+		}
+		return true;
+	}
+
+	/* we have a new multi-chunk packet */
+
+	/* mark it for reinjection */
+	mark_reinjected(skb, conn_key);
+
+	/* save away the SCTP header */
+	struct sctphdr sctph_backup;
+	__builtin_memcpy(&sctph_backup, sctph, sizeof(struct sctphdr));
+
+	/* for every chunk but the last one, we reinject the packet and then
+	 * remove the first chunk */
+	int i;
+	for (i = 0; i < SCTP_MAX_CHUNKS && chunk2 != NULL; i++) {
+		size_t payload_len = bpf_ntohs(ip6h->payload_len);
+		__s32 len_diff = ((void *) chunk2) - ((void *) chunk1);
+
+		/* clone the full packet, the code above will cut away
+		 * everything but the first chunk */
+		if (bpf_clone_redirect(skb, skb->ifindex, 0) != 0) {
+			return false;
+		}
+
+		/* remove the first chunk */
+		if (bpf_skb_adjust_room(skb, -len_diff, BPF_ADJ_ROOM_NET, 0) <
+				0) {
+			return false;
+		}
+
+		/* restore our pointers */
+		bpf_skb_pull_data(skb, 0);
+		if (!get_egress_pointers(skb, &eth, &ip6h, &sctph, &chunk1,
+					&chunk2, &data_end)) {
+			return false;
+		}
+
+		/* restore the SCTP header */
+		__builtin_memcpy(sctph, &sctph_backup, sizeof(struct sctphdr));
+
+		/* adjust the payload length */
+		ip6h->payload_len = bpf_htons(payload_len - len_diff);
+	}
+
+	return true;
+}
+
+static __always_inline bool fill_conn_key(struct __sk_buff *skb, struct
+		spx_conn_key *conn_key)
+{
+	struct bpf_cb_mark_info cbi;
+	cbi.cb[0] = skb->cb[0];
+	cbi.cb[1] = skb->cb[1];
+	cbi.cb[2] = skb->cb[2];
+	cbi.cb[3] = skb->cb[3];
+	cbi.cb[4] = skb->cb[4];
+
+	/* Check if this is the tail end of an already handled SCTP packet. In
+	 * this case the socket association is lost and we need to look up the
+	 * connection key from the CB */
+	if (cbi.mark == SCTP_HEAD_REINJECT_MARK) {
+		*conn_key = cbi.spx_conn_key;
+		return true;
+	}
+
+	struct bpf_sock *client_sock = skb->sk;
+	if (client_sock == NULL) {
+		return false;
+	}
+
+	struct spx_conn_key *sock_conn_key = bpf_sk_storage_get(
+			&ipx_wrap_mux_kspx_sock_key, client_sock, NULL, 0);
+	if (sock_conn_key == NULL) {
+		return false;
+	}
+
+	*conn_key = *sock_conn_key;
 	return true;
 }
 
@@ -234,6 +260,33 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 		return TC_ACT_SHOT; \
 	} \
 	\
+	/* we can only deal with one chunk at a time */ \
+	if (!flatten_sctp(skb, &conn_key)) { \
+		bpf_printk("%s: shot, failed to flatten SCTP packet", \
+				__func__); \
+		return TC_ACT_SHOT; \
+	} \
+	bpf_skb_pull_data(skb, 0); \
+	\
+	struct ethhdr *eth; \
+	struct ipv6hdr *ip6h; \
+	struct sctphdr *sctph; \
+	struct sctp_chunkhdr *chunk1; \
+	struct sctp_chunkhdr *chunk2; \
+	void *data_end; \
+	if (!get_egress_pointers(skb, &eth, &ip6h, &sctph, &chunk1, &chunk2, \
+				&data_end)) { \
+		bpf_printk("%s: shot, failed to get pointers", __func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
+	/* something went wrong with flattening the packet */ \
+	if (chunk2 != NULL) { \
+		bpf_printk("%s: shot, failed to flatten SCTP packet " \
+				"(this is a BUG!)", __func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
 	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
 		/* SPX connection is already closed, the conn_key is stale */ \
@@ -247,19 +300,6 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 		 * tail-call is called. There is nothing we can do here. */ \
 		put_kspx_state(spx_state); \
 		bpf_printk("%s: shot, unexpected state", __func__); \
-		return TC_ACT_SHOT; \
-	} \
-	\
-	struct ethhdr *eth; \
-	struct ipv6hdr *ip6h; \
-	struct sctphdr *sctph; \
-	struct sctp_chunkhdr *chunk1; \
-	struct sctp_chunkhdr *chunk2; \
-	void *data_end; \
-	if (!get_egress_pointers(skb, &eth, &ip6h, &sctph, &chunk1, &chunk2, \
-				&data_end)) { \
-		put_kspx_state(spx_state); \
-		bpf_printk("%s: shot, failed to get pointers", __func__); \
 		return TC_ACT_SHOT; \
 	}
 
@@ -711,15 +751,9 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 
 static __always_inline bool admit_egress_NEW(const struct bpf_kspx_state
 		*spx_state, const struct sctphdr *sctph, const struct
-		sctp_chunkhdr *chunk1, const struct sctp_chunkhdr *chunk2, void
-		*data_end)
+		sctp_chunkhdr *chunk1, void *data_end)
 {
 	if (chunk1 + 1 > data_end) {
-		return false;
-	}
-
-	/* only one chunk allowed in this state */
-	if (chunk2 != NULL) {
 		return false;
 	}
 
@@ -950,20 +984,13 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 
 static __always_inline bool admit_egress_ESTABLISHED(const struct
 		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
-		struct sctp_chunkhdr *chunk1, const struct sctp_chunkhdr
-		*chunk2, void *data_end)
+		struct sctp_chunkhdr *chunk1, void *data_end)
 {
 	if (sctph->source != spx_state->sctp_dport || sctph->dest !=
 			spx_state->sctp_sport) {
 		return false;
 	}
 	if (sctph->vtag != spx_state->sctp_svtag) {
-		return false;
-	}
-
-	/* this is not allowed */
-	if (chunk1->type == SCTP_CID_DATA && chunk2 != NULL && chunk2->type !=
-			SCTP_CID_DATA) {
 		return false;
 	}
 
@@ -1064,149 +1091,10 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 	return true;
 }
 
-static __always_inline bool reinject_additional_chunks(struct __sk_buff *skb,
-		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, struct
-		sctp_chunkhdr *chunk2)
-{
-	__u32 scratch_key = 0;
-	struct bpf_kspx_scratch *scratch = bpf_map_lookup_elem(
-			&ipx_wrap_mux_kspx_egress_scratch, &scratch_key);
-	if (scratch == NULL) {
-		return false;
-	}
-
-	/* only one chunk, nothing to do */
-	if (chunk2 == NULL) {
-		return true;
-	}
-
-	/* determine the size of the chunk */
-	size_t chunk1_len = ((void *) chunk2) - ((void *) chunk1);
-	if (chunk1_len > SCTP_MAX_CHUNKSIZE) {
-		return false;
-	}
-
-	void *data_end = (void *)(long)skb->data_end;
-	if (((void *) chunk1) + chunk1_len > data_end) {
-		return false;
-	}
-
-	/* save SCTP header and first chunk away */
-	void *map_end = ((void *) scratch) + sizeof(struct bpf_kspx_scratch);
-	if (!sctp_pkt_cpy(&(scratch->sctph), sctph, sizeof(struct sctphdr) +
-				chunk1_len, map_end, data_end)) {
-		return false;
-	}
-
-	/* remove the first chunk from the packet */
-	if (bpf_skb_adjust_room(skb, -chunk1_len, BPF_ADJ_ROOM_NET, 0) < 0) {
-		return false;
-	}
-	bpf_skb_pull_data(skb, 0);
-
-	/* adjust pointers and reverify */
-	data_end = (void *)(long)skb->data_end;
-	void *data = (void *)(long)skb->data;
-
-	struct ethhdr *eth = data;
-	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
-	sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
-	if (sctph + 1 > data_end) {
-		return false;
-	}
-
-	/* restore the SCTP header */
-	__builtin_memcpy(sctph, &(scratch->sctph), sizeof(struct sctphdr));
-
-	/* adjust the IPv6 header */
-	size_t payload_len = bpf_ntohs(ip6h->payload_len) - chunk1_len;
-	ip6h->payload_len = bpf_htons(payload_len);
-
-	/* reinject the modifed packet with the subsequent chunks */
-	long err = bpf_clone_redirect(skb, skb->ifindex, 0);
-	if (err < 0) {
-		return false;
-	}
-	if (err > 0) {
-		bpf_printk("failed to reinject SCTP packet");
-	}
-
-	/* restore the first chunk in its own SCTP packet */
-	size_t common_headers_len = sizeof(struct ethhdr) + sizeof(struct
-			ipv6hdr) + sizeof(struct sctphdr);
-	size_t len_diff = chunk1_len - (skb->len - common_headers_len);
-	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
-		return false;
-	}
-	bpf_skb_pull_data(skb, 0);
-
-	/* adjust pointers and reverify */
-	data_end = (void *)(long)skb->data_end;
-	data = (void *)(long)skb->data;
-
-	eth = data;
-	ip6h = ((void *) eth) + sizeof(struct ethhdr);
-	if (ip6h + 1 > data_end) {
-		return false;
-	}
-	sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
-	chunk1 = ((void *) sctph) + sizeof(struct sctphdr);
-	if (((void *) chunk1) + chunk1_len > data_end) {
-		return false;
-	}
-
-	/* copy back the first chunk and the original SCTP header */
-	if (!sctp_pkt_cpy(sctph, &(scratch->sctph), sizeof(struct sctphdr) +
-				chunk1_len, data_end, map_end)) {
-		return false;
-	}
-
-	/* adjust the IPv6 header */
-	ip6h->payload_len = bpf_htons(chunk1_len + sizeof(struct sctphdr));
-
-	return true;
-}
-
-static __always_inline void mark_sctp_tail(struct __sk_buff *skb, const struct
-		egress_transform_info *info)
-{
-	struct bpf_cb_mark_info cbi;
-	cbi.cb[0] = skb->cb[0];
-	cbi.cb[1] = skb->cb[1];
-	cbi.cb[2] = skb->cb[2];
-	cbi.cb[3] = skb->cb[3];
-	cbi.cb[4] = skb->cb[4];
-
-	bpf_printk("reinject depth: %d", cbi.reinject_ctr);
-
-	cbi.mark = SCTP_TAIL_REINJECT_MARK;
-	cbi.spx_conn_key.bind_addr = info->local_addr;
-	cbi.spx_conn_key.conn_id = info->local_id;
-	cbi.reinject_ctr++;
-
-	skb->cb[0] = cbi.cb[0];
-	skb->cb[1] = cbi.cb[1];
-	skb->cb[2] = cbi.cb[2];
-	skb->cb[3] = cbi.cb[3];
-	skb->cb[4] = cbi.cb[4];
-}
-
 static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
-		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, struct
-		sctp_chunkhdr *chunk2, const struct egress_transform_info
-		*info)
+		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, const
+		struct egress_transform_info *info)
 {
-	/* mark the SKB, so that when we reinject a copy of it, we can find the
-	 * SPX state again */
-	mark_sctp_tail(skb, info);
-
-	/* if more than one chunk exists, reinject all but the first chunk into
-	 * the egress path */
-	// TODO: fix reinjection logic, something is amiss here
-	/*if (!reinject_additional_chunks(skb, sctph, chunk1, chunk2)) {
-		return false;
-	}*/
-
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
 	struct ipv6hdr *ip6h = data + sizeof(struct ethhdr);
@@ -1387,7 +1275,7 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 
 	ENTER_EGRESS(KSPX_NEW);
 
-	if (!admit_egress_NEW(spx_state, sctph, chunk1, chunk2, data_end)) {
+	if (!admit_egress_NEW(spx_state, sctph, chunk1, data_end)) {
 		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
 	}
 
@@ -1442,8 +1330,7 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 {
 	ENTER_EGRESS(KSPX_ESTABLISHED);
 
-	if (!admit_egress_ESTABLISHED(spx_state, sctph, chunk1, chunk2,
-				data_end)) {
+	if (!admit_egress_ESTABLISHED(spx_state, sctph, chunk1, data_end)) {
 		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
 	}
 
@@ -1470,9 +1357,8 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 	};
 	put_kspx_state(spx_state);
 
-	if (!transform_egress_ESTABLISHED(skb, sctph, chunk1, chunk2, &info)) {
-		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT,
-				"transformation failed");
+	if (!transform_egress_ESTABLISHED(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
 	}
 	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
 }
