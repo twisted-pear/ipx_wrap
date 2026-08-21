@@ -567,13 +567,12 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		__builtin_add_overflow(info->local_sequence_offset,
 				info->local_current_sequence,
 				&prev_cum_tsn_ack);
-		// TODO: fix this condition
-		/*if (spx_seq_less_than(spx_ack, info->local_current_sequence) &&
-				sctp_tsn_less_than(cum_tsn_ack,
-					prev_cum_tsn_ack)) {
+		if (spx_seq_less_than(spx_ack, info->local_current_sequence) &&
+				sctp_tsn_less_than(prev_cum_tsn_ack,
+				cum_tsn_ack)) {
 			__builtin_sub_overflow(cum_tsn_ack, 0x10000,
 					&cum_tsn_ack);
-		}*/
+		}
 		sack->cum_tsn_ack = bpf_htonl(cum_tsn_ack);
 		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 		sack->num_gap_ack_blocks = bpf_htons(0);
