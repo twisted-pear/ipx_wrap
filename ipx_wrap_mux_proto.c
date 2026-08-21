@@ -661,7 +661,6 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 			break;
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
-		case IPXW_MUX_SPX_GET_SEQPKT:
 			msgh.msg_control = ctrl_msg.buf;
 			msgh.msg_controllen = sizeof(ctrl_msg.buf);
 
@@ -756,33 +755,6 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		case IPXW_MUX_GETSOCKNAME:
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
-		case IPXW_MUX_SPX_GET_SEQPKT_ERR:
-			break;
-		case IPXW_MUX_SPX_GET_SEQPKT_ACK:
-			/* receive the KCM SOCK FD */
-
-			/* get ctrl msg */
-			struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
-
-			/* validate ctrl msg */
-			if (cmsgp == NULL) {
-				errno = EINVAL;
-				return -1;
-			}
-			if (cmsgp->cmsg_len != CMSG_LEN(sizeof(int))) {
-				errno = EINVAL;
-				return -1;
-			}
-			if (cmsgp->cmsg_level != SOL_SOCKET || cmsgp->cmsg_type
-					!= SCM_RIGHTS) {
-				errno = EINVAL;
-				return -1;
-			}
-
-			/* retrive FD */
-			memcpy(&(conf_out->spx_get_seqpkt.sock),
-					CMSG_DATA(cmsgp), sizeof(int));
-
 			break;
 		default:
 			errno = EOPNOTSUPP;
@@ -1541,7 +1513,6 @@ ssize_t ipxw_mux_peek_conf_len(int conf_sock)
 			case IPXW_MUX_SPX_CONNECT:
 			case IPXW_MUX_SPX_ACCEPT:
 			case IPXW_MUX_SPX_CLOSE:
-			case IPXW_MUX_SPX_GET_SEQPKT:
 				return sizeof(msg);
 			default:
 				break;
@@ -1625,7 +1596,6 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 			break;
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
-		case IPXW_MUX_SPX_GET_SEQPKT:
 			/* get ctrl msg */
 			struct cmsghdr *cmsgp = CMSG_FIRSTHDR(&msgh);
 
@@ -1693,10 +1663,6 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, struct ipxw_mux_msg *msg, int
 		case IPXW_MUX_GETSOCKNAME:
 		case IPXW_MUX_SPX_CONNECT:
 		case IPXW_MUX_SPX_ACCEPT:
-		case IPXW_MUX_SPX_GET_SEQPKT_ERR:
-			break;
-		case IPXW_MUX_SPX_GET_SEQPKT_ACK:
-			*transmitted_fd = msg->spx_get_seqpkt.sock;
 			break;
 		default:
 			errno = ENOTSUP;

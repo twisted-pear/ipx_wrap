@@ -534,11 +534,4 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 	return TC_ACT_SHOT;
 }
 
-SEC("socket")
-int ipx_wrap_spx_kcm(struct __sk_buff *skb)
-{
-	bpf_printk("kcm: %d bytes", skb->len);
-	return skb->len;
-}
-
 char _license[] SEC("license") = "GPL";

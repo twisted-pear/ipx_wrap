@@ -25,9 +25,6 @@ enum ipxw_mux_msg_type {
 	IPXW_MUX_SPX_CONNECT,
 	IPXW_MUX_SPX_ACCEPT,
 	IPXW_MUX_SPX_CLOSE,
-	IPXW_MUX_SPX_GET_SEQPKT_ACK,
-	IPXW_MUX_SPX_GET_SEQPKT_ERR,
-	IPXW_MUX_SPX_GET_SEQPKT,
 	IPXW_MUX_XMIT,
 	IPXW_MUX_RECV,
 	IPXW_MUX_MAX
@@ -111,15 +108,6 @@ struct ipxw_mux_msg_spx_accept {
 	__be16 conn_id;
 } __attribute__((packed));
 
-struct ipxw_mux_msg_spx_get_seqpkt {
-	struct ipx_addr reserved;
-	union {
-		int sock; /* TCP on request, KCM on ACK */
-		__u32 err;
-	};
-	__be16 conn_id;
-} __attribute__((packed));
-
 struct ipxw_mux_msg_spx_close {
 	__be16 conn_id;
 } __attribute__((packed));
@@ -138,8 +126,6 @@ struct ipxw_mux_msg {
 				struct ipxw_mux_msg_spx_connect spx_connect;
 				struct ipxw_mux_msg_spx_accept spx_accept;
 				struct ipxw_mux_msg_spx_close spx_close;
-				struct ipxw_mux_msg_spx_get_seqpkt
-					spx_get_seqpkt;
 				struct ipxw_mux_msg_xmit xmit;
 				struct ipxw_mux_msg_recv recv;
 			};
