@@ -305,6 +305,11 @@ static __always_inline bool flatten_sctp(struct __sk_buff *skb, struct
 		ip6h->payload_len = bpf_htons(payload_len - len_diff);
 	}
 
+	/* too many chunks were in the packet, fail */
+	if (chunk2 != NULL) {
+		return false;
+	}
+
 	return true;
 }
 
