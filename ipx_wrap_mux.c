@@ -448,9 +448,9 @@ static bool record_spx_conn(struct bind_entry *e, struct
 
 		struct sctp_rtoinfo rtoi = {
 			.srto_assoc_id = SCTP_FUTURE_ASSOC,
-			.srto_initial = 10,
-			.srto_min = 10,
-			.srto_max = SPX_KEEP_ALIVE_TMO_TICKS * TICKS_MS
+			.srto_initial =  SPX_VERIFY_TMO_TICKS * TICKS_MS,
+			.srto_min = SPX_KEEP_ALIVE_TMO_TICKS * TICKS_MS,
+			.srto_max = SPX_ABORT_TMO_TICKS * TICKS_MS
 		};
 		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RTOINFO, &rtoi,
 					sizeof(rtoi)) < 0) {
