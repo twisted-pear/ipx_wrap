@@ -1,6 +1,8 @@
 #ifndef __IPX_WRAP_MUX_SPX_STATES_H__
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
+// TODO: always support ABORT chunks
+
 static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 		spx_conn_key *key)
 {
@@ -207,6 +209,10 @@ static __always_inline void update_state_ingress_NEW(struct bpf_kspx_state
 {
 	spx_state->remote_id = spxh->src_conn_id;
 	spx_state->remote_alloc_no = spxh->alloc_no;
+
+	/* once we have a correct SPX conn ack, we can deal with the SCTP
+	 * cookie */
+	spx_state->state = KSPX_CONN_ACK_RCVD;
 }
 
 static __always_inline bool transform_ingress_NEW(struct __sk_buff *skb, struct
@@ -293,6 +299,29 @@ _Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval),
 	sctph->checksum = bpf_htonl(csum);
 
 	return true;
+}
+
+static __always_inline bool admit_ingress_CONN_ACK_RCVD(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* we only allow packets from the SCTP side here */
+	return false;
+}
+
+static __always_inline void update_state_ingress_CONN_ACK_RCVD(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* we should never reach this point */
+}
+
+static __always_inline bool transform_ingress_CONN_ACK_RCVD(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	/* we should never reach this point */
+	return false;
 }
 
 static __always_inline bool admit_ingress_ESTABLISHED(const struct
@@ -597,41 +626,18 @@ static __always_inline bool admit_egress_NEW(const struct bpf_kspx_state
 		return false;
 	}
 
-	/* allow the init chunk */
-	if (chunk1->type == SCTP_CID_INIT) {
-		if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_inithdr)) {
-			return false;
-		}
-		const struct sctp_inithdr *inith = (const struct sctp_inithdr
-				*) (chunk1 + 1);
-		if (inith + 1 > data_end) {
-			return false;
-		}
-
-		return true;
-	}
-
-	/* otherwise only a correct cookie echo is allowed (we do not check the
-	 * cookie though) */
-	if (chunk1->type != SCTP_CID_COOKIE_ECHO) {
-		return false;
-	}
-
-	if (sctph->source != spx_state->sctp_dport || sctph->dest !=
-			spx_state->sctp_sport) {
-		return false;
-	}
-	if (sctph->vtag != spx_state->sctp_svtag) {
+	/* allow only the init chunk */
+	if (chunk1->type != SCTP_CID_INIT) {
 		return false;
 	}
 
 	if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
-			SCTP_STATE_COOKIE_LEN) {
+			sizeof(struct sctp_inithdr)) {
 		return false;
 	}
-	const __u8 *cookie = (const __u8 *) (chunk1 + 1);
-	if (cookie + SCTP_STATE_COOKIE_LEN > data_end) {
+	const struct sctp_inithdr *inith = (const struct sctp_inithdr *)
+		(chunk1 + 1);
+	if (inith + 1 > data_end) {
 		return false;
 	}
 
@@ -648,89 +654,20 @@ static __always_inline bool update_state_egress_NEW(struct bpf_kspx_state
 		initial_source_vtag)
 {
 	/* have an INIT */
-	if (chunk1->type == SCTP_CID_INIT) {
-		const struct sctp_inithdr *inith = (const struct sctp_inithdr
-				*) (chunk1 + 1);
-		if (inith + 1 > data_end) {
-			return false;
-		}
-
-		__be32 initial_vtag = inith->init_tag;
-		__u32 initial_tsn = bpf_ntohl(inith->initial_tsn);
-
-		spx_state->sctp_dvtag = initial_vtag;
-		spx_state->sctp_svtag = bpf_htonl(initial_source_vtag);
-		spx_state->sctp_sport = sctph->dest;
-		spx_state->sctp_dport = sctph->source;
-		spx_state->local_sequence_offset = initial_tsn;
-
-		return true;
-	}
-
-	/* once we have the cookie echo, we are established */
-	spx_state->state = KSPX_ESTABLISHED;
-
-	return true;
-}
-
-static __always_inline bool transform_egress_NEW_cookie(struct __sk_buff *skb,
-		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, const
-		struct egress_transform_info *info)
-{
-	void *data_end = (void *)(long)skb->data_end;
-	void *data = (void *)(long)skb->data;
-
-	struct ethhdr *eth = data;
-	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
-	if (ip6h + 1 > data_end) {
+	const struct sctp_inithdr *inith = (const struct sctp_inithdr
+			*) (chunk1 + 1);
+	if (inith + 1 > data_end) {
 		return false;
 	}
 
-	/* swap Ethernet addrs */
-	__u8 eth_dest_backup[ETH_ALEN];
-	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
-	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+	__be32 initial_vtag = inith->init_tag;
+	__u32 initial_tsn = bpf_ntohl(inith->initial_tsn);
 
-	/* swap the IPv6 addrs */
-	struct in6_addr ip6_dest_backup;
-	__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr), sizeof(struct
-				in6_addr));
-	__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
-				in6_addr));
-	__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup, sizeof(struct
-				in6_addr));
-
-	/* adjust the payload length */
-	size_t payload_len = sizeof(struct sctphdr) + sizeof(struct
-			sctp_chunkhdr);
-	ip6h->payload_len = bpf_htons(payload_len);
-
-	/* create the SCTP cookie ack */
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->vtag = info->sctp_dvtag;
-	sctph->checksum = bpf_htonl(0);
-	chunk1->type = SCTP_CID_COOKIE_ACK;
-	chunk1->flags = 0;
-	chunk1->length = bpf_htons(sizeof(struct sctp_chunkhdr));
-
-	/* calculate CRC32c checksum */
-	__u32 csum = 0;
-	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
-		return false;
-	}
-	sctph->checksum = bpf_htonl(csum);
-
-	if (bpf_skb_change_tail(skb, payload_len + sizeof(struct ipv6hdr) +
-				sizeof(struct ethhdr), 0) < 0) {
-		return false;
-	}
-
-	/* mark the packet for reinjection so that the interface
-	 * program accepts it */
-	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
-		SPX_TO_SCTP_REINJECT_MARK;
+	spx_state->sctp_dvtag = initial_vtag;
+	spx_state->sctp_svtag = bpf_htonl(initial_source_vtag);
+	spx_state->sctp_sport = sctph->dest;
+	spx_state->sctp_dport = sctph->source;
+	spx_state->local_sequence_offset = initial_tsn;
 
 	return true;
 }
@@ -818,6 +755,116 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 	spxh->seq_no = bpf_htons(0);
 	spxh->ack_no = bpf_htons(info->remote_expected_sequence);
 	spxh->alloc_no = bpf_htons(info->local_alloc_no);
+
+	return true;
+}
+
+static __always_inline bool admit_egress_CONN_ACK_RCVD(const struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	if (chunk1 + 1 > data_end) {
+		return false;
+	}
+
+	/* only a correct cookie echo is allowed (we do not check the cookie
+	 * though) */
+	if (chunk1->type != SCTP_CID_COOKIE_ECHO) {
+		return false;
+	}
+
+	if (sctph->source != spx_state->sctp_dport || sctph->dest !=
+			spx_state->sctp_sport) {
+		return false;
+	}
+	if (sctph->vtag != spx_state->sctp_svtag) {
+		return false;
+	}
+
+	if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
+			SCTP_STATE_COOKIE_LEN) {
+		return false;
+	}
+	const __u8 *cookie = (const __u8 *) (chunk1 + 1);
+	if (cookie + SCTP_STATE_COOKIE_LEN > data_end) {
+		return false;
+	}
+
+	return true;
+}
+
+/* Note that while it can, this function should never return false. If it does,
+ * there is a bug in the admit function, which should already check if the
+ * packet contains all the info we need. The return value here exists only to
+ * satisfy the verifier. */
+static __always_inline bool update_state_egress_CONN_ACK_RCVD(struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	/* once we have the cookie echo, we are established */
+	spx_state->state = KSPX_ESTABLISHED;
+
+	return true;
+}
+
+static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
+		*skb, struct sctphdr *sctph, struct sctp_chunkhdr *chunk1,
+		const struct egress_transform_info *info)
+{
+	void *data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	struct ethhdr *eth = data;
+	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	if (ip6h + 1 > data_end) {
+		return false;
+	}
+
+	/* swap Ethernet addrs */
+	__u8 eth_dest_backup[ETH_ALEN];
+	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+
+	/* swap the IPv6 addrs */
+	struct in6_addr ip6_dest_backup;
+	__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr), sizeof(struct
+				in6_addr));
+	__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
+				in6_addr));
+	__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup, sizeof(struct
+				in6_addr));
+
+	/* adjust the payload length */
+	size_t payload_len = sizeof(struct sctphdr) + sizeof(struct
+			sctp_chunkhdr);
+	ip6h->payload_len = bpf_htons(payload_len);
+
+	/* create the SCTP cookie ack */
+	sctph->source = info->sctp_sport;
+	sctph->dest = info->sctp_dport;
+	sctph->vtag = info->sctp_dvtag;
+	sctph->checksum = bpf_htonl(0);
+	chunk1->type = SCTP_CID_COOKIE_ACK;
+	chunk1->flags = 0;
+	chunk1->length = bpf_htons(sizeof(struct sctp_chunkhdr));
+
+	/* calculate CRC32c checksum */
+	__u32 csum = 0;
+	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
+		return false;
+	}
+	sctph->checksum = bpf_htonl(csum);
+
+	if (bpf_skb_change_tail(skb, payload_len + sizeof(struct ipv6hdr) +
+				sizeof(struct ethhdr), 0) < 0) {
+		return false;
+	}
+
+	/* mark the packet for reinjection so that the interface
+	 * program accepts it */
+	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
+		SPX_TO_SCTP_REINJECT_MARK;
 
 	return true;
 }
@@ -1154,16 +1201,53 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 	put_kspx_state(spx_state);
 
 	/* init chunk */
-	if (chunk1->type == SCTP_CID_INIT) {
-		if (!transform_egress_NEW(skb, sctph, chunk1, &info)) {
-			EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT,
-					"transformation failed");
-		}
-		EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
+	if (!transform_egress_NEW(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT,
+				"transformation failed");
+	}
+	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
+}
+
+SEC("tc/ingress")
+int kspx_state_ingress_CONN_ACK_RCVD(struct __sk_buff *skb)
+{
+	GENERIC_INGRESS(CONN_ACK_RCVD);
+}
+
+SEC("tc/egress")
+int kspx_state_egress_CONN_ACK_RCVD(struct __sk_buff *skb)
+{
+	ENTER_EGRESS(KSPX_CONN_ACK_RCVD);
+
+	if (!admit_egress_CONN_ACK_RCVD(spx_state, sctph, chunk1, data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
 	}
 
+	if (!update_state_egress_CONN_ACK_RCVD(spx_state, sctph, chunk1,
+				data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT,
+				"state update failed (this is a BUG!)");
+	}
+
+	struct egress_transform_info info = {
+		.prefix = spx_state->prefix,
+		.local_addr = spx_state->local_addr,
+		.remote_addr = spx_state->remote_addr,
+		.local_id = spx_state->local_id,
+		.remote_id = spx_state->remote_id,
+		.local_sequence_offset = spx_state->local_sequence_offset,
+		.local_current_sequence = spx_state->last_sent_sequence,
+		.remote_expected_sequence =
+			spx_state->remote_expected_sequence,
+		.local_alloc_no = spx_state->local_alloc_no,
+		.sctp_sport = spx_state->sctp_sport,
+		.sctp_dport = spx_state->sctp_dport,
+		.sctp_dvtag = spx_state->sctp_dvtag
+	};
+	put_kspx_state(spx_state);
+
 	/* cookie echo chunk */
-	if (!transform_egress_NEW_cookie(skb, sctph, chunk1, &info)) {
+	if (!transform_egress_CONN_ACK_RCVD(skb, sctph, chunk1, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
 	}
 	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
