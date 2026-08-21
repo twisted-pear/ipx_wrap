@@ -16,11 +16,16 @@
 #define TC_ACT_SHOT 2
 
 #define SCTP_STATE_COOKIE_LEN 4
+#define SCTP_HEARTBEAT_PARAM_LEN 4
 #define SCTP_RWND_DUMMY 1500
 
 #define SCTP_HEAD_REINJECT_MARK 0x47744704
 #define SCTP_MAX_CHUNKS 16
 
+_Static_assert(SCTP_STATE_COOKIE_LEN % 4 == 0,
+		"SCTP_STATE_COOKIE_LEN not a multiple of 4");
+_Static_assert(SCTP_HEARTBEAT_PARAM_LEN % 4 == 0,
+		"SCTP_HEARTBEAT_PARAM_LEN not a multiple of 4");
 _Static_assert(SCTP_MAX_HEARTBEAT_CHUNK_LEN > sizeof(struct sctp_chunkhdr),
 		"SCTP_MAX_HEARTBEAT_CHUNK_LEN too small");
 

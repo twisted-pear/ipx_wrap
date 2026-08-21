@@ -359,6 +359,23 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	size_t sctp_padding_bytes = 0;
 	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
 
+	/* if the SPX peer requested an ACK on a system packet, we turn this
+	 * into a heartbeat chunk */
+	bool heartbeat_requested = ((spxh->connection_control &
+				SPX_CC_SYSTEM_PKT) != 0) &&
+		((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0);
+	size_t hb_ofs = 0;
+	size_t hb_len = 0;
+	if (heartbeat_requested) {
+		hb_ofs = sctp_len;
+
+		hb_len = sizeof(struct sctp_chunkhdr) + sizeof(struct
+				sctp_paramhdr) + SCTP_HEARTBEAT_PARAM_LEN;
+
+		sctp_len += hb_len;
+		chunk_start_ofs += hb_len;
+	}
+
 	/* also insert a HEARTBEAT_ACK chunk, if necessary */
 	size_t hb_ack_ofs = 0;
 	if (info->outstanding_heartbeat_len != 0) {
@@ -429,6 +446,35 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	sctph->dest = info->sctp_dport;
 	sctph->checksum = bpf_htonl(0);
 
+	/* fill in the HEARTBEAT chunk if necessary */
+	if (heartbeat_requested) {
+		/* FIXME: this exists solely to appease the verifier */
+		if (hb_ofs > SCTP_MAX_CHUNKSIZE) {
+		}
+
+		if (((void *) sctph) + hb_ofs > data_end) {
+			return false;
+		}
+
+		struct sctp_chunkhdr *hb_chunk = (struct sctp_chunkhdr *)
+			(((void *) sctph) + hb_ofs); 
+		struct sctp_paramhdr *hb_param = (struct sctp_paramhdr *)
+			(hb_chunk + 1);
+		__be32 *hb_param_data = (__be32 *) (hb_param + 1);
+		if (((void *) hb_param_data) + SCTP_HEARTBEAT_PARAM_LEN >
+				data_end) {
+			return false;
+		}
+
+		hb_chunk->type = SCTP_CID_HEARTBEAT;
+		hb_chunk->flags = 0;
+		hb_chunk->length = bpf_htons(hb_len);
+		hb_param->type = SCTP_PARAM_HEARTBEAT_INFO;
+		hb_param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
+				SCTP_HEARTBEAT_PARAM_LEN);
+		*hb_param_data = bpf_get_prandom_u32();
+	}
+
 	/* fill in the HEARTBEAT_ACK chunk if necessary */
 	if (info->outstanding_heartbeat_len != 0) {
 		/* FIXME: this exists solely to appease the verifier */
@@ -474,7 +520,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	}
 
 	/* FIXME: this exists solely to appease the verifier */
-	if (chunk_start_ofs > SCTP_MAX_CHUNKSIZE * 2) {
+	if (chunk_start_ofs > SCTP_MAX_CHUNKSIZE * 3) {
 		return false;
 	}
 	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (((void *)
@@ -899,11 +945,16 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 		return false;
 	}
 
-	/* we can only handle SACK, HEARTBEAT and DATA chunks right now */
-	if (chunk1->type != SCTP_CID_SACK && chunk1->type != SCTP_CID_DATA &&
-			chunk1->type != SCTP_CID_HEARTBEAT) {
-		bpf_printk("unknown chunk type %d", chunk1->type);
-		return false; /* drop only this chunk */
+	/* we can only handle SACK, HEARTBEAT(_ACK) and DATA chunks */
+	switch (chunk1->type) {
+		case SCTP_CID_SACK:
+		case SCTP_CID_DATA:
+		case SCTP_CID_HEARTBEAT:
+		case SCTP_CID_HEARTBEAT_ACK:
+			break;
+		default:
+			bpf_printk("unknown chunk type %d", chunk1->type);
+			return false;
 	}
 
 	size_t data_ofs = 0;
@@ -926,6 +977,12 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 		connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
 		datastream_type = SPX_DS_NONE;
 
+	/* HEARTBEAT_ACK chunk */
+	} else if (chunk1->type == SCTP_CID_HEARTBEAT_ACK) {
+		data_ofs = data_end - ((void *) sctph);
+
+		connection_control = SPX_CC_SYSTEM_PKT;
+		datastream_type = SPX_DS_NONE;
 	/* DATA chunk */
 	} else {
 		struct sctp_datahdr *datah = ((void *) chunk1) + sizeof(struct
