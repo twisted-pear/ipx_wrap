@@ -347,10 +347,6 @@ static __always_inline void update_state_ingress_ESTABLISHED(struct
 		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
 		data_len)
 {
-	if (data_len != 0) {
-		spx_state->last_rcvd_msg_data_len = data_len;
-	}
-
 	spx_state->remote_alloc_no = spxh->alloc_no;
 }
 

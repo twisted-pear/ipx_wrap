@@ -310,7 +310,6 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.last_sent_sequence = 0,
 		.neg_size_to_remote = SPX_MAX_DATA_LEN_WO_SIZNG,
 		.neg_size_to_local = SPX_MAX_DATA_LEN_WO_SIZNG,
-		.last_rcvd_msg_data_len = 0,
 		.prefix = prefix,
 		.sctp_sport = htons(0),
 		.sctp_dport = htons(0),
