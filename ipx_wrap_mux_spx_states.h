@@ -22,6 +22,28 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 	bpf_spin_unlock(&(state->lock));
 }
 
+static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
+		__u16 current_seq)
+{
+	/* subtract 1 from the ack no because SPX acks the "next
+	 * expected" packet, while SCTP acks the "last seen" one */
+	__builtin_sub_overflow(spx_ack, 1, &spx_ack);
+
+	__u32 cum_tsn_ack;
+	__builtin_add_overflow(seq_ofs, spx_ack, &cum_tsn_ack);
+
+	/* compensate for old SPX acks */
+	__u32 prev_cum_tsn_ack;
+	__builtin_add_overflow(seq_ofs, current_seq, &prev_cum_tsn_ack);
+	if (spx_seq_less_than(spx_ack, current_seq) &&
+			sctp_tsn_less_than(prev_cum_tsn_ack, cum_tsn_ack)) {
+		__builtin_sub_overflow(cum_tsn_ack, 0x10000,
+				&cum_tsn_ack);
+	}
+
+	return cum_tsn_ack;
+}
+
 #define ENTER_INGRESS(state_var) \
 	bpf_printk("%s: begin", __func__); \
 	\
@@ -121,19 +143,8 @@ static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 	\
 	update_state_ingress_##state_name(spx_state, spxh, data_len); \
 	\
-	struct ingress_transform_info info = { \
-		.sctp_sport = spx_state->sctp_sport, \
-		.sctp_dport = spx_state->sctp_dport, \
-		.sctp_svtag = spx_state->sctp_svtag, \
-		.sctp_dvtag = spx_state->sctp_dvtag, \
-		.sctp_tsn = spx_state->sctp_tsn, \
-		.local_sequence_offset = spx_state->local_sequence_offset, \
-		.local_current_sequence = spx_state->last_sent_sequence, \
-		.outstanding_heartbeat_len = \
-			spx_state->outstanding_heartbeat_len \
-	}; \
-	__builtin_memcpy(info.heartbeat_buf, spx_state->heartbeat_buf, \
-			SCTP_MAX_HEARTBEAT_CHUNK_LEN); \
+	struct ingress_transform_info info; \
+	fill_ingress_transform_info(spx_state, &info); \
 	/* we assume that if we have a waiting heartbeat, it will be sent \
 	 * with the next chunk */ \
 	spx_state->outstanding_heartbeat_len = 0; \
@@ -160,6 +171,21 @@ struct ingress_transform_info {
 	__u8 heartbeat_buf[SCTP_MAX_HEARTBEAT_CHUNK_LEN];
 };
 
+static __always_inline void fill_ingress_transform_info(const struct
+		bpf_kspx_state *spx_state, struct ingress_transform_info *info)
+{
+	info->sctp_sport = spx_state->sctp_sport;
+	info->sctp_dport = spx_state->sctp_dport;
+	info->sctp_svtag = spx_state->sctp_svtag;
+	info->sctp_dvtag = spx_state->sctp_dvtag;
+	info->sctp_tsn = spx_state->sctp_tsn;
+	info->local_sequence_offset = spx_state->local_sequence_offset;
+	info->local_current_sequence = spx_state->last_sent_sequence;
+	info->outstanding_heartbeat_len = spx_state->outstanding_heartbeat_len;
+	__builtin_memcpy(info->heartbeat_buf, spx_state->heartbeat_buf,
+			SCTP_MAX_HEARTBEAT_CHUNK_LEN);
+}
+
 struct egress_transform_info {
 	__be32 prefix;
 	struct ipx_addr local_addr;
@@ -174,6 +200,23 @@ struct egress_transform_info {
 	__be16 sctp_dport;
 	__be32 sctp_dvtag;
 };
+
+static __always_inline void fill_egress_transform_info(const struct
+		bpf_kspx_state *spx_state, struct egress_transform_info *info)
+{
+	info->prefix = spx_state->prefix;
+	info->local_addr = spx_state->local_addr;
+	info->remote_addr = spx_state->remote_addr;
+	info->local_id = spx_state->local_id;
+	info->remote_id = spx_state->remote_id;
+	info->local_sequence_offset = spx_state->local_sequence_offset;
+	info->local_current_sequence = spx_state->last_sent_sequence;
+	info->remote_expected_sequence = spx_state->remote_expected_sequence;
+	info->local_alloc_no = spx_state->local_alloc_no;
+	info->sctp_sport = spx_state->sctp_sport;
+	info->sctp_dport = spx_state->sctp_dport;
+	info->sctp_dvtag = spx_state->sctp_dvtag;
+}
 
 static __always_inline bool admit_ingress_NEW(const struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
@@ -290,323 +333,6 @@ _Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval),
 		"SCTP state cookie too short");
 	__builtin_memset(cookie, 0, SCTP_STATE_COOKIE_LEN);
 	__builtin_memcpy(cookie, &cval, sizeof(cval));
-
-	/* calculate CRC32c checksum */
-	__u32 csum = 0;
-	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
-		return false;
-	}
-	sctph->checksum = bpf_htonl(csum);
-
-	return true;
-}
-
-static __always_inline bool admit_ingress_CONN_ACK_RCVD(const struct
-		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
-		data_len)
-{
-	/* we only allow packets from the SCTP side here */
-	return false;
-}
-
-static __always_inline void update_state_ingress_CONN_ACK_RCVD(struct
-		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
-		data_len)
-{
-	/* we should never reach this point */
-}
-
-static __always_inline bool transform_ingress_CONN_ACK_RCVD(struct __sk_buff
-		*skb, struct spxhdr *spxh, size_t data_len, const struct
-		ingress_transform_info *info)
-{
-	/* we should never reach this point */
-	return false;
-}
-
-static __always_inline bool admit_ingress_ESTABLISHED(const struct
-		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
-		data_len)
-{
-	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
-	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
-		0;
-
-	/* check if the packet fits with our connection state */
-	if (spxh->dst_conn_id != spx_state->local_id || spxh->src_conn_id !=
-			spx_state->remote_id) {
-		return false;
-	}
-
-	/* handle the loss of ACK packets that we send by also acking data
-	 * packets with a seq no lower than the current epxected one (but not
-	 * letting them go through to SCTP) */
-	if (spx_seq_less_than(bpf_ntohs(spxh->seq_no),
-				spx_state->remote_expected_sequence) &&
-			ack_required) {
-		// TODO: need to construct an SPX ack for packets like this...
-		return false;
-	}
-
-	if (system) {
-		if (data_len != 0) {
-			return false;
-		}
-
-		/* allow old system packets in case we get a lost ACK */
-		__u16 cur_seq = bpf_ntohs(spxh->seq_no);
-		__u16 next_seq;
-		__builtin_add_overflow(cur_seq, 1, &next_seq);
-
-		if (cur_seq != spx_state->remote_expected_sequence && next_seq
-				!= spx_state->remote_expected_sequence) {
-			return false;
-		}
-	} else {
-		if (bpf_ntohs(spxh->seq_no) !=
-				spx_state->remote_expected_sequence) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
-static __always_inline void update_state_ingress_ESTABLISHED(struct
-		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
-		data_len)
-{
-	spx_state->remote_alloc_no = spxh->alloc_no;
-}
-
-static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
-		*skb, struct spxhdr *spxh, size_t data_len, const struct
-		ingress_transform_info *info)
-{
-	size_t sctp_len = sizeof(struct sctphdr);
-	size_t chunk_start_ofs = sizeof(struct sctphdr);
-	size_t sctp_padding_bytes = 0;
-	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
-
-	/* if the SPX peer requested an ACK on a system packet, we turn this
-	 * into a heartbeat chunk */
-	bool heartbeat_requested = ((spxh->connection_control &
-				SPX_CC_SYSTEM_PKT) != 0) &&
-		((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0);
-	size_t hb_ofs = 0;
-	size_t hb_len = 0;
-	if (heartbeat_requested) {
-		hb_ofs = sctp_len;
-
-		hb_len = sizeof(struct sctp_chunkhdr) + sizeof(struct
-				sctp_paramhdr) + SCTP_HEARTBEAT_PARAM_LEN;
-
-		sctp_len += hb_len;
-		chunk_start_ofs += hb_len;
-	}
-
-	/* also insert a HEARTBEAT_ACK chunk, if necessary */
-	size_t hb_ack_ofs = 0;
-	if (info->outstanding_heartbeat_len != 0) {
-		hb_ack_ofs = sctp_len;
-
-		size_t hb_ack_len = info->outstanding_heartbeat_len;
-		if (hb_ack_len % 4 != 0) {
-			hb_ack_len += 4 - (hb_ack_len % 4);
-		}
-
-		sctp_len += hb_ack_len;
-		chunk_start_ofs += hb_ack_len;
-	}
-
-	sctp_len += sizeof(struct sctp_chunkhdr);
-	if (data_len != 0) {
-		/* room for a data chunk */
-		sctp_len += sizeof(struct sctp_datahdr);
-		sctp_padding_bytes = (data_len % 4 == 0) ? 0 : (4 - data_len %
-				4);
-	} else {
-		/* room for a sack chunk */
-		sctp_len += sizeof(struct sctp_sackhdr);
-		sctp_padding_bytes = 0;
-	}
-
-	/* make room for the SCTP header */
-	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
-		sizeof(struct spxhdr);
-	__s32 len_diff = sctp_len - oldhdrs_len;
-	size_t payload_len = sctp_len + data_len + sctp_padding_bytes;
-	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
-		return false;
-	}
-	if (bpf_skb_change_tail(skb, skb->len + sctp_padding_bytes, 0) < 0) {
-		return false;
-	}
-	bpf_skb_pull_data(skb, 0);
-
-	/* adjust pointers and reverify */
-	void *data_end = (void *)(long)skb->data_end;
-	void *data = (void *)(long)skb->data;
-
-	struct ethhdr *eth = data;
-	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
-	struct sctphdr *sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
-	if (sctph + 1 > data_end) {
-		return false;
-	}
-
-	/* calculate and verify length */
-	if (payload_len < sctp_len) {
-		return false;
-	}
-	if (payload_len > SCTP_MAX_PKT_LEN) {
-		return false;
-	}
-	if (payload_len + sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
-			skb->len) {
-		return false;
-	}
-
-	/* fill in the new headers */
-	ip6h->nexthdr = IPPROTO_SCTP;
-	ip6h->payload_len = bpf_htons(payload_len);
-	sctph->vtag = info->sctp_dvtag;
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->checksum = bpf_htonl(0);
-
-	/* fill in the HEARTBEAT chunk if necessary */
-	if (heartbeat_requested) {
-		/* FIXME: this exists solely to appease the verifier */
-		if (hb_ofs > SCTP_MAX_CHUNKSIZE) {
-		}
-
-		if (((void *) sctph) + hb_ofs > data_end) {
-			return false;
-		}
-
-		struct sctp_chunkhdr *hb_chunk = (struct sctp_chunkhdr *)
-			(((void *) sctph) + hb_ofs); 
-		struct sctp_paramhdr *hb_param = (struct sctp_paramhdr *)
-			(hb_chunk + 1);
-		__be32 *hb_param_data = (__be32 *) (hb_param + 1);
-		if (((void *) hb_param_data) + SCTP_HEARTBEAT_PARAM_LEN >
-				data_end) {
-			return false;
-		}
-
-		hb_chunk->type = SCTP_CID_HEARTBEAT;
-		hb_chunk->flags = 0;
-		hb_chunk->length = bpf_htons(hb_len);
-		hb_param->type = SCTP_PARAM_HEARTBEAT_INFO;
-		hb_param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
-				SCTP_HEARTBEAT_PARAM_LEN);
-		*hb_param_data = bpf_get_prandom_u32();
-	}
-
-	/* fill in the HEARTBEAT_ACK chunk if necessary */
-	if (info->outstanding_heartbeat_len != 0) {
-		/* FIXME: this exists solely to appease the verifier */
-		if (hb_ack_ofs > SCTP_MAX_CHUNKSIZE * 2) {
-			return false;
-		}
-		if (info->outstanding_heartbeat_len < sizeof(struct
-					sctp_chunkhdr)) {
-			return false;
-		}
-		if (info->outstanding_heartbeat_len >
-				SCTP_MAX_HEARTBEAT_CHUNK_LEN) {
-			return false;
-		}
-
-		if (((void *) sctph) + hb_ack_ofs > data_end) {
-			return false;
-		}
-
-		struct sctp_chunkhdr *hb_ack_chunk = (struct sctp_chunkhdr *)
-			(((void *) sctph) + hb_ack_ofs);
-		if (((void *) hb_ack_chunk) + info->outstanding_heartbeat_len >
-				data_end) {
-			return false;
-		}
-
-		size_t i;
-		for (i = 0; i < info->outstanding_heartbeat_len; i++) {
-			/* FIXME: this is necessary to appease the verifier,
-			 * but really sucks */
-			if (i >= SCTP_MAX_HEARTBEAT_CHUNK_LEN) {
-				return false;
-			}
-			barrier_var(i);
-			if (((__u8 *) hb_ack_chunk) + (i + 1) > data_end) {
-				return false;
-			}
-
-			((__u8 *) hb_ack_chunk)[i] = info->heartbeat_buf[i];
-		}
-
-		hb_ack_chunk->type = SCTP_CID_HEARTBEAT_ACK;
-	}
-
-	/* FIXME: this exists solely to appease the verifier */
-	if (chunk_start_ofs > SCTP_MAX_CHUNKSIZE * 3) {
-		return false;
-	}
-	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (((void *)
-				sctph) + chunk_start_ofs);
-	if (data_len != 0) {
-		/* create the data chunk */
-		struct sctp_datahdr *data = (struct sctp_datahdr *) (chunk +
-				1);
-		if (data + 1 > data_end) {
-			return false;
-		}
-
-		chunk->type = SCTP_CID_DATA;
-		chunk->flags = (0 << 3) | /* I-bit */
-			       (0 << 2) | /* U-bit */
-			       (1 << 1) | /* B-bit */
-			       (1 << 0) ; /* E-bit */
-		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_datahdr) + data_len);
-		data->tsn = bpf_htonl(info->sctp_tsn);
-		data->stream = bpf_htons(0);
-		data->ssn = bpf_htons(info->sctp_tsn);
-		data->ppid = bpf_htonl(0);
-	} else {
-		/* create the sack chunk */
-		struct sctp_sackhdr *sack = (struct sctp_sackhdr *) (chunk +
-				1);
-		if (sack + 1 > data_end) {
-			return false;
-		}
-
-		chunk->type = SCTP_CID_SACK;
-		chunk->flags = 0;
-		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_sackhdr));
-		/* subtract 1 from the ack no because SPX acks the "next
-		 * expected" packet, while SCTP acks the "last seen" one */
-		__builtin_sub_overflow(spx_ack, 1, &spx_ack);
-		__u32 cum_tsn_ack;
-		__builtin_add_overflow(info->local_sequence_offset, spx_ack,
-				&cum_tsn_ack);
-		/* compensate for old SPX acks */
-		__u32 prev_cum_tsn_ack;
-		__builtin_add_overflow(info->local_sequence_offset,
-				info->local_current_sequence,
-				&prev_cum_tsn_ack);
-		if (spx_seq_less_than(spx_ack, info->local_current_sequence) &&
-				sctp_tsn_less_than(prev_cum_tsn_ack,
-				cum_tsn_ack)) {
-			__builtin_sub_overflow(cum_tsn_ack, 0x10000,
-					&cum_tsn_ack);
-		}
-		sack->cum_tsn_ack = bpf_htonl(cum_tsn_ack);
-		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
-		sack->num_gap_ack_blocks = bpf_htons(0);
-		sack->num_dup_tsns = bpf_htons(0);
-	}
 
 	/* calculate CRC32c checksum */
 	__u32 csum = 0;
@@ -759,6 +485,29 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 	return true;
 }
 
+static __always_inline bool admit_ingress_CONN_ACK_RCVD(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* we only allow packets from the SCTP side here */
+	return false;
+}
+
+static __always_inline void update_state_ingress_CONN_ACK_RCVD(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* we should never reach this point */
+}
+
+static __always_inline bool transform_ingress_CONN_ACK_RCVD(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	/* we should never reach this point */
+	return false;
+}
+
 static __always_inline bool admit_egress_CONN_ACK_RCVD(const struct
 		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
 		struct sctp_chunkhdr *chunk1, void *data_end)
@@ -869,6 +618,313 @@ static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
 	return true;
 }
 
+static __always_inline bool admit_ingress_ESTABLISHED(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
+	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
+		0;
+
+	/* check if the packet fits with our connection state */
+	if (spxh->dst_conn_id != spx_state->local_id || spxh->src_conn_id !=
+			spx_state->remote_id) {
+		return false;
+	}
+
+	/* handle the loss of ACK packets that we send by also acking data
+	 * packets with a seq no lower than the current epxected one (but not
+	 * letting them go through to SCTP) */
+	if (spx_seq_less_than(bpf_ntohs(spxh->seq_no),
+				spx_state->remote_expected_sequence) &&
+			ack_required) {
+		// TODO: need to construct an SPX ack for packets like this...
+		return false;
+	}
+
+	if (system) {
+		if (data_len != 0) {
+			return false;
+		}
+
+		/* allow old system packets in case we get a lost ACK */
+		__u16 cur_seq = bpf_ntohs(spxh->seq_no);
+		__u16 next_seq;
+		__builtin_add_overflow(cur_seq, 1, &next_seq);
+
+		if (cur_seq != spx_state->remote_expected_sequence && next_seq
+				!= spx_state->remote_expected_sequence) {
+			return false;
+		}
+	} else {
+		if (bpf_ntohs(spxh->seq_no) !=
+				spx_state->remote_expected_sequence) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static __always_inline void update_state_ingress_ESTABLISHED(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* got a request to close the connection */
+	if (((spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0) &&
+			((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0)
+			&& (spxh->datastream_type == SPX_DS_END_OF_CONN)) {
+		spx_state->state = KSPX_SHUTDOWN_RCVD;
+	}
+
+	spx_state->remote_alloc_no = spxh->alloc_no;
+}
+
+static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	size_t sctp_len = sizeof(struct sctphdr);
+	size_t chunk_start_ofs = sizeof(struct sctphdr);
+	size_t sctp_padding_bytes = 0;
+	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
+
+	/* if the SPX peer requested an ACK on a system packet, we turn this
+	 * into a heartbeat chunk, unless the peer requested a shutdown */
+	bool heartbeat_requested = ((spxh->connection_control &
+				SPX_CC_SYSTEM_PKT) != 0) &&
+		((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0);
+	bool shutdown_requested = spxh->datastream_type == SPX_DS_END_OF_CONN
+		&& heartbeat_requested;
+
+	size_t hbs_ofs = sctp_len;
+	size_t hbs_len = 0;
+	if (shutdown_requested) {
+		hbs_len = sizeof(struct sctp_chunkhdr) + sizeof(struct
+				sctp_shutdownhdr);
+
+	} else if (heartbeat_requested) {
+		hbs_len = sizeof(struct sctp_chunkhdr) + sizeof(struct
+				sctp_paramhdr) + SCTP_HEARTBEAT_PARAM_LEN;
+	}
+
+	sctp_len += hbs_len;
+	chunk_start_ofs += hbs_len;
+
+	/* also insert a HEARTBEAT_ACK chunk, if necessary */
+	size_t hb_ack_ofs = 0;
+	if (info->outstanding_heartbeat_len != 0) {
+		hb_ack_ofs = sctp_len;
+
+		size_t hb_ack_len = info->outstanding_heartbeat_len;
+		if (hb_ack_len % 4 != 0) {
+			hb_ack_len += 4 - (hb_ack_len % 4);
+		}
+
+		sctp_len += hb_ack_len;
+		chunk_start_ofs += hb_ack_len;
+	}
+
+	sctp_len += sizeof(struct sctp_chunkhdr);
+	if (data_len != 0) {
+		/* room for a data chunk */
+		sctp_len += sizeof(struct sctp_datahdr);
+		sctp_padding_bytes = (data_len % 4 == 0) ? 0 : (4 - data_len %
+				4);
+	} else {
+		/* room for a sack chunk */
+		sctp_len += sizeof(struct sctp_sackhdr);
+		sctp_padding_bytes = 0;
+	}
+
+	/* make room for the SCTP header */
+	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
+		sizeof(struct spxhdr);
+	__s32 len_diff = sctp_len - oldhdrs_len;
+	size_t payload_len = sctp_len + data_len + sctp_padding_bytes;
+	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
+		return false;
+	}
+	if (bpf_skb_change_tail(skb, skb->len + sctp_padding_bytes, 0) < 0) {
+		return false;
+	}
+	bpf_skb_pull_data(skb, 0);
+
+	/* adjust pointers and reverify */
+	void *data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	struct ethhdr *eth = data;
+	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	struct sctphdr *sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	if (sctph + 1 > data_end) {
+		return false;
+	}
+
+	/* calculate and verify length */
+	if (payload_len < sctp_len) {
+		return false;
+	}
+	if (payload_len > SCTP_MAX_PKT_LEN) {
+		return false;
+	}
+	if (payload_len + sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
+			skb->len) {
+		return false;
+	}
+
+	/* fill in the new headers */
+	ip6h->nexthdr = IPPROTO_SCTP;
+	ip6h->payload_len = bpf_htons(payload_len);
+	sctph->vtag = info->sctp_dvtag;
+	sctph->source = info->sctp_sport;
+	sctph->dest = info->sctp_dport;
+	sctph->checksum = bpf_htonl(0);
+
+	/* fill in the SHUTDOWN or HEARTBEAT chunk if necessary */
+	if (shutdown_requested) {
+		if (((void *) sctph) + hbs_ofs > data_end) {
+			return false;
+		}
+
+		struct sctp_chunkhdr *shut_chunk = (struct sctp_chunkhdr *)
+			(((void *) sctph) + hbs_ofs);
+		struct sctp_shutdownhdr *shut_param = (struct sctp_shutdownhdr
+				*) (shut_chunk + 1);
+		if (shut_param + 1 > data_end) {
+			return false;
+		}
+
+		shut_chunk->type = SCTP_CID_SHUTDOWN;
+		shut_chunk->flags = 0;
+		shut_chunk->length = bpf_htons(hbs_len);
+		shut_param->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
+					info->local_sequence_offset,
+					info->local_current_sequence));
+
+	} else if (heartbeat_requested) {
+		if (((void *) sctph) + hbs_ofs > data_end) {
+			return false;
+		}
+
+		struct sctp_chunkhdr *hb_chunk = (struct sctp_chunkhdr *)
+			(((void *) sctph) + hbs_ofs);
+		struct sctp_paramhdr *hb_param = (struct sctp_paramhdr *)
+			(hb_chunk + 1);
+		__be32 *hb_param_data = (__be32 *) (hb_param + 1);
+		if (((void *) hb_param_data) + SCTP_HEARTBEAT_PARAM_LEN >
+				data_end) {
+			return false;
+		}
+
+		hb_chunk->type = SCTP_CID_HEARTBEAT;
+		hb_chunk->flags = 0;
+		hb_chunk->length = bpf_htons(hbs_len);
+		hb_param->type = SCTP_PARAM_HEARTBEAT_INFO;
+		hb_param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
+				SCTP_HEARTBEAT_PARAM_LEN);
+		*hb_param_data = bpf_get_prandom_u32();
+	}
+
+	/* fill in the HEARTBEAT_ACK chunk if necessary */
+	if (info->outstanding_heartbeat_len != 0) {
+		/* FIXME: this exists solely to appease the verifier */
+		if (hb_ack_ofs > SCTP_MAX_CHUNKSIZE * 2) {
+			return false;
+		}
+		if (info->outstanding_heartbeat_len < sizeof(struct
+					sctp_chunkhdr)) {
+			return false;
+		}
+		if (info->outstanding_heartbeat_len >
+				SCTP_MAX_HEARTBEAT_CHUNK_LEN) {
+			return false;
+		}
+
+		if (((void *) sctph) + hb_ack_ofs > data_end) {
+			return false;
+		}
+
+		struct sctp_chunkhdr *hb_ack_chunk = (struct sctp_chunkhdr *)
+			(((void *) sctph) + hb_ack_ofs);
+		if (((void *) hb_ack_chunk) + info->outstanding_heartbeat_len >
+				data_end) {
+			return false;
+		}
+
+		size_t i;
+		for (i = 0; i < info->outstanding_heartbeat_len; i++) {
+			/* FIXME: this is necessary to appease the verifier,
+			 * but really sucks */
+			if (i >= SCTP_MAX_HEARTBEAT_CHUNK_LEN) {
+				return false;
+			}
+			barrier_var(i);
+			if (((__u8 *) hb_ack_chunk) + (i + 1) > data_end) {
+				return false;
+			}
+
+			((__u8 *) hb_ack_chunk)[i] = info->heartbeat_buf[i];
+		}
+
+		hb_ack_chunk->type = SCTP_CID_HEARTBEAT_ACK;
+	}
+
+	/* FIXME: this exists solely to appease the verifier */
+	if (chunk_start_ofs > SCTP_MAX_CHUNKSIZE * 3) {
+		return false;
+	}
+	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (((void *)
+				sctph) + chunk_start_ofs);
+	if (data_len != 0) {
+		/* create the data chunk */
+		struct sctp_datahdr *data = (struct sctp_datahdr *) (chunk +
+				1);
+		if (data + 1 > data_end) {
+			return false;
+		}
+
+		chunk->type = SCTP_CID_DATA;
+		chunk->flags = (0 << 3) | /* I-bit */
+			       (0 << 2) | /* U-bit */
+			       (1 << 1) | /* B-bit */
+			       (1 << 0) ; /* E-bit */
+		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
+				sizeof(struct sctp_datahdr) + data_len);
+		data->tsn = bpf_htonl(info->sctp_tsn);
+		data->stream = bpf_htons(0);
+		data->ssn = bpf_htons(info->sctp_tsn);
+		data->ppid = bpf_htonl(0);
+	} else {
+		/* create the sack chunk */
+		struct sctp_sackhdr *sack = (struct sctp_sackhdr *) (chunk +
+				1);
+		if (sack + 1 > data_end) {
+			return false;
+		}
+
+		chunk->type = SCTP_CID_SACK;
+		chunk->flags = 0;
+		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
+				sizeof(struct sctp_sackhdr));
+		sack->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
+					info->local_sequence_offset,
+					info->local_current_sequence));
+		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
+		sack->num_gap_ack_blocks = bpf_htons(0);
+		sack->num_dup_tsns = bpf_htons(0);
+	}
+
+	/* calculate CRC32c checksum */
+	__u32 csum = 0;
+	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
+		return false;
+	}
+	sctph->checksum = bpf_htonl(csum);
+
+	return true;
+}
+
 static __always_inline bool admit_egress_ESTABLISHED(const struct
 		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
 		struct sctp_chunkhdr *chunk1, void *data_end)
@@ -923,10 +979,13 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		return true;
 	}
 
-	/* SACK chunk */
-	if (chunk1->type == SCTP_CID_SACK) {
-		const struct sctp_sackhdr *sackh = (const struct sctp_sackhdr
-				*) (chunk1 + 1);
+	/* SACK or SHUTDOWN chunk */
+	if (chunk1->type == SCTP_CID_SACK || chunk1->type == SCTP_CID_SHUTDOWN)
+	{
+		/* the first 8 bytes of the SACK and SHUTDOWN chunks are
+		 * identical, so we can do this */
+		const struct sctp_shutdownhdr *sackh = (const struct
+				sctp_shutdownhdr *) (chunk1 + 1);
 		if (sackh + 1 > data_end) {
 			return false;
 		}
@@ -941,6 +1000,12 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 					&(spx_state->local_alloc_no));
 			__builtin_add_overflow(spx_state->sctp_tsn, 1,
 					&(spx_state->sctp_tsn));
+		}
+
+		/* if we sent a SHUTDOWN chunk, start shutting down the
+		 * connection */
+		if (chunk1->type == SCTP_CID_SHUTDOWN) {
+			spx_state->state = KSPX_SHUTDOWN_SENT;
 		}
 
 		return true;
@@ -991,12 +1056,14 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 		return false;
 	}
 
-	/* we can only handle SACK, HEARTBEAT(_ACK) and DATA chunks */
+	/* we can only handle these chunks */
 	switch (chunk1->type) {
 		case SCTP_CID_SACK:
 		case SCTP_CID_DATA:
 		case SCTP_CID_HEARTBEAT:
 		case SCTP_CID_HEARTBEAT_ACK:
+		case SCTP_CID_SHUTDOWN:
+		case SCTP_CID_SHUTDOWN_ACK:
 			break;
 		default:
 			bpf_printk("unknown chunk type %d", chunk1->type);
@@ -1029,6 +1096,23 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 
 		connection_control = SPX_CC_SYSTEM_PKT;
 		datastream_type = SPX_DS_NONE;
+
+	/* SHUTDOWN chunk */
+	} else if (chunk1->type == SCTP_CID_SHUTDOWN) {
+		data_ofs = data_end - ((void *) sctph);
+
+		connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
+		datastream_type = SPX_DS_END_OF_CONN;
+
+		__builtin_add_overflow(seq_no, 1, &seq_no);
+
+	/* SHUTDOWN chunk */
+	} else if (chunk1->type == SCTP_CID_SHUTDOWN_ACK) {
+		data_ofs = data_end - ((void *) sctph);
+
+		connection_control = SPX_CC_SYSTEM_PKT;
+		datastream_type = SPX_DS_END_OF_CONN_ACK;
+
 	/* DATA chunk */
 	} else {
 		struct sctp_datahdr *datah = ((void *) chunk1) + sizeof(struct
@@ -1146,6 +1230,203 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	return true;
 }
 
+static __always_inline bool admit_ingress_SHUTDOWN_SENT(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* do not permit end-of-connection packets here */
+	if (((spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0) &&
+			((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0)
+			&& spxh->datastream_type == SPX_DS_END_OF_CONN) {
+		return false;
+	}
+
+	return admit_ingress_ESTABLISHED(spx_state, spxh, data_len);
+}
+
+static __always_inline void update_state_ingress_SHUTDOWN_SENT(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	update_state_ingress_ESTABLISHED(spx_state, spxh, data_len);
+}
+
+static __always_inline bool transform_ingress_SHUTDOWN_SENT(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	/* if this is not an end-of-connection-ack treat it normally */
+	if (spxh->datastream_type != SPX_DS_END_OF_CONN_ACK ||
+			(spxh->connection_control & SPX_CC_SYSTEM_PKT) == 0) {
+		return transform_ingress_ESTABLISHED(skb, spxh, data_len,
+				info);
+	}
+
+	/* construct a SHUTDOWN_ACK chunk */
+	size_t sctp_len = sizeof(struct sctphdr) + sizeof(struct
+			sctp_chunkhdr);
+
+	/* make room for the SCTP header */
+	__s32 oldhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
+		sizeof(struct spxhdr);
+	__s32 len_diff = sctp_len - oldhdrs_len;
+	size_t payload_len = sctp_len;
+	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
+		return false;
+	}
+	bpf_skb_pull_data(skb, 0);
+
+	/* adjust pointers and reverify */
+	void *data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	struct ethhdr *eth = data;
+	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	struct sctphdr *sctph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	struct sctp_chunkhdr *chunk =  ((void *) sctph) + sizeof(struct
+			sctphdr);
+	if (chunk + 1 > data_end) {
+		return false;
+	}
+
+	/* calculate and verify length */
+	if (payload_len < sctp_len) {
+		return false;
+	}
+	if (payload_len > SCTP_MAX_PKT_LEN) {
+		return false;
+	}
+	if (payload_len + sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
+			skb->len) {
+		return false;
+	}
+
+	/* fill in the new headers */
+	ip6h->nexthdr = IPPROTO_SCTP;
+	ip6h->payload_len = bpf_htons(payload_len);
+	sctph->vtag = info->sctp_dvtag;
+	sctph->source = info->sctp_sport;
+	sctph->dest = info->sctp_dport;
+	sctph->checksum = bpf_htonl(0);
+	chunk->type = SCTP_CID_SHUTDOWN_ACK;
+	chunk->flags = 0;
+	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr));
+
+	/* calculate CRC32c checksum */
+	__u32 csum = 0;
+	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
+		return false;
+	}
+	sctph->checksum = bpf_htonl(csum);
+
+	return true;
+}
+
+static __always_inline bool admit_egress_SHUTDOWN_SENT(const struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	if (!admit_egress_ESTABLISHED(spx_state, sctph, chunk1, data_end)) {
+		return false;
+	}
+
+	/* no more data allowed in this state */
+	if (chunk1->type == SCTP_CID_DATA) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool update_state_egress_SHUTDOWN_SENT(struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	/* no DATA chunks */
+	if (chunk1->type == SCTP_CID_DATA) {
+		return false;
+	}
+
+	/* connection is finished */
+	if (chunk1->type == SCTP_CID_SHUTDOWN_COMPLETE) {
+		spx_state->state = KSPX_INVALID;
+		return true;
+	}
+
+	return update_state_egress_ESTABLISHED(spx_state , sctph, chunk1,
+			data_end);
+}
+
+static __always_inline bool transform_egress_SHUTDOWN_SENT(struct __sk_buff
+		*skb, struct sctphdr *sctph, struct sctp_chunkhdr *chunk1,
+		const struct egress_transform_info *info)
+{
+	return transform_egress_ESTABLISHED(skb, sctph, chunk1, info);
+}
+
+static __always_inline bool admit_ingress_SHUTDOWN_RCVD(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	return admit_ingress_ESTABLISHED(spx_state, spxh, data_len);
+}
+
+static __always_inline void update_state_ingress_SHUTDOWN_RCVD(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	update_state_ingress_ESTABLISHED(spx_state, spxh, data_len);
+}
+
+static __always_inline bool transform_ingress_SHUTDOWN_RCVD(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	/* no more data chunks should be created here */
+	if (data_len != 0) {
+		return false;
+	}
+
+	return transform_ingress_ESTABLISHED(skb, spxh, data_len, info);
+}
+
+static __always_inline bool admit_egress_SHUTDOWN_RCVD(const struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	if (!admit_egress_ESTABLISHED(spx_state, sctph, chunk1, data_end)) {
+		return false;
+	}
+
+	/* prevent us from going to the SHUTDOWN_SENT state from here */
+	if (chunk1->type == SCTP_CID_SHUTDOWN) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline bool update_state_egress_SHUTDOWN_RCVD(struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	/* connection is finished */
+	if (chunk1->type == SCTP_CID_SHUTDOWN_ACK) {
+		spx_state->state = KSPX_INVALID;
+		return true;
+	}
+
+	return update_state_egress_ESTABLISHED(spx_state , sctph, chunk1,
+			data_end);
+}
+
+static __always_inline bool transform_egress_SHUTDOWN_RCVD(struct __sk_buff
+		*skb, struct sctphdr *sctph, struct sctp_chunkhdr *chunk1,
+		const struct egress_transform_info *info)
+{
+	return transform_egress_ESTABLISHED(skb, sctph, chunk1, info);
+}
+
 SEC("tc/ingress")
 int kspx_state_ingress_INVALID(struct __sk_buff *skb)
 {
@@ -1183,21 +1464,8 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 				"state update failed (this is a BUG!)");
 	}
 
-	struct egress_transform_info info = {
-		.prefix = spx_state->prefix,
-		.local_addr = spx_state->local_addr,
-		.remote_addr = spx_state->remote_addr,
-		.local_id = spx_state->local_id,
-		.remote_id = spx_state->remote_id,
-		.local_sequence_offset = spx_state->local_sequence_offset,
-		.local_current_sequence = 0,
-		.remote_expected_sequence =
-			spx_state->remote_expected_sequence,
-		.local_alloc_no = spx_state->local_alloc_no,
-		.sctp_sport = spx_state->sctp_sport,
-		.sctp_dport = spx_state->sctp_dport,
-		.sctp_dvtag = spx_state->sctp_dvtag
-	};
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
 	put_kspx_state(spx_state);
 
 	/* init chunk */
@@ -1229,21 +1497,8 @@ int kspx_state_egress_CONN_ACK_RCVD(struct __sk_buff *skb)
 				"state update failed (this is a BUG!)");
 	}
 
-	struct egress_transform_info info = {
-		.prefix = spx_state->prefix,
-		.local_addr = spx_state->local_addr,
-		.remote_addr = spx_state->remote_addr,
-		.local_id = spx_state->local_id,
-		.remote_id = spx_state->remote_id,
-		.local_sequence_offset = spx_state->local_sequence_offset,
-		.local_current_sequence = spx_state->last_sent_sequence,
-		.remote_expected_sequence =
-			spx_state->remote_expected_sequence,
-		.local_alloc_no = spx_state->local_alloc_no,
-		.sctp_sport = spx_state->sctp_sport,
-		.sctp_dport = spx_state->sctp_dport,
-		.sctp_dvtag = spx_state->sctp_dvtag
-	};
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
 	put_kspx_state(spx_state);
 
 	/* cookie echo chunk */
@@ -1275,25 +1530,85 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 				"state update failed (this is a BUG!)");
 	}
 
-	struct egress_transform_info info = {
-		.prefix = spx_state->prefix,
-		.local_addr = spx_state->local_addr,
-		.remote_addr = spx_state->remote_addr,
-		.local_id = spx_state->local_id,
-		.remote_id = spx_state->remote_id,
-		.local_sequence_offset = spx_state->local_sequence_offset,
-		.local_current_sequence = spx_state->last_sent_sequence,
-		.remote_expected_sequence =
-			spx_state->remote_expected_sequence,
-		.local_alloc_no = spx_state->local_alloc_no,
-		.sctp_sport = spx_state->sctp_sport,
-		.sctp_dport = spx_state->sctp_dport,
-		.sctp_dvtag = spx_state->sctp_dvtag
-	};
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
 	put_kspx_state(spx_state);
 
 	if (!transform_egress_ESTABLISHED(skb, sctph, chunk1, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
+	}
+	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
+}
+
+SEC("tc/ingress")
+int kspx_state_ingress_SHUTDOWN_SENT(struct __sk_buff *skb)
+{
+	GENERIC_INGRESS(SHUTDOWN_SENT);
+}
+
+SEC("tc/egress")
+int kspx_state_egress_SHUTDOWN_SENT(struct __sk_buff *skb)
+{
+	ENTER_EGRESS(KSPX_SHUTDOWN_SENT);
+
+	if (!admit_egress_SHUTDOWN_SENT(spx_state, sctph, chunk1, data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
+	}
+
+	if (!update_state_egress_SHUTDOWN_SENT(spx_state, sctph, chunk1,
+				data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT,
+				"state update failed (this is a BUG!)");
+	}
+
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
+	put_kspx_state(spx_state);
+
+	/* special case for the SHUTDOWN_COMPLETE chunk */
+	if (chunk1->type == SCTP_CID_SHUTDOWN_COMPLETE) {
+		bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, &conn_key);
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "connection closed");
+	}
+	if (!transform_egress_SHUTDOWN_SENT(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
+	}
+	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
+}
+
+SEC("tc/ingress")
+int kspx_state_ingress_SHUTDOWN_RCVD(struct __sk_buff *skb)
+{
+	GENERIC_INGRESS(SHUTDOWN_RCVD);
+}
+
+SEC("tc/egress")
+int kspx_state_egress_SHUTDOWN_RCVD(struct __sk_buff *skb)
+{
+	ENTER_EGRESS(KSPX_SHUTDOWN_RCVD);
+
+	if (!admit_egress_SHUTDOWN_RCVD(spx_state, sctph, chunk1, data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
+	}
+
+	if (!update_state_egress_SHUTDOWN_RCVD(spx_state, sctph, chunk1,
+				data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT,
+				"state update failed (this is a BUG!)");
+	}
+
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
+	put_kspx_state(spx_state);
+
+	bool closed = chunk1->type == SCTP_CID_SHUTDOWN_ACK;
+	if (!transform_egress_SHUTDOWN_RCVD(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
+	}
+	/* special case for the SHUTDOWN_ACK chunk */
+	if (closed) {
+		bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, &conn_key);
+		EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "connection closed");
 	}
 	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
 }

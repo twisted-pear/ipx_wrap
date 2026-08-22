@@ -323,7 +323,7 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 	int err = bpf_map__update_elem(
 			bpf_spx_kern->maps.ipx_wrap_mux_kspx_state, &spx_key,
 			sizeof(struct spx_conn_key), &spx_state, sizeof(struct
-				bpf_kspx_state), BPF_NOEXIST);
+				bpf_kspx_state), BPF_ANY);
 	if (err != 0) {
 		errno = -err;
 		return false;
@@ -719,13 +719,7 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
 		local_id)
 {
-	struct spx_conn_key conn_key = {
-		.bind_addr = *local_addr,
-		.conn_id = local_id
-	};
-
-	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
-			&conn_key, sizeof(struct spx_conn_key), 0);
+	/* this is a no-op, the connection state is cleaned up from eBPF */
 }
 
 static void delete_spx_conn_from_bpf(const struct ipx_addr *local_addr, __be16

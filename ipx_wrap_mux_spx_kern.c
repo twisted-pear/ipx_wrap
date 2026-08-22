@@ -365,6 +365,10 @@ struct {
 		[KSPX_CONN_ACK_RCVD] = (void *)
 			&kspx_state_ingress_CONN_ACK_RCVD,
 		[KSPX_ESTABLISHED] = (void *) &kspx_state_ingress_ESTABLISHED,
+		[KSPX_SHUTDOWN_SENT] = (void *)
+			&kspx_state_ingress_SHUTDOWN_SENT,
+		[KSPX_SHUTDOWN_RCVD] = (void *)
+			&kspx_state_ingress_SHUTDOWN_RCVD,
 	},
 };
 
@@ -380,6 +384,10 @@ struct {
 		[KSPX_CONN_ACK_RCVD] = (void *)
 			&kspx_state_egress_CONN_ACK_RCVD,
 		[KSPX_ESTABLISHED] = (void *) &kspx_state_egress_ESTABLISHED,
+		[KSPX_SHUTDOWN_SENT] = (void *)
+			&kspx_state_egress_SHUTDOWN_SENT,
+		[KSPX_SHUTDOWN_RCVD] = (void *)
+			&kspx_state_egress_SHUTDOWN_RCVD,
 	},
 };
 
