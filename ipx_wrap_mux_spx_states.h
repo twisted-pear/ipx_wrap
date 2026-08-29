@@ -1,8 +1,6 @@
 #ifndef __IPX_WRAP_MUX_SPX_STATES_H__
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
-// TODO: always support ABORT chunks
-
 static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 		spx_conn_key *key)
 {
@@ -20,6 +18,27 @@ static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 static __always_inline void put_kspx_state(struct bpf_kspx_state *state)
 {
 	bpf_spin_unlock(&(state->lock));
+}
+
+static __always_inline bool check_abort(const struct sctp_chunkhdr *chunk1,
+		void *data_end)
+{
+	if (chunk1 + 1 > data_end) {
+		return false;
+	}
+
+	if (chunk1->type != SCTP_CID_ABORT) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline void abort_assoc(struct bpf_kspx_state *spx_state, const
+		struct spx_conn_key *conn_key)
+{
+	put_kspx_state(spx_state);
+	bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, conn_key);
 }
 
 static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
@@ -123,6 +142,14 @@ static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
 		 * tail-call is called. There is nothing we can do here. */ \
 		put_kspx_state(spx_state); \
 		bpf_printk("%s: shot, unexpected state", __func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
+	/* The host is trying to abort the connection. This is supported in \
+	 * any state. */ \
+	if (check_abort(chunk1, data_end)) { \
+		abort_assoc(spx_state, &conn_key); \
+		bpf_printk("%s: connection aborted", __func__); \
 		return TC_ACT_SHOT; \
 	}
 

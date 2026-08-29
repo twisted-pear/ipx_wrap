@@ -536,15 +536,12 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	}
 
-	/* also see if there happen to be more chunks */
-	struct sctp_chunkhdr *chunk2 = NULL;
-	parse_sctp_chunk(&cur, data_end, &chunk2);
+	/* we can only deal with one chunk at a time, hence we split up
+	 * multi-chunk SCTP packets */
 	if (!flatten_sctp(skb, &conn_key)) {
 		return TC_ACT_SHOT;
 	}
 
-	/* we can only deal with one chunk at a time, hence we split up
-	 * multi-chunk SCTP packets */
 	bpf_tail_call(skb, &kspx_states_egress, spx_state->state);
 
 	bpf_printk("no egress state program found");
