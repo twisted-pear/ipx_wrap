@@ -37,6 +37,7 @@ static __always_inline bool check_abort(const struct sctp_chunkhdr *chunk1,
 static __always_inline void abort_assoc(struct bpf_kspx_state *spx_state, const
 		struct spx_conn_key *conn_key)
 {
+	spx_state->state = KSPX_INVALID;
 	put_kspx_state(spx_state);
 	bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, conn_key);
 }
