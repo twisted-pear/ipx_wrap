@@ -303,7 +303,8 @@ struct bpf_kspx_state {
 	__be16 local_id;
 	__u16 remote_alloc_no;
 	__u16 local_alloc_no;
-	__u16 remote_expected_sequence;
+	__u32 remote_sequence_offset;
+	__u32 last_ackd_tsn;
 	__u32 local_sequence_offset;
 	__u16 last_sent_sequence;
 	__u16 neg_size_to_remote;
@@ -313,7 +314,6 @@ struct bpf_kspx_state {
 	__be16 sctp_dport;
 	__be32 sctp_svtag;
 	__be32 sctp_dvtag;
-	__u32 sctp_tsn;
 	__u16 outstanding_heartbeat_len;
 	__u8 heartbeat_buf[SCTP_MAX_HEARTBEAT_CHUNK_LEN];
 };

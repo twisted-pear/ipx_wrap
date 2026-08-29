@@ -1,6 +1,8 @@
 #ifndef __IPX_WRAP_MUX_SPX_STATES_H__
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
+// TODO: find a proper way to handle alloc numbers
+
 static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 		spx_conn_key *key)
 {
@@ -40,6 +42,21 @@ static __always_inline void abort_assoc(struct bpf_kspx_state *spx_state, const
 	spx_state->state = KSPX_INVALID;
 	put_kspx_state(spx_state);
 	bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, conn_key);
+}
+
+static __always_inline __u32 calc_cur_tsn(__u16 spx_seq, __u32 seq_ofs, __u32
+		last_ackd_tsn)
+{
+	__u32 cur_tsn;
+	__builtin_add_overflow(seq_ofs, spx_seq, &cur_tsn);
+
+	/* compensate for old SPX seqs */
+	if (spx_seq_less_than(spx_seq, last_ackd_tsn) &&
+			sctp_tsn_less_than(last_ackd_tsn, cur_tsn)) {
+		__builtin_sub_overflow(cur_tsn, 0x10000, &cur_tsn);
+	}
+
+	return cur_tsn;
 }
 
 static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
@@ -192,7 +209,8 @@ struct ingress_transform_info {
 	__be16 sctp_dport;
 	__be32 sctp_svtag;
 	__be32 sctp_dvtag;
-	__u32 sctp_tsn;
+	__u32 remote_sequence_offset;
+	__u32 last_ackd_tsn;
 	__u32 local_sequence_offset;
 	__u16 local_current_sequence;
 	__u16 outstanding_heartbeat_len;
@@ -206,7 +224,8 @@ static __always_inline void fill_ingress_transform_info(const struct
 	info->sctp_dport = spx_state->sctp_dport;
 	info->sctp_svtag = spx_state->sctp_svtag;
 	info->sctp_dvtag = spx_state->sctp_dvtag;
-	info->sctp_tsn = spx_state->sctp_tsn;
+	info->remote_sequence_offset = spx_state->remote_sequence_offset;
+	info->last_ackd_tsn = spx_state->last_ackd_tsn;
 	info->local_sequence_offset = spx_state->local_sequence_offset;
 	info->local_current_sequence = spx_state->last_sent_sequence;
 	info->outstanding_heartbeat_len = spx_state->outstanding_heartbeat_len;
@@ -222,7 +241,7 @@ struct egress_transform_info {
 	__be16 remote_id;
 	__u32 local_sequence_offset;
 	__u16 local_current_sequence;
-	__u16 remote_expected_sequence;
+	__u32 last_ackd_tsn;
 	__u16 local_alloc_no;
 	__be16 sctp_sport;
 	__be16 sctp_dport;
@@ -239,7 +258,7 @@ static __always_inline void fill_egress_transform_info(const struct
 	info->remote_id = spx_state->remote_id;
 	info->local_sequence_offset = spx_state->local_sequence_offset;
 	info->local_current_sequence = spx_state->last_sent_sequence;
-	info->remote_expected_sequence = spx_state->remote_expected_sequence;
+	info->last_ackd_tsn = spx_state->last_ackd_tsn;
 	info->local_alloc_no = spx_state->local_alloc_no;
 	info->sctp_sport = spx_state->sctp_sport;
 	info->sctp_dport = spx_state->sctp_dport;
@@ -352,7 +371,7 @@ static __always_inline bool transform_ingress_NEW(struct __sk_buff *skb, struct
 	init->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 	init->num_inbound_streams = bpf_htons(1);
 	init->num_outbound_streams = bpf_htons(1);
-	init->initial_tsn = bpf_htonl(info->sctp_tsn);
+	init->initial_tsn = bpf_htonl(0);
 	param->type = SCTP_PARAM_STATE_COOKIE;
 	param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
 			SCTP_STATE_COOKIE_LEN);
@@ -507,7 +526,7 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 	spxh->src_conn_id = info->local_id;
 	spxh->dst_conn_id = info->remote_id;
 	spxh->seq_no = bpf_htons(0);
-	spxh->ack_no = bpf_htons(info->remote_expected_sequence);
+	spxh->ack_no = bpf_htons(info->last_ackd_tsn);
 	spxh->alloc_no = bpf_htons(info->local_alloc_no);
 
 	return true;
@@ -651,8 +670,6 @@ static __always_inline bool admit_ingress_ESTABLISHED(const struct
 		data_len)
 {
 	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
-	bool ack_required = (spxh->connection_control & SPX_CC_ACK_REQUIRED) !=
-		0;
 
 	/* check if the packet fits with our connection state */
 	if (spxh->dst_conn_id != spx_state->local_id || spxh->src_conn_id !=
@@ -660,35 +677,8 @@ static __always_inline bool admit_ingress_ESTABLISHED(const struct
 		return false;
 	}
 
-	/* handle the loss of ACK packets that we send by also acking data
-	 * packets with a seq no lower than the current epxected one (but not
-	 * letting them go through to SCTP) */
-	if (spx_seq_less_than(bpf_ntohs(spxh->seq_no),
-				spx_state->remote_expected_sequence) &&
-			ack_required) {
-		// TODO: need to construct an SPX ack for packets like this...
+	if (system && data_len != 0) {
 		return false;
-	}
-
-	if (system) {
-		if (data_len != 0) {
-			return false;
-		}
-
-		/* allow old system packets in case we get a lost ACK */
-		__u16 cur_seq = bpf_ntohs(spxh->seq_no);
-		__u16 next_seq;
-		__builtin_add_overflow(cur_seq, 1, &next_seq);
-
-		if (cur_seq != spx_state->remote_expected_sequence && next_seq
-				!= spx_state->remote_expected_sequence) {
-			return false;
-		}
-	} else {
-		if (bpf_ntohs(spxh->seq_no) !=
-				spx_state->remote_expected_sequence) {
-			return false;
-		}
 	}
 
 	return true;
@@ -715,6 +705,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	size_t sctp_len = sizeof(struct sctphdr);
 	size_t chunk_start_ofs = sizeof(struct sctphdr);
 	size_t sctp_padding_bytes = 0;
+	__u32 spx_seq = bpf_ntohs(spxh->seq_no);
 	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
 
 	/* if the SPX peer requested an ACK on a system packet, we turn this
@@ -919,9 +910,11 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 			       (1 << 0) ; /* E-bit */
 		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
 				sizeof(struct sctp_datahdr) + data_len);
-		data->tsn = bpf_htonl(info->sctp_tsn);
+		data->tsn = bpf_htonl(calc_cur_tsn(spx_seq,
+					info->remote_sequence_offset,
+					info->last_ackd_tsn));
 		data->stream = bpf_htons(0);
-		data->ssn = bpf_htons(info->sctp_tsn);
+		data->ssn = bpf_htons(spx_seq);
 		data->ppid = bpf_htonl(0);
 	} else {
 		/* create the sack chunk */
@@ -1019,16 +1012,24 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		}
 
 		__u32 tsn_ack = bpf_ntohl(sackh->cum_tsn_ack);
-		/* last message has been acknowledged by SCTP */
-		if (spx_state->sctp_tsn == tsn_ack) {
+
+		/* if the SPX ack would have wrapped over, increate offset */
+		__u16 spx_ack = tsn_ack;
+		__u32 calc_tsn_ack;
+		__builtin_add_overflow(spx_state->remote_sequence_offset,
+				spx_ack, &calc_tsn_ack);
+		if (sctp_tsn_less_than(spx_state->last_ackd_tsn, tsn_ack) &&
+				sctp_tsn_less_than(calc_tsn_ack,
+					spx_state->last_ackd_tsn)) {
 			__builtin_add_overflow(
-					spx_state->remote_expected_sequence, 1,
-					&(spx_state->remote_expected_sequence));
-			__builtin_add_overflow(spx_state->local_alloc_no, 1,
-					&(spx_state->local_alloc_no));
-			__builtin_add_overflow(spx_state->sctp_tsn, 1,
-					&(spx_state->sctp_tsn));
+					spx_state->remote_sequence_offset,
+					0x10000,
+					&(spx_state->remote_sequence_offset));
 		}
+
+		spx_state->last_ackd_tsn = tsn_ack;
+		__builtin_add_overflow(spx_ack, 1,
+				&(spx_state->local_alloc_no));
 
 		/* if we sent a SHUTDOWN chunk, start shutting down the
 		 * connection */
@@ -1252,7 +1253,10 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	spxh->src_conn_id = info->local_id;
 	spxh->dst_conn_id = info->remote_id;
 	spxh->seq_no = bpf_htons(seq_no);
-	spxh->ack_no = bpf_htons(info->remote_expected_sequence);
+
+	__u16 spx_ack;
+	__builtin_add_overflow(info->last_ackd_tsn, 1, &spx_ack);
+	spxh->ack_no = bpf_htons(spx_ack);
 	spxh->alloc_no = bpf_htons(info->local_alloc_no);
 
 	return true;
