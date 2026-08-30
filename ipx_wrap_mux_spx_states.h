@@ -62,10 +62,6 @@ static __always_inline __u32 calc_cur_tsn(__u16 spx_seq, __u32 seq_ofs, __u32
 static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
 		__u16 current_seq)
 {
-	/* subtract 1 from the ack no because SPX acks the "next
-	 * expected" packet, while SCTP acks the "last seen" one */
-	__builtin_sub_overflow(spx_ack, 1, &spx_ack);
-
 	__u32 cum_tsn_ack;
 	__builtin_add_overflow(seq_ofs, spx_ack, &cum_tsn_ack);
 
@@ -77,6 +73,10 @@ static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
 		__builtin_sub_overflow(cum_tsn_ack, 0x10000,
 				&cum_tsn_ack);
 	}
+
+	/* subtract 1 from the ack no because SPX acks the "next
+	 * expected" packet, while SCTP acks the "last seen" one */
+	__builtin_sub_overflow(cum_tsn_ack, 1, &cum_tsn_ack);
 
 	return cum_tsn_ack;
 }
@@ -1013,8 +1013,9 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 
 		__u32 tsn_ack = bpf_ntohl(sackh->cum_tsn_ack);
 
-		/* if the SPX ack would have wrapped over, increate offset */
-		__u16 spx_ack = tsn_ack;
+		/* if the SPX ack would have wrapped over, increase offset */
+		__u16 spx_ack;
+		__builtin_add_overflow(tsn_ack, 1, &spx_ack);
 		__u32 calc_tsn_ack;
 		__builtin_add_overflow(spx_state->remote_sequence_offset,
 				spx_ack, &calc_tsn_ack);
@@ -1028,8 +1029,7 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		}
 
 		spx_state->last_ackd_tsn = tsn_ack;
-		__builtin_add_overflow(spx_ack, 1,
-				&(spx_state->local_alloc_no));
+		spx_state->local_alloc_no = spx_ack;
 
 		/* if we sent a SHUTDOWN chunk, start shutting down the
 		 * connection */
@@ -1052,22 +1052,17 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		return false;
 	}
 
-	/* if the SPX seq no increased but the total TSN decreased, we assume
-	 * the SPX seq no wrapped and increase the TSN offset */
+	/* if the SPX seq no would have wrapped, we increase the TSN offset */
 	__u32 cur_tsn = bpf_ntohl(datah->tsn);
-	__u32 prev_tsn;
-	__builtin_add_overflow(spx_state->local_sequence_offset,
-			spx_state->last_sent_sequence, &prev_tsn);
 	__u32 spx_sequence_u32;
 	__builtin_sub_overflow(cur_tsn, spx_state->local_sequence_offset,
 			&spx_sequence_u32);
-	__u16 spx_sequence_u16 = spx_sequence_u32;
-	if (spx_seq_less_than(spx_state->last_sent_sequence, spx_sequence_u16)
-			&& sctp_tsn_less_than(cur_tsn, prev_tsn)) {
+	if (spx_sequence_u32 >= 0x10000) {
 		__builtin_add_overflow(spx_state->local_sequence_offset,
 				0x10000, &(spx_state->local_sequence_offset));
 	}
-	spx_state->last_sent_sequence = spx_sequence_u16;
+	__builtin_sub_overflow(cur_tsn, spx_state->local_sequence_offset,
+			&(spx_state->last_sent_sequence));
 
 	return true;
 }
