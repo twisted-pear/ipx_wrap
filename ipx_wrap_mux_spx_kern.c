@@ -20,7 +20,7 @@
 #define SCTP_RWND_DUMMY 1500
 
 #define SCTP_HEAD_REINJECT_MARK 0x47744704
-#define SCTP_MAX_CHUNKS 16
+#define SCTP_MAX_CHUNKS 64
 
 _Static_assert(SCTP_STATE_COOKIE_LEN % 4 == 0,
 		"SCTP_STATE_COOKIE_LEN not a multiple of 4");
