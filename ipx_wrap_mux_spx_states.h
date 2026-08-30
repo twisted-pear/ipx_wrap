@@ -2,6 +2,7 @@
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
 // TODO: find a proper way to handle alloc numbers
+// TODO: find a proper way to handle the recv window credit
 
 static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 		spx_conn_key *key)
