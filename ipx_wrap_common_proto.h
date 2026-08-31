@@ -318,6 +318,20 @@ struct bpf_kspx_state {
 	__u8 heartbeat_buf[SCTP_MAX_HEARTBEAT_CHUNK_LEN];
 };
 
+union kspx_sctp_ppid_info {
+	__u32 ppid;
+	struct {
+		__u8 end_of_msg:1,
+		     attention:1,
+		     reserved:6;
+		__u8 datastream_type;
+		__u16 reserved2; /* this should always be 0 */
+	} __attribute__((packed));
+};
+
+_Static_assert(sizeof(union kspx_sctp_ppid_info) == sizeof(__u32),
+		"kspx_sctp_ppid_info has wrong size");
+
 static __always_inline bool spx_seq_less_than(__u16 a, __u16 b)
 {
 	__s16 res;

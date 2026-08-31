@@ -706,8 +706,18 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	size_t sctp_len = sizeof(struct sctphdr);
 	size_t chunk_start_ofs = sizeof(struct sctphdr);
 	size_t sctp_padding_bytes = 0;
+
 	__u32 spx_seq = bpf_ntohs(spxh->seq_no);
 	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
+
+	/* prepare the PPID metadata */
+	union kspx_sctp_ppid_info ppid_info;
+	ppid_info.ppid = 0;
+	ppid_info.end_of_msg = (spxh->connection_control & SPX_CC_END_OF_MSG)
+		!= 0;
+	ppid_info.attention = (spxh->connection_control & SPX_CC_ATTENTION) !=
+		0;
+	ppid_info.datastream_type = spxh->datastream_type;
 
 	/* if the SPX peer requested an ACK on a system packet, we turn this
 	 * into a heartbeat chunk, unless the peer requested a shutdown */
@@ -916,7 +926,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 					info->last_ackd_tsn));
 		data->stream = bpf_htons(0);
 		data->ssn = bpf_htons(spx_seq);
-		data->ppid = bpf_htonl(0);
+		data->ppid = ppid_info.ppid;
 	} else {
 		/* create the sack chunk */
 		struct sctp_sackhdr *sack = (struct sctp_sackhdr *) (chunk +
@@ -957,6 +967,25 @@ static __always_inline bool admit_egress_ESTABLISHED(const struct
 	}
 	if (sctph->vtag != spx_state->sctp_svtag) {
 		return false;
+	}
+
+	if (chunk1->type == SCTP_CID_DATA) {
+		const struct sctp_datahdr *datah = (const struct sctp_datahdr
+				*) (chunk1 + 1);
+		if (datah + 1 > data_end) {
+			return false;
+		}
+
+		union kspx_sctp_ppid_info ppid_info;
+		ppid_info.ppid = datah->ppid;
+
+		/* don't admit data chunks with end-of-conn stream types */
+		if (ppid_info.datastream_type == SPX_DS_END_OF_CONN ||
+				ppid_info.datastream_type ==
+				SPX_DS_END_OF_CONN_ACK) {
+			return false;
+		}
+
 	}
 
 	return true;
@@ -1154,8 +1183,19 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 		void *first_data_end = ((void *) chunk1) + chunk_len;
 		padding_bytes = data_end - first_data_end;
 
+		union kspx_sctp_ppid_info ppid_info;
+		ppid_info.ppid = datah->ppid;
+
 		connection_control = SPX_CC_ACK_REQUIRED;
-		datastream_type = SPX_DS_NONE;
+		if (ppid_info.end_of_msg) {
+			connection_control |= SPX_CC_END_OF_MSG;
+		}
+		if (ppid_info.attention) {
+			connection_control |= SPX_CC_ATTENTION;
+		}
+
+		datastream_type = ppid_info.datastream_type;
+
 		__builtin_sub_overflow(bpf_ntohl(datah->tsn),
 				info->local_sequence_offset, &seq_no);
 		bpf_printk("tsn: %u", bpf_ntohl(datah->tsn));
