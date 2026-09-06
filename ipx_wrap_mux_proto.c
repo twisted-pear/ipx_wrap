@@ -2758,6 +2758,55 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	return sent_len;
 }
 
+ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
+		int flags, __u8 *datastream_type, __u8 *spx_flags)
+{
+	char ctrl_buf[CMSG_SPACE(sizeof(struct sctp_rcvinfo))];
+
+	struct iovec iov;
+	iov.iov_base = buf;
+	iov.iov_len = len;
+
+	struct msghdr msgh;
+	msgh.msg_iov = &iov;
+	msgh.msg_iovlen = 1;
+	msgh.msg_name = NULL;
+	msgh.msg_namelen = 0;
+	msgh.msg_control = &ctrl_buf;
+	msgh.msg_controllen = CMSG_SPACE(sizeof(struct sctp_rcvinfo));
+	msgh.msg_flags = 0;
+
+	ssize_t nrcvd = recvmsg(h.spx_sock, &msgh, flags);
+	if (nrcvd < 0) {
+		return nrcvd;
+	}
+
+	*datastream_type = SPX_DS_NONE;
+	*spx_flags = 0;
+
+	void *rcvinfo_ptr = ipxw_mux_get_rx_cmsg(ctrl_buf,
+			CMSG_SPACE(sizeof(struct sctp_rcvinfo)), IPPROTO_SCTP,
+			SCTP_RCVINFO);
+	if (rcvinfo_ptr == NULL) {
+		return nrcvd;
+	}
+
+	struct sctp_rcvinfo rcvinfo;
+	memcpy(&rcvinfo, rcvinfo_ptr, sizeof(struct sctp_rcvinfo));
+
+	union kspx_sctp_ppid_info ppid_info;
+	ppid_info.ppid = rcvinfo.rcv_ppid;
+	*datastream_type = ppid_info.datastream_type;
+	if (ppid_info.end_of_msg) {
+		*spx_flags |= SPX_CC_END_OF_MSG;
+	}
+	if (ppid_info.attention) {
+		*spx_flags |= SPX_CC_ATTENTION;
+	}
+
+	return nrcvd;
+}
+
 bool ipxw_mux_spx_recv_ready(struct ipxw_mux_spx_handle h)
 {
 	if (ipxw_mux_spx_handle_is_error(h)) {

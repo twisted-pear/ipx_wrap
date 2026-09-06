@@ -61,8 +61,11 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 
 	while (true) {
 		char buf[SPX_MAX_DATA_LEN_WO_SIZNG + 1];
-		ssize_t nrcvd = recv(spxh.spx_sock, buf,
-				SPX_MAX_DATA_LEN_WO_SIZNG, 0);
+		__u8 ds_type = 0;
+		__u8 spx_flags = 0;
+		ssize_t nrcvd = ipxw_mux_kspx_recv(spxh, buf,
+				SPX_MAX_DATA_LEN_WO_SIZNG, 0, &ds_type,
+				&spx_flags);
 		if (nrcvd < 0) {
 			perror("recv");
 			break;
@@ -72,7 +75,8 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 			break;
 		}
 		buf[nrcvd] = '\0';
-		printf("rcvd %ld bytes:\n", nrcvd);
+		printf("rcvd %ld bytes (DS: %02hhx, Flags: %02hhx):\n", nrcvd,
+				ds_type, spx_flags);
 		puts(buf);
 
 		long num = strtol(buf, NULL, 10);

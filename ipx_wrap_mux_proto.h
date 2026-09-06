@@ -210,6 +210,9 @@ void ipxw_mux_spx_prepare_xmit_msg(struct ipxw_mux_spx_handle h, struct
 ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 		*msg, size_t data_len, bool block);
 
+ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
+		int flags, __u8 *datastream_type, __u8 *spx_flags);
+
 /* check if the connection is in a state where receiving messages is possible
  */
 bool ipxw_mux_spx_recv_ready(struct ipxw_mux_spx_handle h);

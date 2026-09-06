@@ -446,6 +446,12 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			return false;
 		}
 
+		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RECVRCVINFO, &val,
+					sizeof(val)) < 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
+
 		struct sctp_rtoinfo rtoi = {
 			.srto_assoc_id = SCTP_FUTURE_ASSOC,
 			.srto_initial =  1 * TICKS_MS,
