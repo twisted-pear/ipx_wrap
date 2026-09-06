@@ -79,7 +79,8 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 		int nhex = snprintf(buf, SPX_MAX_DATA_LEN_WO_SIZNG, "%0lx\n",
 				num);
 
-		ssize_t nsent = send(spxh.spx_sock, buf, nhex, MSG_EOR);
+		ssize_t nsent = ipxw_mux_kspx_send(spxh, buf, nhex, 0, 0x01,
+				SPX_CC_END_OF_MSG);
 		if (nsent < 0) {
 			perror("send");
 			break;

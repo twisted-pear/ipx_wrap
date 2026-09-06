@@ -192,6 +192,9 @@ bool ipxw_mux_spx_established(struct ipxw_mux_spx_handle h);
 
 int ipxw_mux_spx_max_data_len(struct ipxw_mux_spx_handle h);
 
+ssize_t ipxw_mux_kspx_send(struct ipxw_mux_spx_handle h, const void *buf,
+		size_t len, int flags, __u8 datastream_type, __u8 spx_flags);
+
 /* check if the connection is in a state where transmitting messages is
  * possible, this includes ipxw_mux_spx_established() */
 bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h);

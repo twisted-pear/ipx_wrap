@@ -7,6 +7,7 @@
 #include <linux/net_tstamp.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/sctp.h>
 #include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2590,6 +2591,69 @@ int ipxw_mux_spx_max_data_len(struct ipxw_mux_spx_handle h)
 
 	return ipxw_mux_spx_data_len(h.last_known_state->neg_size_to_remote,
 			true);
+}
+
+ssize_t ipxw_mux_kspx_send(struct ipxw_mux_spx_handle h, const void *buf,
+		size_t len, int flags, __u8 datastream_type, __u8 spx_flags)
+{
+	/* illegal datastream type */
+	if (datastream_type == SPX_DS_END_OF_CONN || datastream_type ==
+			SPX_DS_END_OF_CONN_ACK) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* unsupported flags */
+	if ((spx_flags & ~(SPX_CC_END_OF_MSG | SPX_CC_ATTENTION)) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (len > SPX_MAX_DATA_LEN_WO_SIZNG) {
+		errno = EMSGSIZE;
+		return -1;
+	}
+
+	union kspx_sctp_ppid_info ppid_info;
+	ppid_info.ppid = 0;
+	ppid_info.datastream_type = datastream_type;
+	ppid_info.end_of_msg = (spx_flags & SPX_CC_END_OF_MSG) != 0;
+	ppid_info.attention = (spx_flags & SPX_CC_ATTENTION) != 0;
+
+	struct sctp_sndinfo sndinfo = {
+		.snd_sid = 0,
+		.snd_flags = 0,
+		.snd_ppid = ppid_info.ppid,
+		.snd_context = 0,
+		.snd_assoc_id = SCTP_CURRENT_ASSOC
+	};
+
+	struct iovec iov;
+	iov.iov_base = (void *) buf;
+	iov.iov_len = len;
+
+	union {
+		char buf[CMSG_SPACE(sizeof(struct sctp_sndinfo))];
+		struct cmsghdr align;
+	} ctrl_msg;
+	memset(ctrl_msg.buf, 0, sizeof(ctrl_msg.buf));
+
+	struct msghdr msgh;
+	msgh.msg_iov = &iov;
+	msgh.msg_iovlen = 1;
+	msgh.msg_name = NULL;
+	msgh.msg_namelen = 0;
+	msgh.msg_control = &ctrl_msg;
+	msgh.msg_controllen = sizeof(ctrl_msg.buf);
+	msgh.msg_flags = 0;
+
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msgh);
+	cmsg->cmsg_level = IPPROTO_SCTP;
+	cmsg->cmsg_type = SCTP_SNDINFO;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(struct sctp_sndinfo));
+	memcpy(CMSG_DATA(cmsg), &sndinfo, sizeof(struct sctp_sndinfo));
+
+	return sendmsg(h.spx_sock, &msgh, flags);
 }
 
 bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h)
