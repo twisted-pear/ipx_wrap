@@ -600,6 +600,8 @@ static __always_inline bool update_state_egress_CONN_ACK_RCVD(struct
 {
 	/* once we have the cookie echo, we are established */
 	spx_state->state = KSPX_ESTABLISHED;
+	/* we have not yet acked any TSN */
+	spx_state->last_ackd_tsn = -1;
 
 	return true;
 }
@@ -690,9 +692,8 @@ static __always_inline void update_state_ingress_ESTABLISHED(struct
 		data_len)
 {
 	/* got a request to close the connection */
-	if (((spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0) &&
-			((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0)
-			&& (spxh->datastream_type == SPX_DS_END_OF_CONN)) {
+	if (((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0) &&
+			(spxh->datastream_type == SPX_DS_END_OF_CONN)) {
 		spx_state->state = KSPX_SHUTDOWN_RCVD;
 	}
 
@@ -725,7 +726,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 				SPX_CC_SYSTEM_PKT) != 0) &&
 		((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0);
 	bool shutdown_requested = spxh->datastream_type == SPX_DS_END_OF_CONN
-		&& heartbeat_requested;
+		&& ((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0);
 
 	size_t hbs_ofs = sctp_len;
 	size_t hbs_len = 0;
@@ -1155,7 +1156,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	} else if (chunk1->type == SCTP_CID_SHUTDOWN) {
 		data_ofs = data_end - ((void *) sctph);
 
-		connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
+		connection_control = SPX_CC_ACK_REQUIRED;
 		datastream_type = SPX_DS_END_OF_CONN;
 
 		__builtin_add_overflow(seq_no, 1, &seq_no);
@@ -1164,7 +1165,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	} else if (chunk1->type == SCTP_CID_SHUTDOWN_ACK) {
 		data_ofs = data_end - ((void *) sctph);
 
-		connection_control = SPX_CC_SYSTEM_PKT;
+		connection_control = 0;
 		datastream_type = SPX_DS_END_OF_CONN_ACK;
 
 	/* DATA chunk */
@@ -1303,9 +1304,8 @@ static __always_inline bool admit_ingress_SHUTDOWN_SENT(const struct
 		data_len)
 {
 	/* do not permit end-of-connection packets here */
-	if (((spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0) &&
-			((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0)
-			&& spxh->datastream_type == SPX_DS_END_OF_CONN) {
+	if (((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0) &&
+			spxh->datastream_type == SPX_DS_END_OF_CONN) {
 		return false;
 	}
 
@@ -1324,8 +1324,7 @@ static __always_inline bool transform_ingress_SHUTDOWN_SENT(struct __sk_buff
 		ingress_transform_info *info)
 {
 	/* if this is not an end-of-connection-ack treat it normally */
-	if (spxh->datastream_type != SPX_DS_END_OF_CONN_ACK ||
-			(spxh->connection_control & SPX_CC_SYSTEM_PKT) == 0) {
+	if (spxh->datastream_type != SPX_DS_END_OF_CONN_ACK) {
 		return transform_ingress_ESTABLISHED(skb, spxh, data_len,
 				info);
 	}
