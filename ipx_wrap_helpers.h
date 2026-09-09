@@ -21,7 +21,14 @@ bool get_bound_ipx_addr(struct ipxw_mux_handle h, struct ipx_addr *addr);
 
 struct queued_ipx_msg {
 	STAILQ_ENTRY(queued_ipx_msg) q_entry;
-	struct sockaddr_ipx addr;
+	bool is_spx;
+	union {
+		struct sockaddr_ipx addr;
+		struct {
+			__u8 spx_flags;
+			__u8 datastream_type;
+		};
+	};
 	__u16 data_len;
 	__u8 data[0];
 };

@@ -143,6 +143,9 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, struct ipxw_mux_msg *msg, int
 
 /* SPX client API */
 
+#define SPX_F_END_OF_MSG 0x01
+#define SPX_F_ATTENTION 0x02
+
 #define TICKS_MS (1000/18)
 
 #define SPX_ABORT_TMO_TICKS 1500

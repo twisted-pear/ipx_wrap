@@ -2617,8 +2617,8 @@ ssize_t ipxw_mux_kspx_send(struct ipxw_mux_spx_handle h, const void *buf,
 	union kspx_sctp_ppid_info ppid_info;
 	ppid_info.ppid = 0;
 	ppid_info.datastream_type = datastream_type;
-	ppid_info.end_of_msg = (spx_flags & SPX_CC_END_OF_MSG) != 0;
-	ppid_info.attention = (spx_flags & SPX_CC_ATTENTION) != 0;
+	ppid_info.end_of_msg = (spx_flags & SPX_F_END_OF_MSG) != 0;
+	ppid_info.attention = (spx_flags & SPX_F_ATTENTION) != 0;
 
 	struct sctp_sndinfo sndinfo = {
 		.snd_sid = 0,
@@ -2798,10 +2798,10 @@ ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
 	ppid_info.ppid = rcvinfo.rcv_ppid;
 	*datastream_type = ppid_info.datastream_type;
 	if (ppid_info.end_of_msg) {
-		*spx_flags |= SPX_CC_END_OF_MSG;
+		*spx_flags |= SPX_F_END_OF_MSG;
 	}
 	if (ppid_info.attention) {
-		*spx_flags |= SPX_CC_ATTENTION;
+		*spx_flags |= SPX_F_ATTENTION;
 	}
 
 	return nrcvd;
