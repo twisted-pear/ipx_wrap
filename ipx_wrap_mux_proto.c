@@ -2554,6 +2554,10 @@ static bool ipxw_mux_spx_established_pre_sizng(struct ipxw_mux_spx_handle h)
 		return false;
 	}
 
+	if (h.kernel) {
+		return true;
+	}
+
 	switch (h.last_known_state->state) {
 		case IPXW_MUX_SPX_CONN_ESTABLISHED:
 		case IPXW_MUX_SPX_CONN_MUST_SEND_ACK:
@@ -2604,7 +2608,7 @@ ssize_t ipxw_mux_kspx_send(struct ipxw_mux_spx_handle h, const void *buf,
 	}
 
 	/* unsupported flags */
-	if ((spx_flags & ~(SPX_CC_END_OF_MSG | SPX_CC_ATTENTION)) != 0) {
+	if ((spx_flags & ~(SPX_F_END_OF_MSG | SPX_F_ATTENTION)) != 0) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -2758,10 +2762,13 @@ ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
 	return sent_len;
 }
 
+#define SCTP_CTRL_DATA_LEN (CMSG_SPACE(sizeof(struct sctp_rcvinfo)) + \
+		CMSG_SPACE(sizeof(struct sctp_nxtinfo)))
+
 ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
 		int flags, __u8 *datastream_type, __u8 *spx_flags)
 {
-	char ctrl_buf[CMSG_SPACE(sizeof(struct sctp_rcvinfo))];
+	char ctrl_buf[SCTP_CTRL_DATA_LEN];
 
 	struct iovec iov;
 	iov.iov_base = buf;
@@ -2773,7 +2780,7 @@ ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
 	msgh.msg_name = NULL;
 	msgh.msg_namelen = 0;
 	msgh.msg_control = &ctrl_buf;
-	msgh.msg_controllen = CMSG_SPACE(sizeof(struct sctp_rcvinfo));
+	msgh.msg_controllen = SCTP_CTRL_DATA_LEN;
 	msgh.msg_flags = 0;
 
 	ssize_t nrcvd = recvmsg(h.spx_sock, &msgh, flags);
@@ -2784,9 +2791,8 @@ ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
 	*datastream_type = SPX_DS_NONE;
 	*spx_flags = 0;
 
-	void *rcvinfo_ptr = ipxw_mux_get_rx_cmsg(ctrl_buf,
-			CMSG_SPACE(sizeof(struct sctp_rcvinfo)), IPPROTO_SCTP,
-			SCTP_RCVINFO);
+	void *rcvinfo_ptr = ipxw_mux_get_rx_cmsg(ctrl_buf, SCTP_CTRL_DATA_LEN,
+			IPPROTO_SCTP, SCTP_RCVINFO);
 	if (rcvinfo_ptr == NULL) {
 		return nrcvd;
 	}
@@ -2803,6 +2809,23 @@ ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
 	if (ppid_info.attention) {
 		*spx_flags |= SPX_F_ATTENTION;
 	}
+
+	/* caller attempted to determine the message length, try to accomodate
+	 * them */
+	if ((flags & MSG_PEEK) != 0 && (flags & MSG_TRUNC) != 0) {
+		void *nxtinfo_ptr = ipxw_mux_get_rx_cmsg(ctrl_buf,
+				SCTP_CTRL_DATA_LEN, IPPROTO_SCTP,
+				SCTP_NXTINFO);
+
+		if (nxtinfo_ptr == NULL) {
+			return nrcvd;
+		}
+
+		struct sctp_nxtinfo nxtinfo;
+		memcpy(&nxtinfo, nxtinfo_ptr, sizeof(struct sctp_nxtinfo));
+		return nxtinfo.nxt_length;
+	}
+
 
 	return nrcvd;
 }
