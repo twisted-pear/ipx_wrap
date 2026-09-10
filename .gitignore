@@ -20,6 +20,7 @@
 /ipxrecv
 /spxclient
 /rconcl
+/krconcl
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests
