@@ -108,7 +108,9 @@ static struct srv_type_list *get_srv_type_list(__be16 srv_type)
 static int sort_srv_entry_by_last_seen(struct srv_entry *a, struct srv_entry
 		*b)
 {
-	return a->last_seen - b->last_seen;
+	int diff;
+	__builtin_sub_overflow(a->last_seen, b->last_seen, &diff);
+	return diff;
 }
 
 static bool prepare_srv_type_and_name_key(__be16 srv_type, const char
@@ -165,6 +167,12 @@ static void delete_srv_entry(struct srv_entry *e)
 
 static bool insert_srv_entry(struct srv_entry *e)
 {
+	/* get the by server type list */
+	struct srv_type_list *l = get_srv_type_list(e->data.srv_type);
+	if (l == NULL) {
+		return false;
+	}
+
 	/* service must not exist already */
 
 	/* in a production build (without asserts) these two variables will be
@@ -193,11 +201,6 @@ static bool insert_srv_entry(struct srv_entry *e)
 			sizeof(*key), e);
 
 	/* the by server type ordered list */
-	struct srv_type_list *l = get_srv_type_list(e->data.srv_type);
-	if (l == NULL) {
-		return false;
-	}
-
 	bool inserted = false;
 	struct srv_entry *i;
 	TAILQ_FOREACH(i, &l->entries, type_list_entry) {
@@ -542,7 +545,19 @@ static ssize_t insert_srv_entries_from_sap_rsp(struct srv_id_pkt *sap_rsp,
 		// is the net one of our own but the hop count is higher?
 		// do we have a route to the source net?
 
-		memcpy(&e->data, &sap_rsp->data[i], sizeof(struct srv_data));
+		/* copy type and name and also sanitize the name */
+		if (!prepare_srv_type_and_name_key(sap_rsp->data[i].srv_type,
+					sap_rsp->data[i].srv_name, (struct
+						srv_type_and_name_key *)
+					&(e->data.srv_type))) {
+			free(e);
+			continue;
+		}
+		/* copy remaining data */
+		e->data.srv_addr = sap_rsp->data[i].srv_addr;
+		e->data.hops = sap_rsp->data[i].hops;
+
+		/* insert entry meta-data */
 		e->learned_from_net = in_net;
 		e->last_seen = now_secs;
 
