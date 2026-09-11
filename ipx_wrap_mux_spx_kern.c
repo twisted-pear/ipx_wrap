@@ -362,6 +362,7 @@ struct {
 	.values = {
 		[KSPX_INVALID] = (void *) &kspx_state_ingress_INVALID,
 		[KSPX_NEW] = (void *) &kspx_state_ingress_NEW,
+		[KSPX_INCOMING] = (void *) &kspx_state_ingress_INCOMING,
 		[KSPX_CONN_ACK_RCVD] = (void *)
 			&kspx_state_ingress_CONN_ACK_RCVD,
 		[KSPX_ESTABLISHED] = (void *) &kspx_state_ingress_ESTABLISHED,
@@ -381,6 +382,7 @@ struct {
 	.values = {
 		[KSPX_INVALID] = (void *) &kspx_state_egress_INVALID,
 		[KSPX_NEW] = (void *) &kspx_state_egress_NEW,
+		[KSPX_INCOMING] = (void *) &kspx_state_egress_INCOMING,
 		[KSPX_CONN_ACK_RCVD] = (void *)
 			&kspx_state_egress_CONN_ACK_RCVD,
 		[KSPX_ESTABLISHED] = (void *) &kspx_state_egress_ESTABLISHED,

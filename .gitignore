@@ -19,6 +19,7 @@
 /ipxsend
 /ipxrecv
 /spxclient
+/spxserver
 /rconcl
 /krconcl
 /vmlinux.h

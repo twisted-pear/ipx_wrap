@@ -178,6 +178,10 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr, int spxii_size_negotiation_hint);
 
+__be16 ipxw_mux_kspx_check_for_conn_req(const void *buf, size_t len, struct
+		sockaddr_ipx *src);
+struct ipxw_mux_spx_handle ipxw_mux_kspx_accept(struct ipxw_mux_handle h,
+		struct sockaddr_ipx *remote_sockaddr, __be16 remote_conn_id);
 __be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg, bool
 		*is_spxii);
 struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct

@@ -1872,6 +1872,35 @@ static bool ipxw_mux_spx_bind_and_connect(int spx_sock, __be32 prefix, struct
 	return true;
 }
 
+__be16 ipxw_mux_kspx_check_for_conn_req(const void *buf, size_t len, struct
+		sockaddr_ipx *src)
+{
+	if (len != sizeof(struct spxhdr)) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+
+	if (src->sipx_type != SPX_PKT_TYPE) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+
+	const struct spxhdr *spxh = buf;
+	if ((spxh->connection_control & SPX_CC_MASK_SPX) != (SPX_CC_SYSTEM_PKT
+				| SPX_CC_ACK_REQUIRED)) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (spxh->datastream_type != SPX_DS_NONE) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (spxh->dst_conn_id != SPX_CONN_ID_UNKNOWN) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+	if (ntohs(spxh->seq_no) != 0 || ntohs(spxh->ack_no) != 0) {
+		return SPX_CONN_ID_UNKNOWN;
+	}
+
+	return spxh->src_conn_id;
+}
+
 __be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg, bool
 		*is_spxii)
 {
@@ -2272,6 +2301,63 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 		if (!ipxw_mux_spx_bind_and_connect(ret.spx_sock, h.prefix,
 					&(connect_rsp.spx_connect.addr),
 					daddr)) {
+			break;
+		}
+
+		return ret;
+	} while (0);
+
+	ipxw_mux_spx_conn_close(&ret);
+
+	return ret;
+}
+
+struct ipxw_mux_spx_handle ipxw_mux_kspx_accept(struct ipxw_mux_handle h,
+		struct sockaddr_ipx *remote_sockaddr, __be16 remote_conn_id)
+{
+	struct ipx_addr remote_addr;
+	sockaddr_ipx_to_ipx_addr(&remote_addr, remote_sockaddr);
+
+	struct ipxw_mux_spx_handle ret = ipxw_mux_spx_mk_handle(h, true);
+	if (ret.last_known_state == NULL || ret.spx_sock < 0) {
+		return ret;
+	}
+
+	struct ipxw_mux_msg accept_req;
+	accept_req.type = IPXW_MUX_SPX_ACCEPT;
+	accept_req.spx_accept.addr = remote_addr;
+	accept_req.spx_accept.spx_sock = ret.spx_sock;
+	accept_req.spx_accept.conn_id = remote_conn_id;
+
+	struct ipxw_mux_msg accept_rsp;
+	accept_rsp.type = IPXW_MUX_CONF;
+	accept_rsp.conf.data_len = 0;
+
+	ssize_t rcvd_len = ipxw_mux_send_recv_conf_msg(h, &accept_req,
+			&accept_rsp);
+
+	do {
+		if (rcvd_len < 0) {
+			break;
+		}
+
+		if (accept_rsp.type != IPXW_MUX_SPX_ACCEPT) {
+			errno = EINVAL;
+			break;
+		}
+
+		if (accept_rsp.spx_accept.err != 0) {
+			errno = accept_rsp.spx_accept.err;
+			break;
+		}
+
+		ret.conn_id = accept_rsp.spx_accept.conn_id;
+		ret.spxii = false;
+		ret.last_known_state->state = IPXW_MUX_SPX_INVALID;
+
+		if (!ipxw_mux_spx_bind_and_connect(ret.spx_sock, h.prefix,
+					&(accept_rsp.spx_accept.addr),
+					&remote_addr)) {
 			break;
 		}
 

@@ -285,6 +285,7 @@ struct bpf_spx_state {
 enum kspx_connection_state {
 	KSPX_INVALID = 0,
 	KSPX_NEW,
+	KSPX_INCOMING,
 	KSPX_CONN_ACK_RCVD,
 	KSPX_ESTABLISHED,
 	KSPX_SHUTDOWN_SENT,

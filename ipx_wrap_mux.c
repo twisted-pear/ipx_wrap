@@ -298,7 +298,8 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 	};
 
 	struct bpf_kspx_state spx_state = {
-		.state = KSPX_NEW,
+		.state = (remote_id == SPX_CONN_ID_UNKNOWN ? KSPX_NEW :
+				KSPX_INCOMING),
 		.remote_addr = *remote_addr,
 		.local_addr = *local_addr,
 		.remote_id = remote_id,

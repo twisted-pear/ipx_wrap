@@ -247,6 +247,7 @@ struct egress_transform_info {
 	__be16 sctp_sport;
 	__be16 sctp_dport;
 	__be32 sctp_dvtag;
+	__be32 sctp_svtag;
 };
 
 static __always_inline void fill_egress_transform_info(const struct
@@ -264,6 +265,7 @@ static __always_inline void fill_egress_transform_info(const struct
 	info->sctp_sport = spx_state->sctp_sport;
 	info->sctp_dport = spx_state->sctp_dport;
 	info->sctp_dvtag = spx_state->sctp_dvtag;
+	info->sctp_svtag = spx_state->sctp_svtag;
 }
 
 static __always_inline bool admit_ingress_NEW(const struct bpf_kspx_state
@@ -523,6 +525,280 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 
 	/* fill in the SPX header */
 	spxh->connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
+	spxh->datastream_type = SPX_DS_NONE;
+	spxh->src_conn_id = info->local_id;
+	spxh->dst_conn_id = info->remote_id;
+	spxh->seq_no = bpf_htons(0);
+	spxh->ack_no = bpf_htons(info->last_ackd_tsn);
+	spxh->alloc_no = bpf_htons(info->local_alloc_no);
+
+	return true;
+}
+
+static __always_inline bool admit_ingress_INCOMING(const struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh, size_t data_len)
+{
+	/* no incomding packets are expected here */
+	return false;
+}
+
+static __always_inline void update_state_ingress_INCOMING(struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh, size_t data_len)
+{
+}
+
+static __always_inline bool transform_ingress_INCOMING(struct __sk_buff *skb,
+		struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	return false;
+}
+
+static __always_inline bool admit_egress_INCOMING(const struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, const struct
+		sctp_chunkhdr *chunk1, void *data_end)
+{
+	if (chunk1 + 1 > data_end) {
+		return false;
+	}
+
+	/* allow only the init chunk */
+	if (chunk1->type != SCTP_CID_INIT) {
+		return false;
+	}
+
+	if (bpf_ntohs(chunk1->length) < sizeof(struct sctp_chunkhdr) +
+			sizeof(struct sctp_inithdr)) {
+		return false;
+	}
+	const struct sctp_inithdr *inith = (const struct sctp_inithdr *)
+		(chunk1 + 1);
+	if (inith + 1 > data_end) {
+		return false;
+	}
+
+	return true;
+}
+
+/* Note that while it can, this function should never return false. If it does,
+ * there is a bug in the admit function, which should already check if the
+ * packet contains all the info we need. The return value here exists only to
+ * satisfy the verifier. */
+static __always_inline bool update_state_egress_INCOMING(struct bpf_kspx_state
+		*spx_state, const struct sctphdr *sctph, const struct
+		sctp_chunkhdr *chunk1, void *data_end, __u32
+		initial_source_vtag)
+{
+	/* have an INIT */
+	const struct sctp_inithdr *inith = (const struct sctp_inithdr
+			*) (chunk1 + 1);
+	if (inith + 1 > data_end) {
+		return false;
+	}
+
+	__be32 initial_vtag = inith->init_tag;
+	__u32 initial_tsn = bpf_ntohl(inith->initial_tsn);
+
+	spx_state->sctp_dvtag = initial_vtag;
+	spx_state->sctp_svtag = bpf_htonl(initial_source_vtag);
+	spx_state->sctp_sport = sctph->dest;
+	spx_state->sctp_dport = sctph->source;
+	spx_state->local_sequence_offset = initial_tsn;
+
+	/* we are reflecting the INIT right back as an INIT ACK, hence we are
+	 * now ready to deal with the cookie */
+	spx_state->state = KSPX_CONN_ACK_RCVD;
+
+	return true;
+}
+
+static __always_inline bool reflect_INIT_egress_INCOMING(struct __sk_buff *skb,
+		const struct egress_transform_info *info, size_t *new_chunklen)
+{
+	/* calculate the length of the INIT ACK packet */
+	size_t chunklen = sizeof(struct sctp_chunkhdr) + sizeof(struct
+			sctp_inithdr) + sizeof(struct sctp_paramhdr) +
+		SCTP_STATE_COOKIE_LEN;
+	size_t payload_len = sizeof(struct sctphdr) + chunklen;
+
+	/* and grow the packet accordingly */
+	if (bpf_skb_change_tail(skb, payload_len + sizeof(struct ipv6hdr) +
+				sizeof(struct ethhdr), 0) < 0) {
+		bpf_printk("change tail failed");
+		return false;
+	}
+
+	/* get pointers again */
+	void *data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+	struct ethhdr *eth = data;
+	struct ipv6hdr *ip6h = (struct ipv6hdr *) (eth + 1);
+	struct sctphdr *sctph = (struct sctphdr *) (ip6h + 1);
+	struct sctp_chunkhdr *chunk1 = (struct sctp_chunkhdr *) (sctph + 1);
+	struct sctp_inithdr *init = (struct sctp_inithdr *) (chunk1 + 1);
+	struct sctp_paramhdr *param = (struct sctp_paramhdr *) (init + 1);
+	__u8 *cookie = (__u8 *) (param + 1);
+	if (cookie + SCTP_STATE_COOKIE_LEN > data_end) {
+		bpf_printk("get ptrs 2 failed");
+		return false;
+	}
+
+	/* swap Ethernet addrs */
+	__u8 eth_dest_backup[ETH_ALEN];
+	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+
+	/* swap the IPv6 addrs */
+	struct in6_addr ip6_dest_backup;
+	__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr), sizeof(struct
+				in6_addr));
+	__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
+				in6_addr));
+	__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup, sizeof(struct
+				in6_addr));
+
+	/* adjust the payload length */
+	ip6h->payload_len = bpf_htons(payload_len);
+
+	/* create the SCTP init ack */
+	sctph->source = info->sctp_sport;
+	sctph->dest = info->sctp_dport;
+	sctph->vtag = info->sctp_dvtag;
+	sctph->checksum = bpf_htonl(0);
+	chunk1->type = SCTP_CID_INIT_ACK;
+	chunk1->flags = 0;
+	chunk1->length = bpf_htons(chunklen);
+	init->init_tag = info->sctp_svtag;
+	init->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
+	init->num_inbound_streams = bpf_htons(1);
+	init->num_outbound_streams = bpf_htons(1);
+	init->initial_tsn = bpf_htonl(0);
+	param->type = SCTP_PARAM_STATE_COOKIE;
+	param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
+			SCTP_STATE_COOKIE_LEN);
+	__u32 cval = bpf_get_prandom_u32();
+_Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval),
+		"SCTP state cookie too short");
+	__builtin_memset(cookie, 0, SCTP_STATE_COOKIE_LEN);
+	__builtin_memcpy(cookie, &cval, sizeof(cval));
+
+	/* calculate CRC32c checksum */
+	__u32 csum = 0;
+	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
+		bpf_printk("csum failed");
+		return false;
+	}
+	sctph->checksum = bpf_htonl(csum);
+
+	/* mark the packet for reinjection so that the interface
+	 * program accepts it */
+	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
+		SPX_TO_SCTP_REINJECT_MARK;
+
+	if (bpf_clone_redirect(skb, skb->ifindex, BPF_F_INGRESS) < 0) {
+		bpf_printk("clone redir failed");
+		return false;
+	}
+
+	*new_chunklen = chunklen;
+	return true;
+}
+
+static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
+		struct sctphdr *sctph, struct sctp_chunkhdr *chunk1, const
+		struct egress_transform_info *info)
+{
+	size_t new_chunklen;
+
+	/* reflect the INIT chunk as an INIT ACK */
+	if (!reflect_INIT_egress_INCOMING(skb, info, &new_chunklen)) {
+		bpf_printk("reflect failed");
+		return false;
+	}
+
+	/* make room for the new headers */
+	__s32 newhdrs_len = sizeof(struct udphdr) + sizeof(struct ipxhdr) +
+		sizeof(struct spxhdr);
+	__s32 oldhdrs_len = sizeof(struct sctphdr) + new_chunklen;
+	__s32 len_diff = newhdrs_len - oldhdrs_len;
+	size_t payload_len = newhdrs_len;
+	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
+		bpf_printk("adj room failed");
+		return false;
+	}
+	bpf_skb_pull_data(skb, 0);
+
+	/* adjust pointers and reverify */
+	void *data_end = (void *)(long)skb->data_end;
+	void *data = (void *)(long)skb->data;
+
+	struct ethhdr *eth = data;
+	struct ipv6hdr *ip6h = ((void *) eth) + sizeof(struct ethhdr);
+	struct udphdr *udph = ((void *) ip6h) + sizeof(struct ipv6hdr);
+	struct ipxhdr *ipxh = ((void *) udph) + sizeof(struct udphdr);
+	struct spxhdr *spxh = ((void *) ipxh) + sizeof(struct ipxhdr);
+	if (spxh + 1 > data_end) {
+		bpf_printk("get ptrs 3 failed");
+		return false;
+	}
+
+	/* calculate and verify length */
+	if (payload_len + sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
+			skb->len) {
+		bpf_printk("len verify failed");
+		return false;
+	}
+
+	/* swap Ethernet addrs (again) */
+	__u8 eth_dest_backup[ETH_ALEN];
+	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+
+	/* fill in IPv6 header */
+	ip6h->payload_len = bpf_htons(payload_len);
+	ip6h->nexthdr = IPPROTO_UDP;
+
+	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
+		&(ip6h->saddr);
+	ip6_saddr->prefix = info->prefix;
+	ip6_saddr->ipx_net = info->local_addr.net;
+	__builtin_memcpy(ip6_saddr->ipx_node_fst, info->local_addr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	ip6_saddr->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(ip6_saddr->ipx_node_snd, &(info->local_addr.node[3]),
+			IPX_ADDR_NODE_BYTES / 2);
+
+	struct ipv6_eui64_addr *ip6_daddr = (struct ipv6_eui64_addr *)
+		&(ip6h->daddr);
+	ip6_daddr->prefix = info->prefix;
+	ip6_daddr->ipx_net = info->remote_addr.net;
+	__builtin_memcpy(ip6_daddr->ipx_node_fst, info->remote_addr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	ip6_daddr->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(ip6_daddr->ipx_node_snd, &(info->remote_addr.node[3]),
+			IPX_ADDR_NODE_BYTES / 2);
+
+	/* fill in the UDP header. */
+	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
+	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
+	/* we do not care about the UDP checksum here because the outer eBPF
+	 * program discards the UDP header anyway */
+	// TODO: calculate the UDP checksum properly
+	udph->check = bpf_htons(0xdead);
+	udph->len = bpf_htons(payload_len);
+
+	/* fill in the IPX header */
+	ipxh->csum = IPX_CSUM_NONE;
+	ipxh->pktlen = bpf_htons(payload_len - sizeof(struct udphdr));
+	ipxh->tc = 0;
+	ipxh->type = SPX_PKT_TYPE;
+	ipxh->daddr = info->remote_addr;
+	ipxh->saddr = info->local_addr;
+
+	/* fill in the SPX header */
+	spxh->connection_control = SPX_CC_SYSTEM_PKT;
 	spxh->datastream_type = SPX_DS_NONE;
 	spxh->src_conn_id = info->local_id;
 	spxh->dst_conn_id = info->remote_id;
@@ -1537,6 +1813,41 @@ int kspx_state_egress_NEW(struct __sk_buff *skb)
 
 	/* init chunk */
 	if (!transform_egress_NEW(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT,
+				"transformation failed");
+	}
+	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
+}
+
+SEC("tc/ingress")
+int kspx_state_ingress_INCOMING(struct __sk_buff *skb)
+{
+	GENERIC_INGRESS(INCOMING);
+}
+
+SEC("tc/egress")
+int kspx_state_egress_INCOMING(struct __sk_buff *skb)
+{
+	__u32 initial_source_vtag = bpf_get_prandom_u32();
+
+	ENTER_EGRESS(KSPX_INCOMING);
+
+	if (!admit_egress_INCOMING(spx_state, sctph, chunk1, data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
+	}
+
+	if (!update_state_egress_INCOMING(spx_state, sctph, chunk1, data_end,
+				initial_source_vtag)) {
+		EXIT_EGRESS(TC_ACT_SHOT,
+				"state update failed (this is a BUG!)");
+	}
+
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
+	put_kspx_state(spx_state);
+
+	/* init chunk */
+	if (!transform_egress_INCOMING(skb, sctph, chunk1, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT,
 				"transformation failed");
 	}
