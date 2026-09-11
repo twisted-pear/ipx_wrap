@@ -900,8 +900,9 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 			break;
 		case IPXW_MUX_SPX_CLOSE:
 			struct spx_connection *conn = NULL;
-			HASH_FIND_INT(be_conf->ht_id_to_spx_conn,
-					&(msg->spx_close.conn_id), conn);
+			HASH_FIND(hh, be_conf->ht_id_to_spx_conn,
+					&(msg->spx_close.conn_id),
+					sizeof(__be16), conn);
 			if (conn != NULL) {
 				delete_spx_conn(be_conf, conn);
 			}
