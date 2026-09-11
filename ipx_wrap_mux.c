@@ -471,7 +471,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		}
 	}
 
-	if (e->recv_direct) {
+	if (e->recv_direct && !kernel) {
 		conn_rsp->err = ENOTSUP;
 		return false;
 	}

@@ -1620,6 +1620,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 	bind_msg.bind.pkt_type = SPX_PKT_TYPE;
 	bind_msg.bind.pkt_type_any = false;
 	bind_msg.bind.recv_bcast = false;
+	bind_msg.bind.recv_direct = true;
 
 	struct ipxw_mux_handle ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {

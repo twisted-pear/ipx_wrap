@@ -31,6 +31,7 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 	bind_msg.bind.pkt_type = SPX_PKT_TYPE;
 	bind_msg.bind.pkt_type_any = false;
 	bind_msg.bind.recv_bcast = false;
+	bind_msg.bind.recv_direct = true;
 
 	struct ipxw_mux_handle ipxh = ipxw_mux_bind(&bind_msg);
 	if (ipxw_mux_handle_is_error(ipxh)) {
@@ -84,7 +85,7 @@ static _Noreturn void do_spxclient(struct spxclient_cfg *cfg)
 				num);
 
 		ssize_t nsent = ipxw_mux_kspx_send(spxh, buf, nhex, 0, 0x01,
-				SPX_CC_END_OF_MSG);
+				SPX_F_END_OF_MSG);
 		if (nsent < 0) {
 			perror("send");
 			break;
