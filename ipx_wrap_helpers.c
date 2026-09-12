@@ -78,6 +78,50 @@ bool get_bound_ipx_addr(struct ipxw_mux_handle h, struct ipx_addr *addr)
 	return true;
 }
 
+bool counted_ipx_msg_queue_empty(struct counted_ipx_msg_queue *q)
+{
+	bool ret = STAILQ_EMPTY(&(q->q));
+
+	if (ret) {
+		assert(q->n == 0);
+	}
+
+	return ret;
+}
+
+struct queued_ipx_msg *counted_ipx_msg_queue_peek(struct counted_ipx_msg_queue
+		*q)
+{
+	return STAILQ_FIRST(&(q->q));
+}
+
+struct queued_ipx_msg *counted_ipx_msg_queue_pop(struct counted_ipx_msg_queue
+		*q)
+{
+	struct queued_ipx_msg *ret = STAILQ_FIRST(&(q->q));
+	if (ret == NULL) {
+		assert(q->n == 0);
+		return NULL;
+	}
+
+	STAILQ_REMOVE_HEAD(&(q->q), q_entry);
+	q->n--;
+
+	return ret;
+}
+
+void counted_ipx_msg_queue_push(struct counted_ipx_msg_queue *q, struct
+		queued_ipx_msg *msg)
+{
+	STAILQ_INSERT_TAIL(&(q->q), msg, q_entry);
+	q->n++;
+}
+
+size_t counted_ipx_msg_queue_nitems(struct counted_ipx_msg_queue *q)
+{
+	return q->n;
+}
+
 bool counted_msg_queue_empty(struct counted_msg_queue *q)
 {
 	bool ret = STAILQ_EMPTY(&(q->q));

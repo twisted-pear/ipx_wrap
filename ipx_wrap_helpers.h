@@ -35,6 +35,24 @@ struct queued_ipx_msg {
 
 STAILQ_HEAD(ipx_msg_queue, queued_ipx_msg);
 
+struct counted_ipx_msg_queue {
+	struct ipx_msg_queue q;
+	size_t n;
+};
+
+#define counted_ipx_msg_queue_init(qname) { .q = \
+	STAILQ_HEAD_INITIALIZER(qname.q), .n = 0 }
+
+bool counted_ipx_msg_queue_empty(struct counted_ipx_msg_queue *q);
+size_t counted_ipx_msg_queue_nitems(struct counted_ipx_msg_queue *q);
+
+struct queued_ipx_msg *counted_ipx_msg_queue_peek(struct counted_ipx_msg_queue
+		*q);
+struct queued_ipx_msg *counted_ipx_msg_queue_pop(struct counted_ipx_msg_queue
+		*q);
+void counted_ipx_msg_queue_push(struct counted_ipx_msg_queue *q, struct
+		queued_ipx_msg *msg);
+
 STAILQ_HEAD(ipxw_msg_queue, ipxw_mux_msg);
 
 struct counted_msg_queue {

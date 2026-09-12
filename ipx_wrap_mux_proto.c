@@ -1872,8 +1872,8 @@ static bool ipxw_mux_spx_bind_and_connect(int spx_sock, __be32 prefix, struct
 	return true;
 }
 
-__be16 ipxw_mux_kspx_check_for_conn_req(const void *buf, size_t len, struct
-		sockaddr_ipx *src)
+__be16 ipxw_mux_kspx_check_for_conn_req(const void *buf, size_t len, const
+		struct sockaddr_ipx *src)
 {
 	if (len != sizeof(struct spxhdr)) {
 		return SPX_CONN_ID_UNKNOWN;
@@ -2312,7 +2312,7 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 	return ret;
 }
 
-struct ipxw_mux_spx_handle ipxw_mux_kspx_accept(struct ipxw_mux_handle h,
+struct ipxw_mux_spx_handle ipxw_mux_kspx_accept(struct ipxw_mux_handle h, const
 		struct sockaddr_ipx *remote_sockaddr, __be16 remote_conn_id)
 {
 	struct ipx_addr remote_addr;
