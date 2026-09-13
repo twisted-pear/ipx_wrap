@@ -58,7 +58,6 @@ enum rconcl_error_codes {
 
 struct rconcl_cfg {
 	bool verbose;
-	bool spx_1_only;
 	__u16 max_spx_data_len;
 	size_t rx_queue_pause_threshold;
 	size_t tx_queue_pause_threshold;
@@ -137,8 +136,10 @@ static __u8 *current_cp = &cp850[0];
 
 static volatile sig_atomic_t keep_going = true;
 
-static struct ipx_msg_queue rx_queue = STAILQ_HEAD_INITIALIZER(rx_queue);
-static struct ipx_msg_queue tx_queue = STAILQ_HEAD_INITIALIZER(tx_queue);
+static struct counted_ipx_msg_queue rx_queue =
+	counted_ipx_msg_queue_init(rx_queue);
+static struct counted_ipx_msg_queue tx_queue =
+	counted_ipx_msg_queue_init(tx_queue);
 
 /* connected handle */
 static struct ipxw_mux_spx_handle spxh = ipxw_mux_spx_handle_init;
@@ -159,7 +160,7 @@ static void signal_handler(int signal)
 static bool send_out_spx_msg(int epoll_fd)
 {
 	/* no msgs to send */
-	if (STAILQ_EMPTY(&tx_queue)) {
+	if (counted_ipx_msg_queue_empty(&tx_queue)) {
 		/* unregister SPX socket from ready-to-write events to avoid
 		 * busy polling */
 		struct epoll_event ev = {
@@ -172,7 +173,7 @@ static bool send_out_spx_msg(int epoll_fd)
 		return true;
 	}
 
-	struct queued_ipx_msg *msg = STAILQ_FIRST(&tx_queue);
+	struct queued_ipx_msg *msg = counted_ipx_msg_queue_peek(&tx_queue);
 	ssize_t err = ipxw_mux_kspx_send(spxh, msg->data, msg->data_len,
 			MSG_DONTWAIT, msg->datastream_type, msg->spx_flags);
 	if (err < 0) {
@@ -186,7 +187,7 @@ static bool send_out_spx_msg(int epoll_fd)
 		/* other error, make sure to get rid of the message */
 	}
 
-	STAILQ_REMOVE_HEAD(&tx_queue, q_entry);
+	counted_ipx_msg_queue_pop(&tx_queue);
 	free(msg);
 
 	return (err >= 0);
@@ -366,14 +367,14 @@ static _Noreturn void cleanup_and_exit(int epoll_fd, enum rconcl_error_codes
 	}
 
 	/* remove all queued messages */
-	while (!STAILQ_EMPTY(&rx_queue)) {
-		struct queued_ipx_msg *msg = STAILQ_FIRST(&rx_queue);
-		STAILQ_REMOVE_HEAD(&rx_queue, q_entry);
+	while (!counted_ipx_msg_queue_empty(&rx_queue)) {
+		struct queued_ipx_msg *msg =
+			counted_ipx_msg_queue_pop(&rx_queue);
 		free(msg);
 	}
-	while (!STAILQ_EMPTY(&tx_queue)) {
-		struct queued_ipx_msg *msg = STAILQ_FIRST(&tx_queue);
-		STAILQ_REMOVE_HEAD(&tx_queue, q_entry);
+	while (!counted_ipx_msg_queue_empty(&tx_queue)) {
+		struct queued_ipx_msg *msg =
+			counted_ipx_msg_queue_pop(&tx_queue);
 		free(msg);
 	}
 
@@ -460,7 +461,12 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 			cleanup_and_exit(epoll_fd, RCONCL_ERR_SPX_FAILURE);
 		}
 
-		// TOOD: reinstate rx_queue limit
+		/* queue is full, try again later */
+		// FIXME: this can cause a busy loop when the queue is full
+		if (counted_ipx_msg_queue_nitems(&rx_queue) >
+				cfg->rx_queue_pause_threshold) {
+			return;
+		}
 
 		struct queued_ipx_msg *msg = calloc(1, sizeof(struct
 					queued_ipx_msg) + expected_data_len);
@@ -485,9 +491,11 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 			cleanup_and_exit(epoll_fd, RCONCL_ERR_SPX_FAILURE);
 		}
 
+		/* SPX connection was closed */
 		if (rcvd_len == 0) {
 			free(msg);
-			continue;
+			keep_going = false;
+			return;
 		}
 
 		/* continue previous message */
@@ -501,7 +509,7 @@ static void spx_recv_loop(int epoll_fd, struct rconcl_cfg *cfg)
 
 		/* queue received message, if complete */
 		if (msg_to_queue != NULL) {
-			STAILQ_INSERT_TAIL(&rx_queue, msg_to_queue, q_entry);
+			counted_ipx_msg_queue_push(&rx_queue, msg_to_queue);
 		}
 	}
 }
@@ -523,7 +531,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 
 		/* if there are still messages left, don't wait */
 		int epoll_tmo = -1;
-		if (!STAILQ_EMPTY(&rx_queue)) {
+		if (!counted_ipx_msg_queue_empty(&rx_queue)) {
 			epoll_tmo = 0;
 		}
 
@@ -580,7 +588,7 @@ static enum rconcl_event wait_for_event(int epoll_fd, struct rconcl_cfg *cfg)
 		}
 
 		/* if messages are left in the RX queue, notify */
-		if (!STAILQ_EMPTY(&rx_queue)) {
+		if (!counted_ipx_msg_queue_empty(&rx_queue)) {
 			ret |= RCONCL_EVENT_MSG;
 		}
 
@@ -739,17 +747,16 @@ static bool rcon_request_push(int epoll_fd, struct queued_ipx_msg *msg)
 	int req_data_len = sizeof(struct rcon_request) + ntohs(req->data_len);
 
 	msg->data_len = req_data_len;
-	STAILQ_INSERT_TAIL(&tx_queue, msg, q_entry);
+	counted_ipx_msg_queue_push(&tx_queue, msg);
 
 	return true;
 }
 
 static struct queued_ipx_msg *rcon_reply_pop(void)
 {
-	assert(!STAILQ_EMPTY(&rx_queue));
+	assert(!counted_ipx_msg_queue_empty(&rx_queue));
 
-	struct queued_ipx_msg *msg = STAILQ_FIRST(&rx_queue);
-	STAILQ_REMOVE_HEAD(&rx_queue, q_entry);
+	struct queued_ipx_msg *msg = counted_ipx_msg_queue_pop(&rx_queue);
 
 	do {
 		if (msg->data_len < sizeof(struct rcon_reply)) {
@@ -1718,14 +1725,14 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 
 static _Noreturn void usage(void)
 {
-	printf("Usage: rconcl [-v] [-1] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address>\n");
+	printf("Usage: rconcl [-v] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address>\n");
 	exit(RCONCL_ERR_USAGE);
 }
 
 static bool verify_cfg(struct rconcl_cfg *cfg)
 {
 	if (cfg->max_spx_data_len < 1 || cfg->max_spx_data_len >
-			SPXII_MAX_DATA_LEN) {
+			SPX_MAX_DATA_LEN_WO_SIZNG) {
 		return false;
 	}
 
@@ -1736,7 +1743,6 @@ int main(int argc, char **argv)
 {
 	struct rconcl_cfg cfg = {
 		.verbose = false,
-		.spx_1_only = false,
 		.max_spx_data_len = SPX_MAX_DATA_LEN_WO_SIZNG,
 		.rx_queue_pause_threshold = DEFAULT_RX_QUEUE_PAUSE_THRESHOLD,
 		.tx_queue_pause_threshold = DEFAULT_TX_QUEUE_PAUSE_THRESHOLD,
@@ -1747,9 +1753,6 @@ int main(int argc, char **argv)
 	int opt;
 	while ((opt = getopt(argc, argv, "1d:v")) != -1) {
 		switch (opt) {
-			case '1':
-				cfg.spx_1_only = true;
-				break;
 			case 'd':
 				cfg.max_spx_data_len = strtoul(optarg, NULL, 0);
 				break;
