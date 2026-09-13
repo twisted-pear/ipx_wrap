@@ -9,8 +9,6 @@
 #include "ipx_wrap_mux_proto.h"
 #include "ipx_wrap_helpers.h"
 
-// TODO: handle close semantics for SPX properly
-
 #define DEFAULT_PKT_TYPE 0x1E
 #define DEFAULT_IPX_DATA_LEN (SPX_MAX_PKT_LEN_WO_SIZNG - IPX_WIRE_OVERHEAD)
 
@@ -496,6 +494,13 @@ static void spx_recv_loop(int epoll_fd, struct ipxcat_cfg *cfg)
 			perror("SPX receive");
 			cleanup_and_exit(epoll_fd, cfg,
 					IPXCAT_ERR_SPX_FAILURE);
+		}
+
+		/* connection is closed */
+		if (rcvd_len == 0) {
+			free(msg);
+			keep_going = false;
+			return;
 		}
 
 		/* queue received message */
