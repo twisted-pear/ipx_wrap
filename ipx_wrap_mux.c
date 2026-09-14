@@ -459,6 +459,12 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			return false;
 		}
 
+		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_NODELAY, &val,
+					sizeof(val)) < 0) {
+			conn_rsp->err = errno;
+			return false;
+		}
+
 		/* disable delayed sacks */
 		struct sctp_sack_info sacki = {
 			.sack_assoc_id = SCTP_FUTURE_ASSOC,

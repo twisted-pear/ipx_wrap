@@ -34,6 +34,11 @@ static __always_inline bool check_abort(const struct sctp_chunkhdr *chunk1,
 		return false;
 	}
 
+	/* T-bit set, abort is for an out-of-the-blue packet */
+	if ((chunk1->flags & (1 << 0)) != 0) {
+		return false;
+	}
+
 	return true;
 }
 
