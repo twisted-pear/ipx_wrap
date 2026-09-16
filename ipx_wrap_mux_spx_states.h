@@ -66,23 +66,21 @@ static __always_inline __u32 calc_cur_tsn(__u16 spx_seq, __u32 seq_ofs, __u32
 }
 
 static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
-		__u16 current_seq)
+		__u32 current_tsn)
 {
+	/* subtract 1 from the ack no because SPX acks the "next
+	 * expected" packet, while SCTP acks the "last seen" one */
+	__builtin_sub_overflow(spx_ack, 1, &spx_ack);
+
 	__u32 cum_tsn_ack;
 	__builtin_add_overflow(seq_ofs, spx_ack, &cum_tsn_ack);
 
-	/* compensate for old SPX acks */
-	__u32 prev_cum_tsn_ack;
-	__builtin_add_overflow(seq_ofs, current_seq, &prev_cum_tsn_ack);
-	if (spx_seq_less_than(spx_ack, current_seq) &&
-			sctp_tsn_less_than(prev_cum_tsn_ack, cum_tsn_ack)) {
+	/* current ack appears to be from the future, this can happen if the
+	 * SPX ack no overflowed and we are getting an old ack, compensate */
+	if (sctp_tsn_less_than(current_tsn, cum_tsn_ack)) {
 		__builtin_sub_overflow(cum_tsn_ack, 0x10000,
 				&cum_tsn_ack);
 	}
-
-	/* subtract 1 from the ack no because SPX acks the "next
-	 * expected" packet, while SCTP acks the "last seen" one */
-	__builtin_sub_overflow(cum_tsn_ack, 1, &cum_tsn_ack);
 
 	return cum_tsn_ack;
 }
@@ -218,7 +216,7 @@ struct ingress_transform_info {
 	__u32 remote_sequence_offset;
 	__u32 last_ackd_tsn;
 	__u32 local_sequence_offset;
-	__u16 local_current_sequence;
+	__u32 local_current_tsn;
 	__u16 outstanding_heartbeat_len;
 	__u8 heartbeat_buf[SCTP_MAX_HEARTBEAT_CHUNK_LEN];
 };
@@ -233,7 +231,7 @@ static __always_inline void fill_ingress_transform_info(const struct
 	info->remote_sequence_offset = spx_state->remote_sequence_offset;
 	info->last_ackd_tsn = spx_state->last_ackd_tsn;
 	info->local_sequence_offset = spx_state->local_sequence_offset;
-	info->local_current_sequence = spx_state->last_sent_sequence;
+	info->local_current_tsn = spx_state->last_sent_tsn;
 	info->outstanding_heartbeat_len = spx_state->outstanding_heartbeat_len;
 	__builtin_memcpy(info->heartbeat_buf, spx_state->heartbeat_buf,
 			SCTP_MAX_HEARTBEAT_CHUNK_LEN);
@@ -246,7 +244,7 @@ struct egress_transform_info {
 	__be16 local_id;
 	__be16 remote_id;
 	__u32 local_sequence_offset;
-	__u16 local_current_sequence;
+	__u32 local_current_tsn;
 	__u32 last_ackd_tsn;
 	__u16 local_alloc_no;
 	__be16 sctp_sport;
@@ -264,7 +262,7 @@ static __always_inline void fill_egress_transform_info(const struct
 	info->local_id = spx_state->local_id;
 	info->remote_id = spx_state->remote_id;
 	info->local_sequence_offset = spx_state->local_sequence_offset;
-	info->local_current_sequence = spx_state->last_sent_sequence;
+	info->local_current_tsn = spx_state->last_sent_tsn;
 	info->last_ackd_tsn = spx_state->last_ackd_tsn;
 	info->local_alloc_no = spx_state->local_alloc_no;
 	info->sctp_sport = spx_state->sctp_sport;
@@ -449,6 +447,7 @@ static __always_inline bool update_state_egress_NEW(struct bpf_kspx_state
 	spx_state->sctp_sport = sctph->dest;
 	spx_state->sctp_dport = sctph->source;
 	spx_state->local_sequence_offset = initial_tsn;
+	spx_state->last_sent_tsn = initial_tsn;
 
 	return true;
 }
@@ -609,6 +608,7 @@ static __always_inline bool update_state_egress_INCOMING(struct bpf_kspx_state
 	spx_state->sctp_sport = sctph->dest;
 	spx_state->sctp_dport = sctph->source;
 	spx_state->local_sequence_offset = initial_tsn;
+	spx_state->last_sent_tsn = initial_tsn;
 
 	/* we are reflecting the INIT right back as an INIT ACK, hence we are
 	 * now ready to deal with the cookie */
@@ -1112,7 +1112,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		shut_chunk->length = bpf_htons(hbs_len);
 		shut_param->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
 					info->local_sequence_offset,
-					info->local_current_sequence));
+					info->local_current_tsn));
 
 	} else if (heartbeat_requested) {
 		if (((void *) sctph) + hbs_ofs > data_end) {
@@ -1223,7 +1223,7 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 				sizeof(struct sctp_sackhdr));
 		sack->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
 					info->local_sequence_offset,
-					info->local_current_sequence));
+					info->local_current_tsn));
 		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 		sack->num_gap_ack_blocks = bpf_htons(0);
 		sack->num_dup_tsns = bpf_htons(0);
@@ -1326,22 +1326,19 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		__u32 tsn_ack = bpf_ntohl(sackh->cum_tsn_ack);
 
 		/* if the SPX ack would have wrapped over, increase offset */
-		__u16 spx_ack;
-		__builtin_add_overflow(tsn_ack, 1, &spx_ack);
-		__u32 calc_tsn_ack;
-		__builtin_add_overflow(spx_state->remote_sequence_offset,
-				spx_ack, &calc_tsn_ack);
-		if (sctp_tsn_less_than(spx_state->last_ackd_tsn, tsn_ack) &&
-				sctp_tsn_less_than(calc_tsn_ack,
-					spx_state->last_ackd_tsn)) {
-			__builtin_add_overflow(
-					spx_state->remote_sequence_offset,
+		__s32 spx_ack_s32;
+		__builtin_sub_overflow(tsn_ack,
+				spx_state->remote_sequence_offset,
+				&spx_ack_s32);
+		if (spx_ack_s32 >= 0xFFFF) {
+			__builtin_add_overflow(spx_state->remote_sequence_offset,
 					0x10000,
 					&(spx_state->remote_sequence_offset));
 		}
 
 		spx_state->last_ackd_tsn = tsn_ack;
-		spx_state->local_alloc_no = spx_ack;
+		__builtin_add_overflow(tsn_ack, 1,
+				&(spx_state->local_alloc_no));
 
 		/* if we sent a SHUTDOWN chunk, start shutting down the
 		 * connection */
@@ -1364,17 +1361,21 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		return false;
 	}
 
-	/* if the SPX seq no would have wrapped, we increase the TSN offset */
 	__u32 cur_tsn = bpf_ntohl(datah->tsn);
-	__u32 spx_sequence_u32;
-	__builtin_sub_overflow(cur_tsn, spx_state->local_sequence_offset,
-			&spx_sequence_u32);
-	if (spx_sequence_u32 >= 0x10000) {
-		__builtin_add_overflow(spx_state->local_sequence_offset,
-				0x10000, &(spx_state->local_sequence_offset));
+	if (sctp_tsn_less_than(spx_state->last_sent_tsn, cur_tsn)) {
+		/* if the SPX seq no would have wrapped, we increase the TSN
+		 * offset */
+		__s32 spx_sequence_s32;
+		__builtin_sub_overflow(cur_tsn,
+				spx_state->local_sequence_offset,
+				&spx_sequence_s32);
+		if (spx_sequence_s32 >= 0x10000) {
+			__builtin_add_overflow(spx_state->local_sequence_offset,
+					0x10000,
+					&(spx_state->local_sequence_offset));
+		}
+		spx_state->last_sent_tsn = cur_tsn;
 	}
-	__builtin_sub_overflow(cur_tsn, spx_state->local_sequence_offset,
-			&(spx_state->last_sent_sequence));
 
 	return true;
 }
@@ -1410,7 +1411,9 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	size_t padding_bytes = 0;
 	__u8 connection_control = 0;
 	__u8 datastream_type = SPX_DS_NONE;
-	__u16 seq_no = info->local_current_sequence;
+	__u16 seq_no;
+	__builtin_sub_overflow(info->local_current_tsn,
+			info->local_sequence_offset, &seq_no);
 
 	/* SACK chunk */
 	if (chunk1->type == SCTP_CID_SACK) {

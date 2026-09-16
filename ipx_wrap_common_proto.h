@@ -307,7 +307,7 @@ struct bpf_kspx_state {
 	__u32 remote_sequence_offset;
 	__u32 last_ackd_tsn;
 	__u32 local_sequence_offset;
-	__u16 last_sent_sequence;
+	__u32 last_sent_tsn;
 	__u16 neg_size_to_remote;
 	__u16 neg_size_to_local;
 	__be32 prefix;
