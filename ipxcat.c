@@ -1035,7 +1035,7 @@ int main(int argc, char **argv)
 	/* parse and verify command-line arguments */
 
 	int opt;
-	while ((opt = getopt(argc, argv, "1bd:lrst:v")) != -1) {
+	while ((opt = getopt(argc, argv, "bd:lrst:v")) != -1) {
 		switch (opt) {
 			case 'b':
 				cfg.accept_broadcasts = true;

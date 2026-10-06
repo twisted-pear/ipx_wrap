@@ -1751,7 +1751,7 @@ int main(int argc, char **argv)
 	/* parse and verify command-line arguments */
 
 	int opt;
-	while ((opt = getopt(argc, argv, "1d:v")) != -1) {
+	while ((opt = getopt(argc, argv, "d:v")) != -1) {
 		switch (opt) {
 			case 'd':
 				cfg.max_spx_data_len = strtoul(optarg, NULL, 0);
