@@ -304,7 +304,7 @@ static __always_inline void update_state_ingress_NEW(struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
 {
 	spx_state->remote_id = spxh->src_conn_id;
-	spx_state->remote_alloc_no = spxh->alloc_no;
+	spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 
 	/* once we have a correct SPX conn ack, we can deal with the SCTP
 	 * cookie */
@@ -953,6 +953,8 @@ static __always_inline bool admit_ingress_ESTABLISHED(const struct
 		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
 		data_len)
 {
+	// TODO: build a mechanism to detect and filter out very old packets
+
 	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
 
 	/* check if the packet fits with our connection state */
@@ -978,7 +980,7 @@ static __always_inline void update_state_ingress_ESTABLISHED(struct
 		spx_state->state = KSPX_SHUTDOWN_RCVD;
 	}
 
-	spx_state->remote_alloc_no = spxh->alloc_no;
+	spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 }
 
 static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
@@ -1414,6 +1416,9 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	__u16 seq_no;
 	__builtin_sub_overflow(info->local_current_tsn,
 			info->local_sequence_offset, &seq_no);
+	/* the seq no on system packets is the seq no the next data packet
+	 * will have */
+	__builtin_add_overflow(seq_no, 1, &seq_no);
 
 	/* SACK chunk */
 	if (chunk1->type == SCTP_CID_SACK) {
@@ -1442,8 +1447,6 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 
 		connection_control = SPX_CC_ACK_REQUIRED;
 		datastream_type = SPX_DS_END_OF_CONN;
-
-		__builtin_add_overflow(seq_no, 1, &seq_no);
 
 	/* SHUTDOWN chunk */
 	} else if (chunk1->type == SCTP_CID_SHUTDOWN_ACK) {
