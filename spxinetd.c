@@ -525,13 +525,11 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 			!counted_ipx_msg_queue_empty(&out_queue)) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
-			if (errno == EINTR) {
-				continue;
+			if (errno != EINTR) {
+				perror("event polling");
+				cleanup_and_exit(epoll_fd, &spxh, cfg,
+						SPXINETD_ERR_EPOLL_WAIT);
 			}
-
-			perror("event polling");
-			cleanup_and_exit(epoll_fd, &spxh, cfg,
-					SPXINETD_ERR_EPOLL_WAIT);
 		}
 
 		/* exit if our child (the exec-process) terminated */
@@ -777,13 +775,11 @@ static _Noreturn void do_main(struct spxinetd_cfg *cfg, int epoll_fd)
 	while (keep_going) {
 		int n_fds = epoll_wait(epoll_fd, evs, MAX_EPOLL_EVENTS, -1);
 		if (n_fds < 0) {
-			if (errno == EINTR) {
-				continue;
+			if (errno != EINTR) {
+				perror("event polling");
+				cleanup_and_exit(epoll_fd, NULL, cfg,
+						SPXINETD_ERR_EPOLL_WAIT);
 			}
-
-			perror("event polling");
-			cleanup_and_exit(epoll_fd, NULL, cfg,
-					SPXINETD_ERR_EPOLL_WAIT);
 		}
 
 		if (reap_children) {
