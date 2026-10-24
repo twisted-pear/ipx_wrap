@@ -42,12 +42,33 @@ static __always_inline bool check_abort(const struct sctp_chunkhdr *chunk1,
 	return true;
 }
 
+static __always_inline void delete_state(const struct spx_conn_key *conn_key,
+		const struct ipx_addr *remote_addr, __be16 remote_id)
+{
+	if (remote_id != SPX_CONN_ID_UNKNOWN) {
+		struct spx_remote_conn_key remote_conn_key = {
+			.local_addr = conn_key->bind_addr,
+			.remote_addr = *remote_addr,
+			.conn_id = remote_id
+		};
+
+		bpf_map_delete_elem(&ipx_wrap_mux_kspx_remote_to_local_id,
+				&remote_conn_key);
+	}
+
+	bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, conn_key);
+}
+
 static __always_inline void abort_assoc(struct bpf_kspx_state *spx_state, const
 		struct spx_conn_key *conn_key)
 {
+	struct ipx_addr remote_addr = spx_state->remote_addr;
+	__be16 remote_id = spx_state->remote_id;
+
 	spx_state->state = KSPX_INVALID;
 	put_kspx_state(spx_state);
-	bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, conn_key);
+
+	delete_state(conn_key, &remote_addr, remote_id);
 }
 
 static __always_inline __u32 calc_cur_tsn(__u16 spx_seq, __u32 seq_ofs, __u32
@@ -85,6 +106,32 @@ static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
 	return cum_tsn_ack;
 }
 
+static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
+		*spx_state, const struct spxhdr *spxh)
+{
+	/* not for us */
+	if (spxh->src_conn_id != spx_state->remote_id) {
+		return false;
+	}
+
+	/* not a conn-req */
+	if ((spxh->connection_control & SPX_CC_MASK_SPX) != (SPX_CC_SYSTEM_PKT
+				| SPX_CC_ACK_REQUIRED)) {
+		return false;
+	}
+	if (spxh->datastream_type != SPX_DS_NONE) {
+		return false;
+	}
+	if (spxh->dst_conn_id != SPX_CONN_ID_UNKNOWN) {
+		return false;
+	}
+	if (bpf_ntohs(spxh->seq_no) != 0 || bpf_ntohs(spxh->ack_no) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
 #define ENTER_INGRESS(state_var) \
 	bpf_printk("%s: begin", __func__); \
 	\
@@ -103,10 +150,13 @@ static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
 	size_t data_len = bpf_ntohs(ipxh->pktlen) - (sizeof(struct ipxhdr) + \
 			sizeof(struct spxhdr)); \
 	\
-	struct spx_conn_key conn_key = { \
-		.bind_addr = ipxh->daddr, \
-		.conn_id = spxh->dst_conn_id \
-	}; \
+	struct spx_conn_key conn_key; \
+	if (!fill_conn_key(skb, &conn_key)) { \
+		bpf_printk("%s: shot, failed to get connection key", \
+				__func__); \
+		return TC_ACT_SHOT; \
+	} \
+	\
 	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
 		bpf_printk("%s: shot, failed to get state", __func__); \
@@ -203,12 +253,20 @@ static __always_inline __u32 calc_cum_tsn_ack(__u16 spx_ack, __u32 seq_ofs,
 				"transformation failed"); \
 	} \
 	\
+	/* mark the packet for reinjection so that the interface program \
+	 * accepts it */ \
+	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark = \
+		SPX_TO_SCTP_REINJECT_MARK; \
 	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS); \
 	EXIT_UNLOCKED_INGRESS(verdict, "end"); \
 	//EXIT_UNLOCKED_INGRESS(TC_ACT_UNSPEC, "end");
 	// TODO: ^ change the above back! ^
 
 struct ingress_transform_info {
+	struct ipx_addr local_addr;
+	struct ipx_addr remote_addr;
+	__be16 local_id;
+	__be16 remote_id;
 	__be16 sctp_sport;
 	__be16 sctp_dport;
 	__be32 sctp_svtag;
@@ -224,6 +282,10 @@ struct ingress_transform_info {
 static __always_inline void fill_ingress_transform_info(const struct
 		bpf_kspx_state *spx_state, struct ingress_transform_info *info)
 {
+	info->local_addr = spx_state->local_addr;
+	info->remote_addr = spx_state->remote_addr;
+	info->local_id = spx_state->local_id;
+	info->remote_id = spx_state->remote_id;
 	info->sctp_sport = spx_state->sctp_sport;
 	info->sctp_dport = spx_state->sctp_dport;
 	info->sctp_svtag = spx_state->sctp_svtag;
@@ -612,7 +674,7 @@ static __always_inline bool update_state_egress_INCOMING(struct bpf_kspx_state
 
 	/* we are reflecting the INIT right back as an INIT ACK, hence we are
 	 * now ready to deal with the cookie */
-	spx_state->state = KSPX_CONN_ACK_RCVD;
+	spx_state->state = KSPX_CONN_ACK_SENT;
 
 	return true;
 }
@@ -947,6 +1009,62 @@ static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
 		SPX_TO_SCTP_REINJECT_MARK;
 
 	return true;
+}
+
+static __always_inline bool admit_ingress_CONN_ACK_SENT(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* we only allow packets from the SCTP side here */
+	return false;
+}
+
+static __always_inline void update_state_ingress_CONN_ACK_SENT(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* we should never reach this point */
+}
+
+static __always_inline bool transform_ingress_CONN_ACK_SENT(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	/* we should never reach this point */
+	return false;
+}
+
+static __always_inline bool admit_egress_CONN_ACK_SENT(const struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	return admit_egress_CONN_ACK_RCVD(spx_state, sctph, chunk1, data_end);
+}
+
+/* Note that while it can, this function should never return false. If it does,
+ * there is a bug in the admit function, which should already check if the
+ * packet contains all the info we need. The return value here exists only to
+ * satisfy the verifier. */
+static __always_inline bool update_state_egress_CONN_ACK_SENT(struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	/* Once we have the cookie echo, we are established. However there is a
+	 * chance, that our conn-ack was lost. in this case we will receive a
+	 * retransmit of the conn-req which we need to reflect. This is what
+	 * the PRE_ESTABLISHED state does. */
+	spx_state->state = KSPX_PRE_ESTABLISHED;
+	/* we have not yet acked any TSN */
+	spx_state->last_ackd_tsn = -1;
+
+	return true;
+}
+
+static __always_inline bool transform_egress_CONN_ACK_SENT(struct __sk_buff
+		*skb, struct sctphdr *sctph, struct sctp_chunkhdr *chunk1,
+		const struct egress_transform_info *info)
+{
+	return transform_egress_CONN_ACK_RCVD(skb, sctph, chunk1, info);
 }
 
 static __always_inline bool admit_ingress_ESTABLISHED(const struct
@@ -1586,6 +1704,147 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	return true;
 }
 
+static __always_inline bool admit_ingress_PRE_ESTABLISHED(const struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* allow connection requests no matter what */
+	if (is_conn_req_for_conn(spx_state, spxh)) {
+		return true;
+	}
+
+	// TODO: build a mechanism to detect and filter out very old packets
+
+	bool system = (spxh->connection_control & SPX_CC_SYSTEM_PKT) != 0;
+
+	/* check if the packet fits with our connection state */
+	if (spxh->dst_conn_id != spx_state->local_id || spxh->src_conn_id !=
+			spx_state->remote_id) {
+		return false;
+	}
+
+	if (system && data_len != 0) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline void update_state_ingress_PRE_ESTABLISHED(struct
+		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
+		data_len)
+{
+	/* conn-req, no state update, just reflect */
+	if (is_conn_req_for_conn(spx_state, spxh)) {
+		return;
+	}
+
+	/* We got something other than a connection, request! The connection is
+	 * now fully established. */
+	spx_state->state = KSPX_ESTABLISHED;
+	update_state_ingress_ESTABLISHED(spx_state, spxh, data_len);
+}
+
+static __always_inline bool reflect_CONNREQ_ingress_PRE_ESTABLISHED(struct
+		__sk_buff *skb, struct ethhdr *eth, struct ipv6hdr *ip6h,
+		struct udphdr *udph, struct ipxhdr *ipxh, struct spxhdr *spxh,
+		const struct ingress_transform_info *info, int *out_ifidx)
+{
+	/* look up the reverse path for our conn-ack */
+	struct bpf_fib_lookup fib_params;
+	fib_params.family = AF_INET6;
+	__builtin_memcpy(fib_params.ipv6_dst, &(ip6h->saddr),
+			sizeof(fib_params.ipv6_dst));
+	__builtin_memcpy(fib_params.ipv6_src, &(ip6h->daddr),
+			sizeof(fib_params.ipv6_src));
+	fib_params.l4_protocol = IPPROTO_UDP;
+	fib_params.sport = bpf_htons(IPX_IN_IPV6_PORT);
+	fib_params.dport = bpf_htons(IPX_IN_IPV6_PORT);
+	fib_params.ifindex = skb->ingress_ifindex;
+	long fib_res = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), 0);
+	if (fib_res != 0) {
+		return false;
+	}
+
+	/* fill in the SPX header */
+	spxh->connection_control = SPX_CC_SYSTEM_PKT;
+	spxh->datastream_type = SPX_DS_NONE;
+	spxh->src_conn_id = info->local_id;
+	spxh->dst_conn_id = info->remote_id;
+	spxh->seq_no = bpf_htons(0);
+	spxh->ack_no = bpf_htons(0);
+	spxh->alloc_no = bpf_htons(0);
+
+	size_t ack_len = sizeof(struct spxhdr) + sizeof(struct ipxhdr);
+
+	/* fill in the IPX header */
+	ipxh->csum = IPX_CSUM_NONE;
+	ipxh->pktlen = bpf_htons(ack_len);
+	ipxh->tc = 0;
+	ipxh->type = SPX_PKT_TYPE;
+	ipxh->daddr = info->remote_addr;
+	ipxh->saddr = info->local_addr;
+
+	ack_len += sizeof(struct udphdr);
+
+	/* fill in the UDP header */
+	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
+	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
+	udph->len = bpf_htons(ack_len);
+	/* dummy checksum since the UDP header will get stripped away */
+	udph->check = bpf_htons(0xdead);
+
+	/* update ETH and IPv6 headers */
+	__builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
+	__builtin_memcpy(&(ip6h->saddr), fib_params.ipv6_src,
+			sizeof(fib_params.ipv6_src));
+	__builtin_memcpy(&(ip6h->daddr), fib_params.ipv6_dst,
+			sizeof(fib_params.ipv6_dst));
+	ip6h->payload_len = bpf_htons(ack_len);
+
+	ack_len += sizeof(struct ipv6hdr) + sizeof(struct ethhdr);
+
+	/* cut the SKB down to size */
+	if (bpf_skb_change_tail(skb, ack_len, 0) != 0) {
+		return TC_ACT_SHOT;
+	}
+
+	/* set outgoing interface index */
+	*out_ifidx = fib_params.ifindex;
+
+	return true;
+}
+
+static __always_inline bool transform_ingress_PRE_ESTABLISHED(struct __sk_buff
+		*skb, struct spxhdr *spxh, size_t data_len, const struct
+		ingress_transform_info *info)
+{
+	return transform_ingress_ESTABLISHED(skb, spxh, data_len, info);
+}
+
+static __always_inline bool admit_egress_PRE_ESTABLISHED(const struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	return admit_egress_ESTABLISHED(spx_state, sctph, chunk1, data_end);
+}
+
+static __always_inline bool update_state_egress_PRE_ESTABLISHED(struct
+		bpf_kspx_state *spx_state, const struct sctphdr *sctph, const
+		struct sctp_chunkhdr *chunk1, void *data_end)
+{
+	return update_state_egress_ESTABLISHED(spx_state, sctph, chunk1,
+			data_end);
+}
+
+static __always_inline bool transform_egress_PRE_ESTABLISHED(struct __sk_buff
+		*skb, struct sctphdr *sctph, struct sctp_chunkhdr *chunk1,
+		const struct egress_transform_info *info)
+{
+	return transform_egress_ESTABLISHED(skb, sctph, chunk1, info);
+}
+
 static __always_inline bool admit_ingress_SHUTDOWN_SENT(const struct
 		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
 		data_len)
@@ -1899,6 +2158,39 @@ int kspx_state_egress_CONN_ACK_RCVD(struct __sk_buff *skb)
 }
 
 SEC("tc/ingress")
+int kspx_state_ingress_CONN_ACK_SENT(struct __sk_buff *skb)
+{
+	GENERIC_INGRESS(CONN_ACK_SENT);
+}
+
+SEC("tc/egress")
+int kspx_state_egress_CONN_ACK_SENT(struct __sk_buff *skb)
+{
+	ENTER_EGRESS(KSPX_CONN_ACK_SENT);
+
+	if (!admit_egress_CONN_ACK_SENT(spx_state, sctph, chunk1, data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
+	}
+
+	if (!update_state_egress_CONN_ACK_SENT(spx_state, sctph, chunk1,
+				data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT,
+				"state update failed (this is a BUG!)");
+	}
+
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
+	put_kspx_state(spx_state);
+
+	/* cookie echo chunk */
+	if (!transform_egress_CONN_ACK_SENT(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
+	}
+	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	EXIT_UNLOCKED_EGRESS(verdict, "end");
+}
+
+SEC("tc/ingress")
 int kspx_state_ingress_ESTABLISHED(struct __sk_buff *skb)
 {
 	GENERIC_INGRESS(ESTABLISHED);
@@ -1924,6 +2216,77 @@ int kspx_state_egress_ESTABLISHED(struct __sk_buff *skb)
 	put_kspx_state(spx_state);
 
 	if (!transform_egress_ESTABLISHED(skb, sctph, chunk1, &info)) {
+		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
+	}
+	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
+}
+
+SEC("tc/ingress")
+int kspx_state_ingress_PRE_ESTABLISHED(struct __sk_buff *skb)
+{
+	ENTER_INGRESS(KSPX_PRE_ESTABLISHED);
+
+	if (!admit_ingress_PRE_ESTABLISHED(spx_state, spxh, data_len)) {
+		EXIT_INGRESS(TC_ACT_SHOT, "message rejected");
+	}
+
+	update_state_ingress_PRE_ESTABLISHED(spx_state, spxh, data_len);
+	bool is_conn_req = is_conn_req_for_conn(spx_state, spxh);
+
+	struct ingress_transform_info info;
+	fill_ingress_transform_info(spx_state, &info);
+	/* we assume that if we have a waiting heartbeat, it will be sent
+	 * with the next chunk */
+	spx_state->outstanding_heartbeat_len = 0;
+	put_kspx_state(spx_state);
+
+	if (is_conn_req) {
+		int out_ifidx = 0;
+		if (!reflect_CONNREQ_ingress_PRE_ESTABLISHED(skb, eth, ip6h,
+					udph, ipxh, spxh, &info, &out_ifidx)) {
+			EXIT_UNLOCKED_INGRESS(TC_ACT_SHOT,
+					"failed to reflect conn-req");
+		}
+		int verdict = bpf_redirect(out_ifidx, 0);
+		EXIT_UNLOCKED_INGRESS(verdict, "end");
+	}
+
+	if (!transform_ingress_PRE_ESTABLISHED(skb, spxh, data_len, &info)) {
+		EXIT_UNLOCKED_INGRESS(TC_ACT_SHOT,
+				"transformation failed");
+	}
+
+	/* mark the packet for reinjection so that the interface program
+	 * accepts it */
+	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
+		SPX_TO_SCTP_REINJECT_MARK;
+	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	EXIT_UNLOCKED_INGRESS(verdict, "end");
+	//EXIT_UNLOCKED_INGRESS(TC_ACT_UNSPEC, "end");
+	// TODO: ^ change the above back! ^
+
+}
+
+SEC("tc/egress")
+int kspx_state_egress_PRE_ESTABLISHED(struct __sk_buff *skb)
+{
+	ENTER_EGRESS(KSPX_PRE_ESTABLISHED);
+
+	if (!admit_egress_PRE_ESTABLISHED(spx_state, sctph, chunk1, data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT, "message rejected");
+	}
+
+	if (!update_state_egress_PRE_ESTABLISHED(spx_state, sctph, chunk1,
+				data_end)) {
+		EXIT_EGRESS(TC_ACT_SHOT,
+				"state update failed (this is a BUG!)");
+	}
+
+	struct egress_transform_info info;
+	fill_egress_transform_info(spx_state, &info);
+	put_kspx_state(spx_state);
+
+	if (!transform_egress_PRE_ESTABLISHED(skb, sctph, chunk1, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
 	}
 	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");
@@ -1956,7 +2319,7 @@ int kspx_state_egress_SHUTDOWN_SENT(struct __sk_buff *skb)
 
 	/* special case for the SHUTDOWN_COMPLETE chunk */
 	if (chunk1->type == SCTP_CID_SHUTDOWN_COMPLETE) {
-		bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, &conn_key);
+		delete_state(&conn_key, &(info.remote_addr), info.remote_id);
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "connection closed");
 	}
 	if (!transform_egress_SHUTDOWN_SENT(skb, sctph, chunk1, &info)) {
@@ -1996,7 +2359,7 @@ int kspx_state_egress_SHUTDOWN_RCVD(struct __sk_buff *skb)
 	}
 	/* special case for the SHUTDOWN_ACK chunk */
 	if (closed) {
-		bpf_map_delete_elem(&ipx_wrap_mux_kspx_state, &conn_key);
+		delete_state(&conn_key, &(info.remote_addr), info.remote_id);
 		EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "connection closed");
 	}
 	EXIT_UNLOCKED_EGRESS(TC_ACT_UNSPEC, "end");

@@ -331,19 +331,46 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 	}
 
 	__u32 conn_fd32 = conn_fd;
-	err = bpf_map__update_elem(
-			bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_key,
-			&conn_fd32, sizeof(__u32), &spx_key, sizeof(struct
-				spx_conn_key), BPF_NOEXIST);
-	if (err != 0) {
-		bpf_map__delete_elem(
-				bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
-				&spx_key, sizeof(struct spx_conn_key), 0);
-		errno = -err;
-		return false;
-	}
 
-	return true;
+	do {
+		err = bpf_map__update_elem(
+				bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_key,
+				&conn_fd32, sizeof(__u32), &spx_key,
+				sizeof(struct spx_conn_key), BPF_NOEXIST);
+		if (err != 0) {
+			break;
+		}
+
+		/* If the remote ID is known, record it. This is necessary if our
+		 * connection ack to an incoming connection is lost. */
+		if (remote_id != SPX_CONN_ID_UNKNOWN) {
+			struct spx_remote_conn_key remote_spx_key = {
+				.local_addr = *local_addr,
+				.remote_addr = *remote_addr,
+				.conn_id = remote_id
+			};
+
+			err = bpf_map__update_elem(
+					bpf_spx_kern->maps.ipx_wrap_mux_kspx_remote_to_local_id,
+					&remote_spx_key, sizeof(struct
+						spx_remote_conn_key),
+					&local_id, sizeof(__be16),
+					BPF_NOEXIST);
+			if (err != 0) {
+				break;
+			}
+		}
+
+		return true;
+	} while (0);
+
+	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_sock_key,
+			&conn_fd32, sizeof(__u32), 0);
+	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
+			&spx_key, sizeof(struct spx_conn_key), 0);
+
+	errno = -err;
+	return false;
 }
 
 static bool record_spx_conn_in_bpf(const struct ipx_addr *local_addr, const

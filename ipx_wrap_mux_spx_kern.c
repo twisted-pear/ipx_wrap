@@ -15,6 +15,8 @@
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 
+#define SPX_INGRESS_MARK 0x47744705
+
 #define SCTP_STATE_COOKIE_LEN 4
 #define SCTP_HEARTBEAT_PARAM_LEN 4
 #define SCTP_RWND_DUMMY 1500
@@ -43,6 +45,13 @@ struct {
 	__uint(max_entries, 0);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } ipx_wrap_mux_kspx_sock_key SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct spx_remote_conn_key);
+	__type(value, __be16);
+	__uint(max_entries, SPX_SOCKETS_MAX);
+} ipx_wrap_mux_kspx_remote_to_local_id SEC(".maps");
 
 /* CRC code copied from RFC 9260, Appendix A */
 #define CRC32C(c,d) (c=(c>>8)^crc_c[(c^(d))&0xFF])
@@ -216,8 +225,8 @@ static __always_inline bool is_reinjected(struct __sk_buff *skb)
 	return (cb_mark == SCTP_HEAD_REINJECT_MARK);
 }
 
-static __always_inline void mark_reinjected(struct __sk_buff *skb, const struct
-		spx_conn_key *conn_key)
+static __always_inline void mark_with_conn_key(struct __sk_buff *skb, const
+		struct spx_conn_key *conn_key, __u32 mark)
 {
 	struct bpf_cb_mark_info cbi;
 	cbi.cb[0] = skb->cb[0];
@@ -226,7 +235,7 @@ static __always_inline void mark_reinjected(struct __sk_buff *skb, const struct
 	cbi.cb[3] = skb->cb[3];
 	cbi.cb[4] = skb->cb[4];
 
-	cbi.mark = SCTP_HEAD_REINJECT_MARK;
+	cbi.mark = mark;
 	cbi.spx_conn_key.bind_addr = conn_key->bind_addr;
 	cbi.spx_conn_key.conn_id = conn_key->conn_id;
 
@@ -235,6 +244,18 @@ static __always_inline void mark_reinjected(struct __sk_buff *skb, const struct
 	skb->cb[2] = cbi.cb[2];
 	skb->cb[3] = cbi.cb[3];
 	skb->cb[4] = cbi.cb[4];
+}
+
+static __always_inline void mark_reinjected(struct __sk_buff *skb, const struct
+		spx_conn_key *conn_key)
+{
+	mark_with_conn_key(skb, conn_key, SCTP_HEAD_REINJECT_MARK);
+}
+
+static __always_inline void mark_spx_ingress(struct __sk_buff *skb, const
+		struct spx_conn_key *conn_key)
+{
+	mark_with_conn_key(skb, conn_key, SPX_INGRESS_MARK);
 }
 
 static __always_inline bool flatten_sctp(struct __sk_buff *skb, struct
@@ -328,6 +349,13 @@ static __always_inline bool fill_conn_key(struct __sk_buff *skb, struct
 	cbi.cb[3] = skb->cb[3];
 	cbi.cb[4] = skb->cb[4];
 
+	/* on ingress the conn key is transferred to the CB so that we can also
+	 * handle retransmits of connection requests */
+	if (cbi.mark == SPX_INGRESS_MARK) {
+		*conn_key = cbi.spx_conn_key;
+		return true;
+	}
+
 	/* Check if this is the tail end of an already handled SCTP packet. In
 	 * this case the socket association is lost and we need to look up the
 	 * connection key from the CB */
@@ -365,6 +393,10 @@ struct {
 		[KSPX_INCOMING] = (void *) &kspx_state_ingress_INCOMING,
 		[KSPX_CONN_ACK_RCVD] = (void *)
 			&kspx_state_ingress_CONN_ACK_RCVD,
+		[KSPX_CONN_ACK_SENT] = (void *)
+			&kspx_state_ingress_CONN_ACK_SENT,
+		[KSPX_PRE_ESTABLISHED] = (void *)
+			&kspx_state_ingress_PRE_ESTABLISHED,
 		[KSPX_ESTABLISHED] = (void *) &kspx_state_ingress_ESTABLISHED,
 		[KSPX_SHUTDOWN_SENT] = (void *)
 			&kspx_state_ingress_SHUTDOWN_SENT,
@@ -385,6 +417,10 @@ struct {
 		[KSPX_INCOMING] = (void *) &kspx_state_egress_INCOMING,
 		[KSPX_CONN_ACK_RCVD] = (void *)
 			&kspx_state_egress_CONN_ACK_RCVD,
+		[KSPX_CONN_ACK_SENT] = (void *)
+			&kspx_state_egress_CONN_ACK_SENT,
+		[KSPX_PRE_ESTABLISHED] = (void *)
+			&kspx_state_egress_PRE_ESTABLISHED,
 		[KSPX_ESTABLISHED] = (void *) &kspx_state_egress_ESTABLISHED,
 		[KSPX_SHUTDOWN_SENT] = (void *)
 			&kspx_state_egress_SHUTDOWN_SENT,
@@ -465,9 +501,28 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
+	/* incoming conn req, see if it is a retransmit */
+	__be16 local_conn_id = spxh->dst_conn_id;
+	if (local_conn_id == SPX_CONN_ID_UNKNOWN) {
+		struct spx_remote_conn_key remote_conn_key = {
+			.local_addr = ipxh->daddr,
+			.remote_addr = ipxh->saddr,
+			.conn_id = spxh->src_conn_id
+		};
+
+		__be16 *local_conn_id_ptr = bpf_map_lookup_elem(
+				&ipx_wrap_mux_kspx_remote_to_local_id,
+				&remote_conn_key);
+		if (local_conn_id_ptr == NULL) {
+			return TC_ACT_UNSPEC;
+		}
+
+		local_conn_id = *local_conn_id_ptr;
+	}
+
 	struct spx_conn_key conn_key = {
 		.bind_addr = ipxh->daddr,
-		.conn_id = spxh->dst_conn_id
+		.conn_id = local_conn_id
 	};
 	struct bpf_kspx_state *spx_state = bpf_map_lookup_elem(
 			&ipx_wrap_mux_kspx_state, &conn_key);
@@ -475,6 +530,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 		return TC_ACT_UNSPEC;
 	}
 
+	mark_spx_ingress(skb, &conn_key);
 	bpf_tail_call(skb, &kspx_states_ingress, spx_state->state);
 
 	bpf_printk("no ingress state program found");
@@ -495,9 +551,6 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 		/* SPX connection is already closed, the conn_key is stale */
 		return TC_ACT_SHOT;
 	}
-
-	bpf_printk("Got packet for kernel SPX conn %02x",
-			bpf_ntohs(spx_state->local_id));
 
 	void *data_end = (void *)(long)skb->data_end;
 	void *data = (void *)(long)skb->data;
