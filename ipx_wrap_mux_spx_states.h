@@ -691,7 +691,6 @@ static __always_inline bool reflect_INIT_egress_INCOMING(struct __sk_buff *skb,
 	/* and grow the packet accordingly */
 	if (bpf_skb_change_tail(skb, payload_len + sizeof(struct ipv6hdr) +
 				sizeof(struct ethhdr), 0) < 0) {
-		bpf_printk("change tail failed");
 		return false;
 	}
 
@@ -706,7 +705,6 @@ static __always_inline bool reflect_INIT_egress_INCOMING(struct __sk_buff *skb,
 	struct sctp_paramhdr *param = (struct sctp_paramhdr *) (init + 1);
 	__u8 *cookie = (__u8 *) (param + 1);
 	if (cookie + SCTP_STATE_COOKIE_LEN > data_end) {
-		bpf_printk("get ptrs 2 failed");
 		return false;
 	}
 
@@ -753,7 +751,6 @@ _Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval),
 	/* calculate CRC32c checksum */
 	__u32 csum = 0;
 	if (!sctp_csum_calc(sctph, data_end, payload_len, &csum)) {
-		bpf_printk("csum failed");
 		return false;
 	}
 	sctph->checksum = bpf_htonl(csum);
@@ -764,7 +761,6 @@ _Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval),
 		SPX_TO_SCTP_REINJECT_MARK;
 
 	if (bpf_clone_redirect(skb, skb->ifindex, BPF_F_INGRESS) < 0) {
-		bpf_printk("clone redir failed");
 		return false;
 	}
 
@@ -780,7 +776,6 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 
 	/* reflect the INIT chunk as an INIT ACK */
 	if (!reflect_INIT_egress_INCOMING(skb, info, &new_chunklen)) {
-		bpf_printk("reflect failed");
 		return false;
 	}
 
@@ -791,7 +786,6 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 	__s32 len_diff = newhdrs_len - oldhdrs_len;
 	size_t payload_len = newhdrs_len;
 	if (bpf_skb_adjust_room(skb, len_diff, BPF_ADJ_ROOM_NET, 0) < 0) {
-		bpf_printk("adj room failed");
 		return false;
 	}
 	bpf_skb_pull_data(skb, 0);
@@ -806,14 +800,12 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 	struct ipxhdr *ipxh = ((void *) udph) + sizeof(struct udphdr);
 	struct spxhdr *spxh = ((void *) ipxh) + sizeof(struct ipxhdr);
 	if (spxh + 1 > data_end) {
-		bpf_printk("get ptrs 3 failed");
 		return false;
 	}
 
 	/* calculate and verify length */
 	if (payload_len + sizeof(struct ipv6hdr) + sizeof(struct ethhdr) !=
 			skb->len) {
-		bpf_printk("len verify failed");
 		return false;
 	}
 
