@@ -25,9 +25,6 @@
 							  extension header
 							  trickery */
 
-#define TC_ACT_OK 0
-#define TC_ACT_SHOT 2
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32);
@@ -38,9 +35,6 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 #endif
 } ipx_wrap_if_config SEC(".maps");
-
-#define IPX_TO_IPV6_REINJECT_MARK 0x47744701
-#define IPX_TO_IPV6UDP_REINJECT_MARK 0x47744702
 
 struct icmpv6_nd {
 	/* the reserved bits are already part of the ICMPv6 header struct */
@@ -398,7 +392,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	__u32 cb_mark = ((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark;
 	if (cb_mark == IPX_TO_IPV6_REINJECT_MARK || cb_mark ==
 			IPX_TO_IPV6UDP_REINJECT_MARK || cb_mark ==
-			SPX_TO_SCTP_REINJECT_MARK) {
+			SPX_TO_SCTP_MARK) {
 		return TC_ACT_OK;
 	}
 
@@ -473,9 +467,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 	}
 
 	/* mark and reinject the packet to trick the network stack */
-	((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark =
-		IPX_TO_IPV6UDP_REINJECT_MARK;
-	return bpf_redirect(ctx->ingress_ifindex, BPF_F_INGRESS);
+	return mark_and_reinject(ctx, IPX_TO_IPV6UDP_REINJECT_MARK);
 }
 
 SEC("tc/egress")
@@ -521,8 +513,7 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 
 		/* reinject the packet on ingress */
 		// TODO: remove this when non-IPX traffic is allowed
-		((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark = IPX_TO_IPV6_REINJECT_MARK;
-		return bpf_redirect(ifidx, BPF_F_INGRESS);
+		return mark_and_reinject(ctx, IPX_TO_IPV6_REINJECT_MARK);
 	}
 
 	struct ipv6_eui64_addr *daddr6 = (void *) &ip6h->daddr;
@@ -581,7 +572,7 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 					IPX_BCAST_NODE,
 					sizeof(ipxh->daddr.node)) == 0) {
 			/* then also loop it back into this interface */
-			bpf_clone_redirect(ctx, ifidx, BPF_F_INGRESS);
+			mark_clone_reinject_and_clear(ctx, CB_MARK_NONE);
 		}
 	}
 

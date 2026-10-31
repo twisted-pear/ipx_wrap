@@ -253,14 +253,9 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 				"transformation failed"); \
 	} \
 	\
-	/* mark the packet for reinjection so that the interface program \
-	 * accepts it */ \
-	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark = \
-		SPX_TO_SCTP_REINJECT_MARK; \
-	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS); \
-	EXIT_UNLOCKED_INGRESS(verdict, "end"); \
-	//EXIT_UNLOCKED_INGRESS(TC_ACT_UNSPEC, "end");
-	// TODO: ^ change the above back! ^
+	/* mark the packet so that the interface program accepts it */ \
+	int verdict = mark_and_pass_through(skb, SPX_TO_SCTP_MARK); \
+	EXIT_UNLOCKED_INGRESS(verdict, "end");
 
 struct ingress_transform_info {
 	struct ipx_addr local_addr;
@@ -755,12 +750,8 @@ _Static_assert(SCTP_STATE_COOKIE_LEN >= sizeof(cval),
 	}
 	sctph->checksum = bpf_htonl(csum);
 
-	/* mark the packet for reinjection so that the interface
-	 * program accepts it */
-	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
-		SPX_TO_SCTP_REINJECT_MARK;
-
-	if (bpf_clone_redirect(skb, skb->ifindex, BPF_F_INGRESS) < 0) {
+	/* mark the packet so that the interface program accepts it */
+	if (mark_clone_reinject_and_clear(skb, SPX_TO_SCTP_MARK) < 0) {
 		return false;
 	}
 
@@ -994,11 +985,6 @@ static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
 				sizeof(struct ethhdr), 0) < 0) {
 		return false;
 	}
-
-	/* mark the packet for reinjection so that the interface
-	 * program accepts it */
-	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
-		SPX_TO_SCTP_REINJECT_MARK;
 
 	return true;
 }
@@ -2145,7 +2131,8 @@ int kspx_state_egress_CONN_ACK_RCVD(struct __sk_buff *skb)
 	if (!transform_egress_CONN_ACK_RCVD(skb, sctph, chunk1, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
 	}
-	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	/* mark the packet so that the interface program accepts it */
+	int verdict = mark_and_reinject(skb, SPX_TO_SCTP_MARK);
 	EXIT_UNLOCKED_EGRESS(verdict, "end");
 }
 
@@ -2178,7 +2165,8 @@ int kspx_state_egress_CONN_ACK_SENT(struct __sk_buff *skb)
 	if (!transform_egress_CONN_ACK_SENT(skb, sctph, chunk1, &info)) {
 		EXIT_UNLOCKED_EGRESS(TC_ACT_SHOT, "transformation failed");
 	}
-	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	/* mark the packet so that the interface program accepts it */
+	int verdict = mark_and_reinject(skb, SPX_TO_SCTP_MARK);
 	EXIT_UNLOCKED_EGRESS(verdict, "end");
 }
 
@@ -2239,7 +2227,7 @@ int kspx_state_ingress_PRE_ESTABLISHED(struct __sk_buff *skb)
 			EXIT_UNLOCKED_INGRESS(TC_ACT_SHOT,
 					"failed to reflect conn-req");
 		}
-		int verdict = bpf_redirect(out_ifidx, 0);
+		int verdict = clear_mark_and_send(skb, out_ifidx);
 		EXIT_UNLOCKED_INGRESS(verdict, "end");
 	}
 
@@ -2248,15 +2236,9 @@ int kspx_state_ingress_PRE_ESTABLISHED(struct __sk_buff *skb)
 				"transformation failed");
 	}
 
-	/* mark the packet for reinjection so that the interface program
-	 * accepts it */
-	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark =
-		SPX_TO_SCTP_REINJECT_MARK;
-	int verdict = bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	/* mark the packet so that the interface program accepts it */
+	int verdict = mark_and_pass_through(skb, SPX_TO_SCTP_MARK);
 	EXIT_UNLOCKED_INGRESS(verdict, "end");
-	//EXIT_UNLOCKED_INGRESS(TC_ACT_UNSPEC, "end");
-	// TODO: ^ change the above back! ^
-
 }
 
 SEC("tc/egress")

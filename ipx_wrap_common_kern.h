@@ -1,11 +1,46 @@
 #ifndef __IPX_WRAP_COMMON_KERN_H__
 #define __IPX_WRAP_COMMON_KERN_H__
 
+#define TC_ACT_UNSPEC (-1)
+#define TC_ACT_OK 0
+#define TC_ACT_SHOT 2
+
+enum cb_mark {
+	CB_MARK_NONE = 0, /* used to clear any mark */
+	IPX_TO_IPV6_REINJECT_MARK = 0x47744701, /* The egress interface program
+						   marks constructed IPv6
+						   Neighbor Advertisements with
+						   this before reinjecting them
+						   into the ingress path. The
+						   ingress interface program is
+						   expected to let these
+						   packets pass through. */
+	IPX_TO_IPV6UDP_REINJECT_MARK, /* After wrapping an IPX packet in IPv6
+					 and UDP, the ingress interface program
+					 reinjects it into the ingress path. A
+					 packet marked with this has to be
+					 allowed to pass through the ingress
+					 interface program. */
+	SPX_TO_SCTP_MARK, /* If the SPX state machine creates an SCTP packet
+			     (either by reflecting an SCTP packet or by passing
+			     along a modified SPX packet), it is marked with
+			     this. The ingress interface program is expected to
+			     let these packets pass through. */
+	SPX_INGRESS_MARK, /* If an incoming SPX packet can be matched to an SPX
+			     connection, it is marked with this in the ingress
+			     path and also has the connection key attached. */
+	SCTP_HEAD_REINJECT_MARK /* Set in the egress path, indicates that this
+				   is a reinjected SCTP packet. Required to
+				   match split up SCTP chunks to an SPX
+				   connection. The connection key is attached
+				   if this is set. */
+};
+
 struct bpf_cb_mark_info {
 	union {
 		__u32 cb[5];
 		struct {
-			__u32 mark;
+			enum cb_mark mark;
 			struct spx_conn_key spx_conn_key;
 		} __attribute__((packed));
 	};
@@ -13,8 +48,6 @@ struct bpf_cb_mark_info {
 
 _Static_assert(sizeof(struct bpf_cb_mark_info) == (sizeof(__u32) * 5),
 		"bpf_cb_mark_info has invalid size");
-
-#define SPX_TO_SCTP_REINJECT_MARK 0x47744703
 
 #define SCTP_MAX_CHUNKSIZE 4096 // FIXME: this will do for our purposes but is
 				// very ugly
@@ -266,6 +299,44 @@ static __always_inline __s64 csum_add_spxhdr(struct spxhdr *spxh, __s64
 		csum_diff)
 {
 	return csum_add((__be32 *) spxh, sizeof(struct spxhdr), csum_diff);
+}
+
+static __always_inline void set_mark(struct __sk_buff *skb, enum cb_mark mark)
+{
+	((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark = mark;
+}
+
+static __always_inline int clear_mark_and_send(struct __sk_buff *skb, int
+		out_ifidx)
+{
+	set_mark(skb, CB_MARK_NONE);
+	return bpf_redirect(out_ifidx, 0);
+}
+
+static __always_inline int mark_clone_reinject_and_clear(struct __sk_buff *skb,
+		enum cb_mark mark)
+{
+	set_mark(skb, mark);
+	int ret = bpf_clone_redirect(skb, skb->ifindex, BPF_F_INGRESS);
+	set_mark(skb, CB_MARK_NONE);
+	return ret;
+}
+
+static __always_inline int mark_and_reinject(struct __sk_buff *skb, enum
+		cb_mark mark)
+{
+	set_mark(skb, mark);
+	return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+}
+
+static __always_inline int mark_and_pass_through(struct __sk_buff *skb, enum
+		cb_mark mark)
+{
+	set_mark(skb, mark);
+	//return TC_ACT_UNSPEC;
+	// TODO: Instead of passing through we reinject here for better
+	// visibility. Change this back later!
+	return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
 }
 
 #endif /* __IPX_WRAP_COMMON_KERN_H__ */

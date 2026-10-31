@@ -12,10 +12,6 @@
 #define IPX_SOCKETS_MAX	32768
 #define SPX_SOCKETS_MAX	32768
 
-#define TC_ACT_UNSPEC (-1)
-#define TC_ACT_OK 0
-#define TC_ACT_SHOT 2
-
 struct {
 	__uint(type, BPF_MAP_TYPE_SOCKHASH);
 	__type(key, struct ipx_addr);
@@ -671,7 +667,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 	}
 
 	/* redirect the thusly generated ACK */
-	return bpf_redirect(fib_params.ifindex, 0);
+	return clear_mark_and_send(skb, fib_params.ifindex);
 }
 
 static __always_inline bool ipx_wrap_spx_egress(struct bpf_spx_state
