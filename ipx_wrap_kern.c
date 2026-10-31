@@ -385,14 +385,24 @@ static __always_inline size_t unpack_ipx_in_ipv6(void)
 	return 0;
 }
 
+static __always_inline bool is_reinjected(struct __sk_buff *skb)
+{
+	enum cb_mark cb_mark = ((struct bpf_cb_mark_info *)
+			&(skb->cb[0]))->mark;
+	if (cb_mark == IPX_TO_IPV6_REINJECT_MARK || cb_mark ==
+			IPX_TO_IPV6UDP_REINJECT_MARK || cb_mark ==
+			SPX_TO_SCTP_MARK) {
+		return true;
+	}
+
+	return false;
+}
+
 SEC("tc/ingress")
 int ipx_wrap_in(struct __sk_buff *ctx)
 {
 	/* packet was already processed and reinjected, just accept */
-	__u32 cb_mark = ((struct bpf_cb_mark_info *) &(ctx->cb[0]))->mark;
-	if (cb_mark == IPX_TO_IPV6_REINJECT_MARK || cb_mark ==
-			IPX_TO_IPV6UDP_REINJECT_MARK || cb_mark ==
-			SPX_TO_SCTP_MARK) {
+	if (is_reinjected(ctx)) {
 		return TC_ACT_OK;
 	}
 

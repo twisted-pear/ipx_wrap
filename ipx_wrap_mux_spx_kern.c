@@ -212,9 +212,10 @@ static __always_inline bool get_egress_pointers(struct __sk_buff *skb, struct
 	return true;
 }
 
-static __always_inline bool is_reinjected(struct __sk_buff *skb)
+static __always_inline bool is_reinjected_sctp_head(struct __sk_buff *skb)
 {
-	__u32 cb_mark = ((struct bpf_cb_mark_info *) &(skb->cb[0]))->mark;
+	enum cb_mark cb_mark = ((struct bpf_cb_mark_info *)
+			&(skb->cb[0]))->mark;
 	return (cb_mark == SCTP_HEAD_REINJECT_MARK);
 }
 
@@ -272,7 +273,7 @@ static __always_inline bool flatten_sctp(struct __sk_buff *skb, struct
 
 	/* packet was already copied and reinjected, delete all but the first
 	 * chunk */
-	if (is_reinjected(skb)) {
+	if (is_reinjected_sctp_head(skb)) {
 		size_t tail_len = data_end - ((void *) chunk2);
 		size_t payload_len = bpf_ntohs(ip6h->payload_len) - tail_len;
 		ip6h->payload_len = bpf_htons(payload_len);
