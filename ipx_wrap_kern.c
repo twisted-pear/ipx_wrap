@@ -403,7 +403,7 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 {
 	/* packet was already processed and reinjected, just accept */
 	if (is_reinjected(ctx)) {
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	__u32 ifidx = ctx->ingress_ifindex;
@@ -586,7 +586,7 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 		}
 	}
 
-	return TC_ACT_OK;
+	return TC_ACT_UNSPEC;
 }
 
 char _license[] SEC("license") = "GPL";

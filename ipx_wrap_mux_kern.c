@@ -570,7 +570,7 @@ int ipx_wrap_demux(struct __sk_buff *skb)
 			}
 		}
 
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	/* we have to generate an ACK, we do this by rewriting the packet and
