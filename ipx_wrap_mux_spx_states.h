@@ -328,6 +328,56 @@ static __always_inline void fill_egress_transform_info(const struct
 	info->sctp_svtag = spx_state->sctp_svtag;
 }
 
+static __always_inline void fill_ipv6_hdr(struct ipv6hdr *ip6h, const struct
+		egress_transform_info *info, size_t ip_payload_len)
+{
+	ip6h->payload_len = bpf_htons(ip_payload_len);
+	ip6h->nexthdr = IPPROTO_UDP;
+
+	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
+		&(ip6h->saddr);
+	ip6_saddr->prefix = info->prefix;
+	ip6_saddr->ipx_net = info->local_addr.net;
+	__builtin_memcpy(ip6_saddr->ipx_node_fst, info->local_addr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	ip6_saddr->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(ip6_saddr->ipx_node_snd, &(info->local_addr.node[3]),
+			IPX_ADDR_NODE_BYTES / 2);
+
+	struct ipv6_eui64_addr *ip6_daddr = (struct ipv6_eui64_addr *)
+		&(ip6h->daddr);
+	ip6_daddr->prefix = info->prefix;
+	ip6_daddr->ipx_net = info->remote_addr.net;
+	__builtin_memcpy(ip6_daddr->ipx_node_fst, info->remote_addr.node,
+			IPX_ADDR_NODE_BYTES / 2);
+	ip6_daddr->fffe = bpf_htons(0xfffe);
+	__builtin_memcpy(ip6_daddr->ipx_node_snd, &(info->remote_addr.node[3]),
+			IPX_ADDR_NODE_BYTES / 2);
+}
+
+static __always_inline void fill_udp_hdr(struct udphdr *udph, const struct
+		egress_transform_info *info, size_t ip_payload_len)
+{
+	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
+	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
+	/* we do not care about the UDP checksum here because the outer eBPF
+	 * program discards the UDP header anyway */
+	// TODO: calculate the UDP checksum properly
+	udph->check = bpf_htons(0xdead);
+	udph->len = bpf_htons(ip_payload_len);
+}
+
+static __always_inline void fill_ipx_hdr(struct ipxhdr *ipxh, const struct
+		egress_transform_info *info, size_t ip_payload_len)
+{
+	ipxh->csum = IPX_CSUM_NONE;
+	ipxh->pktlen = bpf_htons(ip_payload_len - sizeof(struct udphdr));
+	ipxh->tc = 0;
+	ipxh->type = SPX_PKT_TYPE;
+	ipxh->daddr = info->remote_addr;
+	ipxh->saddr = info->local_addr;
+}
+
 static __always_inline bool admit_ingress_NEW(const struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
 {
@@ -544,45 +594,13 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 	}
 
 	/* fill in IPv6 header */
-	ip6h->payload_len = bpf_htons(payload_len);
-	ip6h->nexthdr = IPPROTO_UDP;
-
-	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
-		&(ip6h->saddr);
-	ip6_saddr->prefix = info->prefix;
-	ip6_saddr->ipx_net = info->local_addr.net;
-	__builtin_memcpy(ip6_saddr->ipx_node_fst, info->local_addr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	ip6_saddr->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(ip6_saddr->ipx_node_snd, &(info->local_addr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
-
-	struct ipv6_eui64_addr *ip6_daddr = (struct ipv6_eui64_addr *)
-		&(ip6h->daddr);
-	ip6_daddr->prefix = info->prefix;
-	ip6_daddr->ipx_net = info->remote_addr.net;
-	__builtin_memcpy(ip6_daddr->ipx_node_fst, info->remote_addr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	ip6_daddr->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(ip6_daddr->ipx_node_snd, &(info->remote_addr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
+	fill_ipv6_hdr(ip6h, info, payload_len);
 
 	/* fill in the UDP header. */
-	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
-	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
-	/* we do not care about the UDP checksum here because the outer eBPF
-	 * program discards the UDP header anyway */
-	// TODO: calculate the UDP checksum properly
-	udph->check = bpf_htons(0xdead);
-	udph->len = bpf_htons(payload_len);
+	fill_udp_hdr(udph, info, payload_len);
 
 	/* fill in the IPX header */
-	ipxh->csum = IPX_CSUM_NONE;
-	ipxh->pktlen = bpf_htons(payload_len - sizeof(struct udphdr));
-	ipxh->tc = 0;
-	ipxh->type = SPX_PKT_TYPE;
-	ipxh->daddr = info->remote_addr;
-	ipxh->saddr = info->local_addr;
+	fill_ipx_hdr(ipxh, info, payload_len);
 
 	/* fill in the SPX header */
 	spxh->connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
@@ -807,45 +825,13 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
 
 	/* fill in IPv6 header */
-	ip6h->payload_len = bpf_htons(payload_len);
-	ip6h->nexthdr = IPPROTO_UDP;
-
-	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
-		&(ip6h->saddr);
-	ip6_saddr->prefix = info->prefix;
-	ip6_saddr->ipx_net = info->local_addr.net;
-	__builtin_memcpy(ip6_saddr->ipx_node_fst, info->local_addr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	ip6_saddr->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(ip6_saddr->ipx_node_snd, &(info->local_addr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
-
-	struct ipv6_eui64_addr *ip6_daddr = (struct ipv6_eui64_addr *)
-		&(ip6h->daddr);
-	ip6_daddr->prefix = info->prefix;
-	ip6_daddr->ipx_net = info->remote_addr.net;
-	__builtin_memcpy(ip6_daddr->ipx_node_fst, info->remote_addr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	ip6_daddr->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(ip6_daddr->ipx_node_snd, &(info->remote_addr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
+	fill_ipv6_hdr(ip6h, info, payload_len);
 
 	/* fill in the UDP header. */
-	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
-	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
-	/* we do not care about the UDP checksum here because the outer eBPF
-	 * program discards the UDP header anyway */
-	// TODO: calculate the UDP checksum properly
-	udph->check = bpf_htons(0xdead);
-	udph->len = bpf_htons(payload_len);
+	fill_udp_hdr(udph, info, payload_len);
 
 	/* fill in the IPX header */
-	ipxh->csum = IPX_CSUM_NONE;
-	ipxh->pktlen = bpf_htons(payload_len - sizeof(struct udphdr));
-	ipxh->tc = 0;
-	ipxh->type = SPX_PKT_TYPE;
-	ipxh->daddr = info->remote_addr;
-	ipxh->saddr = info->local_addr;
+	fill_ipx_hdr(ipxh, info, payload_len);
 
 	/* fill in the SPX header */
 	spxh->connection_control = SPX_CC_SYSTEM_PKT;
@@ -1627,45 +1613,13 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	}
 
 	/* fill in IPv6 header */
-	ip6h->payload_len = bpf_htons(payload_len);
-	ip6h->nexthdr = IPPROTO_UDP;
-
-	struct ipv6_eui64_addr *ip6_saddr = (struct ipv6_eui64_addr *)
-		&(ip6h->saddr);
-	ip6_saddr->prefix = info->prefix;
-	ip6_saddr->ipx_net = info->local_addr.net;
-	__builtin_memcpy(ip6_saddr->ipx_node_fst, info->local_addr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	ip6_saddr->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(ip6_saddr->ipx_node_snd, &(info->local_addr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
-
-	struct ipv6_eui64_addr *ip6_daddr = (struct ipv6_eui64_addr *)
-		&(ip6h->daddr);
-	ip6_daddr->prefix = info->prefix;
-	ip6_daddr->ipx_net = info->remote_addr.net;
-	__builtin_memcpy(ip6_daddr->ipx_node_fst, info->remote_addr.node,
-			IPX_ADDR_NODE_BYTES / 2);
-	ip6_daddr->fffe = bpf_htons(0xfffe);
-	__builtin_memcpy(ip6_daddr->ipx_node_snd, &(info->remote_addr.node[3]),
-			IPX_ADDR_NODE_BYTES / 2);
+	fill_ipv6_hdr(ip6h, info, payload_len);
 
 	/* fill in the UDP header. */
-	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
-	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
-	/* we do not care about the UDP checksum here because the outer eBPF
-	 * program discards the UDP header anyway */
-	// TODO: calculate the UDP checksum properly
-	udph->check = bpf_htons(0xdead);
-	udph->len = bpf_htons(payload_len);
+	fill_udp_hdr(udph, info, payload_len);
 
 	/* fill in the IPX header */
-	ipxh->csum = IPX_CSUM_NONE;
-	ipxh->pktlen = bpf_htons(payload_len - sizeof(struct udphdr));
-	ipxh->tc = 0;
-	ipxh->type = SPX_PKT_TYPE;
-	ipxh->daddr = info->remote_addr;
-	ipxh->saddr = info->local_addr;
+	fill_ipx_hdr(ipxh, info, payload_len);
 
 	/* fill in the SPX header */
 	spxh->connection_control = connection_control;
