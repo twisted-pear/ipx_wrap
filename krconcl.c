@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <limits.h>
+#include <locale.h>
 #include <menu.h>
 #include <ncurses.h>
 #include <signal.h>
@@ -18,6 +19,8 @@
 
 #include "ipx_wrap_mux_proto.h"
 #include "ipx_wrap_helpers.h"
+
+#include "cp850.h"
 
 #define MAX_PASSWORD_LEN 32
 
@@ -123,14 +126,7 @@ TAILQ_HEAD(rcon_screen_list, rcon_screen);
 static __be32 current_screen_id = CURRENT_SCREEN_NONE;
 static struct rcon_screen_list screen_list = TAILQ_HEAD_INITIALIZER(screen_list);
 
-static chtype cp850[UCHAR_MAX + 1] = {
-	[0x10] = '>',
-	[0x11] = '<',
-	[0x1E] = '^',
-	[0x1F] = 'v'
-};
-
-static chtype *current_cp = &cp850[0];
+static wchar_t *current_cp = &cp850[0];
 
 #define RCON_NONCE_LEN 4
 
@@ -287,6 +283,8 @@ static bool post_screen_menu(void)
 
 static void init_ui(void)
 {
+	setlocale(LC_ALL, "");
+
 	initscr();
 
 	start_color();
@@ -1269,7 +1267,7 @@ static int get_ncurses_color(__u8 win_col_attr)
 	}
 }
 
-static int translate_attrs(__u8 attrs)
+static __u16 attrs_to_color_pair(__u8 attrs)
 {
 	__u8 fg_col_attr = attrs & (WIN_FG_BLUE | WIN_FG_GREEN | WIN_FG_RED);
 	__u8 bg_col_attr = attrs & (WIN_BG_BLUE | WIN_BG_GREEN | WIN_BG_RED);
@@ -1279,7 +1277,12 @@ static int translate_attrs(__u8 attrs)
 	__u16 cp_name = fg_col | (bg_col << 3);
 	init_pair(cp_name, fg_col, bg_col);
 
-	int new_attrs = COLOR_PAIR(cp_name);
+	return cp_name;
+}
+
+static attr_t translate_attrs(__u8 attrs)
+{
+	attr_t new_attrs = 0;
 
 	if ((attrs & WIN_FG_INTENSITY) != 0) {
 		new_attrs |= A_BOLD;
@@ -1291,7 +1294,7 @@ static int translate_attrs(__u8 attrs)
 	return new_attrs;
 }
 
-static chtype get_byte_from_codepage(__u8 c, chtype *cp)
+static wchar_t get_wchar_from_codepage(__u8 c, wchar_t *cp)
 {
 	if (cp[c] != 0) {
 		return cp[c];
@@ -1439,9 +1442,15 @@ static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 
 	move(0, 0);
 	for (i = 0; i < RCON_LINES * RCON_COLUMNS; i++) {
-		chtype cont = get_byte_from_codepage(screen_content[i],
+		wchar_t cont = get_wchar_from_codepage(screen_content[i],
 				current_cp);
-		addch(cont | translate_attrs(screen_attrs[i]));
+		attr_t attrs = translate_attrs(screen_attrs[i]);
+		__u16 color_pair = attrs_to_color_pair(screen_attrs[i]);
+
+		cchar_t chr;
+		wchar_t str[2] = { cont, L'\0' };
+		setcchar(&chr, str, attrs, color_pair, NULL);
+		add_wch(&chr);
 	}
 	move(ypos, xpos);
 	refresh();

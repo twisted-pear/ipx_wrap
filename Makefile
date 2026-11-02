@@ -73,7 +73,7 @@ $(MUXER_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_
 $(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(MUX_LIBS)
 
-$(RCON_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
+$(RCON_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h cp850.h
 	$(CC) $(CFLAGS) $(RCON_CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(RCON_LIBS)
 
 $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
