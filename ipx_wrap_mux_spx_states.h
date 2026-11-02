@@ -328,8 +328,24 @@ static __always_inline void fill_egress_transform_info(const struct
 	info->sctp_svtag = spx_state->sctp_svtag;
 }
 
-static __always_inline void fill_ipv6_hdr(struct ipv6hdr *ip6h, const struct
-		egress_transform_info *info, size_t ip_payload_len)
+static __always_inline void ingress_fill_ipv6_hdr(struct ipv6hdr *ip6h, size_t
+		ip_payload_len)
+{
+	ip6h->nexthdr = IPPROTO_SCTP;
+	ip6h->payload_len = bpf_htons(ip_payload_len);
+}
+
+static __always_inline void ingress_fill_sctp_hdr(struct sctphdr *sctph, __be16
+		sport, __be16 dport, __be32 vtag)
+{
+	sctph->vtag = vtag;
+	sctph->source = sport;
+	sctph->dest = dport;
+	sctph->checksum = bpf_htonl(0); /* gets filled in later */
+}
+
+static __always_inline void egress_fill_ipv6_hdr(struct ipv6hdr *ip6h, const
+		struct egress_transform_info *info, size_t ip_payload_len)
 {
 	ip6h->payload_len = bpf_htons(ip_payload_len);
 	ip6h->nexthdr = IPPROTO_UDP;
@@ -355,8 +371,8 @@ static __always_inline void fill_ipv6_hdr(struct ipv6hdr *ip6h, const struct
 			IPX_ADDR_NODE_BYTES / 2);
 }
 
-static __always_inline void fill_udp_hdr(struct udphdr *udph, const struct
-		egress_transform_info *info, size_t ip_payload_len)
+static __always_inline void egress_fill_udp_hdr(struct udphdr *udph, size_t
+		ip_payload_len)
 {
 	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
 	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
@@ -367,15 +383,16 @@ static __always_inline void fill_udp_hdr(struct udphdr *udph, const struct
 	udph->len = bpf_htons(ip_payload_len);
 }
 
-static __always_inline void fill_ipx_hdr(struct ipxhdr *ipxh, const struct
-		egress_transform_info *info, size_t ip_payload_len)
+static __always_inline void egress_fill_ipx_hdr(struct ipxhdr *ipxh, const
+		struct ipx_addr *remote_addr, const struct ipx_addr
+		*local_addr, size_t ip_payload_len)
 {
 	ipxh->csum = IPX_CSUM_NONE;
 	ipxh->pktlen = bpf_htons(ip_payload_len - sizeof(struct udphdr));
 	ipxh->tc = 0;
 	ipxh->type = SPX_PKT_TYPE;
-	ipxh->daddr = info->remote_addr;
-	ipxh->saddr = info->local_addr;
+	ipxh->daddr = *remote_addr;
+	ipxh->saddr = *local_addr;
 }
 
 static __always_inline bool admit_ingress_NEW(const struct bpf_kspx_state
@@ -459,12 +476,9 @@ static __always_inline bool transform_ingress_NEW(struct __sk_buff *skb, struct
 	}
 
 	/* fill in the new headers */
-	ip6h->nexthdr = IPPROTO_SCTP;
-	ip6h->payload_len = bpf_htons(payload_len);
-	sctph->vtag = info->sctp_dvtag;
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->checksum = bpf_htonl(0);
+	ingress_fill_ipv6_hdr(ip6h, payload_len);
+	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
+			info->sctp_dvtag);
 
 	/* create the init ack chunk */
 	struct sctp_chunkhdr *chunk = (struct sctp_chunkhdr *) (sctph + 1);
@@ -594,13 +608,14 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 	}
 
 	/* fill in IPv6 header */
-	fill_ipv6_hdr(ip6h, info, payload_len);
+	egress_fill_ipv6_hdr(ip6h, info, payload_len);
 
 	/* fill in the UDP header. */
-	fill_udp_hdr(udph, info, payload_len);
+	egress_fill_udp_hdr(udph, payload_len);
 
 	/* fill in the IPX header */
-	fill_ipx_hdr(ipxh, info, payload_len);
+	egress_fill_ipx_hdr(ipxh, &(info->remote_addr), &(info->local_addr),
+			payload_len);
 
 	/* fill in the SPX header */
 	spxh->connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
@@ -740,10 +755,8 @@ static __always_inline bool reflect_INIT_egress_INCOMING(struct __sk_buff *skb,
 	ip6h->payload_len = bpf_htons(payload_len);
 
 	/* create the SCTP init ack */
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->vtag = info->sctp_dvtag;
-	sctph->checksum = bpf_htonl(0);
+	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
+			info->sctp_dvtag);
 	chunk1->type = SCTP_CID_INIT_ACK;
 	chunk1->flags = 0;
 	chunk1->length = bpf_htons(chunklen);
@@ -825,13 +838,14 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
 
 	/* fill in IPv6 header */
-	fill_ipv6_hdr(ip6h, info, payload_len);
+	egress_fill_ipv6_hdr(ip6h, info, payload_len);
 
 	/* fill in the UDP header. */
-	fill_udp_hdr(udph, info, payload_len);
+	egress_fill_udp_hdr(udph, payload_len);
 
 	/* fill in the IPX header */
-	fill_ipx_hdr(ipxh, info, payload_len);
+	egress_fill_ipx_hdr(ipxh, &(info->remote_addr), &(info->local_addr),
+			payload_len);
 
 	/* fill in the SPX header */
 	spxh->connection_control = SPX_CC_SYSTEM_PKT;
@@ -952,10 +966,8 @@ static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
 	ip6h->payload_len = bpf_htons(payload_len);
 
 	/* create the SCTP cookie ack */
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->vtag = info->sctp_dvtag;
-	sctph->checksum = bpf_htonl(0);
+	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
+			info->sctp_dvtag);
 	chunk1->type = SCTP_CID_COOKIE_ACK;
 	chunk1->flags = 0;
 	chunk1->length = bpf_htons(sizeof(struct sctp_chunkhdr));
@@ -1170,12 +1182,9 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	}
 
 	/* fill in the new headers */
-	ip6h->nexthdr = IPPROTO_SCTP;
-	ip6h->payload_len = bpf_htons(payload_len);
-	sctph->vtag = info->sctp_dvtag;
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->checksum = bpf_htonl(0);
+	ingress_fill_ipv6_hdr(ip6h, payload_len);
+	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
+			info->sctp_dvtag);
 
 	/* fill in the SHUTDOWN or HEARTBEAT chunk if necessary */
 	if (shutdown_requested) {
@@ -1613,13 +1622,14 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 	}
 
 	/* fill in IPv6 header */
-	fill_ipv6_hdr(ip6h, info, payload_len);
+	egress_fill_ipv6_hdr(ip6h, info, payload_len);
 
 	/* fill in the UDP header. */
-	fill_udp_hdr(udph, info, payload_len);
+	egress_fill_udp_hdr(udph, payload_len);
 
 	/* fill in the IPX header */
-	fill_ipx_hdr(ipxh, info, payload_len);
+	egress_fill_ipx_hdr(ipxh, &(info->remote_addr), &(info->local_addr),
+			payload_len);
 
 	/* fill in the SPX header */
 	spxh->connection_control = connection_control;
@@ -1707,24 +1717,15 @@ static __always_inline bool reflect_CONNREQ_ingress_PRE_ESTABLISHED(struct
 	spxh->ack_no = bpf_htons(0);
 	spxh->alloc_no = bpf_htons(0);
 
-	size_t ack_len = sizeof(struct spxhdr) + sizeof(struct ipxhdr);
+	size_t ack_len = sizeof(struct spxhdr) + sizeof(struct ipxhdr) +
+		sizeof(struct udphdr);
 
 	/* fill in the IPX header */
-	ipxh->csum = IPX_CSUM_NONE;
-	ipxh->pktlen = bpf_htons(ack_len);
-	ipxh->tc = 0;
-	ipxh->type = SPX_PKT_TYPE;
-	ipxh->daddr = info->remote_addr;
-	ipxh->saddr = info->local_addr;
-
-	ack_len += sizeof(struct udphdr);
+	egress_fill_ipx_hdr(ipxh, &(info->remote_addr), &(info->local_addr),
+			ack_len);
 
 	/* fill in the UDP header */
-	udph->source = bpf_htons(IPX_IN_IPV6_PORT);
-	udph->dest = bpf_htons(IPX_IN_IPV6_PORT);
-	udph->len = bpf_htons(ack_len);
-	/* dummy checksum since the UDP header will get stripped away */
-	udph->check = bpf_htons(0xdead);
+	egress_fill_udp_hdr(udph, ack_len);
 
 	/* update ETH and IPv6 headers */
 	__builtin_memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
@@ -1847,12 +1848,9 @@ static __always_inline bool transform_ingress_SHUTDOWN_SENT(struct __sk_buff
 	}
 
 	/* fill in the new headers */
-	ip6h->nexthdr = IPPROTO_SCTP;
-	ip6h->payload_len = bpf_htons(payload_len);
-	sctph->vtag = info->sctp_dvtag;
-	sctph->source = info->sctp_sport;
-	sctph->dest = info->sctp_dport;
-	sctph->checksum = bpf_htonl(0);
+	ingress_fill_ipv6_hdr(ip6h, payload_len);
+	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
+			info->sctp_dvtag);
 	chunk->type = SCTP_CID_SHUTDOWN_ACK;
 	chunk->flags = 0;
 	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr));
