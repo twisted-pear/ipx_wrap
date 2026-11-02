@@ -123,14 +123,14 @@ TAILQ_HEAD(rcon_screen_list, rcon_screen);
 static __be32 current_screen_id = CURRENT_SCREEN_NONE;
 static struct rcon_screen_list screen_list = TAILQ_HEAD_INITIALIZER(screen_list);
 
-static __u8 cp850[UCHAR_MAX + 1] = {
+static chtype cp850[UCHAR_MAX + 1] = {
 	[0x10] = '>',
 	[0x11] = '<',
 	[0x1E] = '^',
 	[0x1F] = 'v'
 };
 
-static __u8 *current_cp = &cp850[0];
+static chtype *current_cp = &cp850[0];
 
 #define RCON_NONCE_LEN 4
 
@@ -1167,21 +1167,26 @@ static int translate_key(int c)
 
 static void handle_screen_input(int epoll_fd, int c)
 {
+	struct queued_ipx_msg *req = NULL;
+
 	if (c == SCREEN_ESCAPE_KEY) {
+		req = rcon_prepare_request(0, RCON_REQUEST_SCREEN_CLOSE,
+				current_screen_id);
+
 		leave_screen();
-		return;
-	}
-
-	if (!isprint(c)) {
-		c = translate_key(c);
-		if (c == -1) {
-			return;
-		}
 	} else {
-		c <<= 8;
+		if (!isprint(c)) {
+			c = translate_key(c);
+			if (c == -1) {
+				return;
+			}
+		} else {
+			c <<= 8;
+		}
+
+		req = rcon_input_request(current_screen_id, c);
 	}
 
-	struct queued_ipx_msg *req = rcon_input_request(current_screen_id, c);
 	if (req == NULL) {
 		leave_ui();
 		perror("allocating message");
@@ -1286,7 +1291,7 @@ static int translate_attrs(__u8 attrs)
 	return new_attrs;
 }
 
-static __u8 get_byte_from_codepage(__u8 c, __u8 *cp)
+static chtype get_byte_from_codepage(__u8 c, chtype *cp)
 {
 	if (cp[c] != 0) {
 		return cp[c];
@@ -1434,7 +1439,7 @@ static bool screen_draw(__u8 *data, __u16 len, int pos, bool update)
 
 	move(0, 0);
 	for (i = 0; i < RCON_LINES * RCON_COLUMNS; i++) {
-		__u8 cont = get_byte_from_codepage(screen_content[i],
+		chtype cont = get_byte_from_codepage(screen_content[i],
 				current_cp);
 		addch(cont | translate_attrs(screen_attrs[i]));
 	}

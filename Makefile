@@ -24,7 +24,8 @@ BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap -lbpf
 MUX_LIBS = -lm
-RCON_LIBS = -lcrypto -lmenuw -lncursesw
+RCON_LIBS = -lcrypto -lmenuw $(shell pkg-config --libs ncursesw)
+RCON_CFLAGS = $(shell pkg-config --cflags ncursesw)
 
 all: $(MUX_TARGETS) $(RCON_TARGETS) $(USER_TARGETS) $(IFD_TARGETS) $(BPF_OBJ) $(MUXER_TARGETS) $(SERVICE_TARGETS)
 
@@ -73,7 +74,7 @@ $(MUX_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wr
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(MUX_LIBS)
 
 $(RCON_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_helpers.o ipx_wrap_helpers.h
-	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(RCON_LIBS)
+	$(CC) $(CFLAGS) $(RCON_CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_helpers.o $(RCON_LIBS)
 
 $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
