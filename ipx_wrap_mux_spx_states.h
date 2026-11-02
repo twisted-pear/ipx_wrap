@@ -344,6 +344,14 @@ static __always_inline void ingress_fill_sctp_hdr(struct sctphdr *sctph, __be16
 	sctph->checksum = bpf_htonl(0); /* gets filled in later */
 }
 
+static __always_inline void ingress_fill_sctp_chunk_hdr(struct sctp_chunkhdr
+		*chunk, __u8 type, __u8 flags, size_t length)
+{
+	chunk->type = type;
+	chunk->flags = flags;
+	chunk->length = bpf_htons(length);
+}
+
 static __always_inline void egress_fill_ipv6_hdr(struct ipv6hdr *ip6h, const
 		struct egress_transform_info *info, size_t ip_payload_len)
 {
@@ -489,11 +497,9 @@ static __always_inline bool transform_ingress_NEW(struct __sk_buff *skb, struct
 		return false;
 	}
 
-	chunk->type = SCTP_CID_INIT_ACK;
-	chunk->flags = 0;
-	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) + sizeof(struct
-				sctp_inithdr) + sizeof(struct sctp_paramhdr) +
-			SCTP_STATE_COOKIE_LEN);
+	ingress_fill_sctp_chunk_hdr(chunk, SCTP_CID_INIT_ACK, 0, sizeof(struct
+				sctp_chunkhdr) + sizeof(struct sctp_inithdr) +
+			sizeof(struct sctp_paramhdr) + SCTP_STATE_COOKIE_LEN);
 	init->init_tag = info->sctp_svtag;
 	init->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 	init->num_inbound_streams = bpf_htons(1);
@@ -757,9 +763,7 @@ static __always_inline bool reflect_INIT_egress_INCOMING(struct __sk_buff *skb,
 	/* create the SCTP init ack */
 	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
 			info->sctp_dvtag);
-	chunk1->type = SCTP_CID_INIT_ACK;
-	chunk1->flags = 0;
-	chunk1->length = bpf_htons(chunklen);
+	ingress_fill_sctp_chunk_hdr(chunk1, SCTP_CID_INIT_ACK, 0, chunklen);
 	init->init_tag = info->sctp_svtag;
 	init->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
 	init->num_inbound_streams = bpf_htons(1);
@@ -968,9 +972,8 @@ static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
 	/* create the SCTP cookie ack */
 	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
 			info->sctp_dvtag);
-	chunk1->type = SCTP_CID_COOKIE_ACK;
-	chunk1->flags = 0;
-	chunk1->length = bpf_htons(sizeof(struct sctp_chunkhdr));
+	ingress_fill_sctp_chunk_hdr(chunk1, SCTP_CID_COOKIE_ACK, 0,
+			sizeof(struct sctp_chunkhdr));
 
 	/* calculate CRC32c checksum */
 	__u32 csum = 0;
@@ -1200,9 +1203,8 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 			return false;
 		}
 
-		shut_chunk->type = SCTP_CID_SHUTDOWN;
-		shut_chunk->flags = 0;
-		shut_chunk->length = bpf_htons(hbs_len);
+		ingress_fill_sctp_chunk_hdr(shut_chunk, SCTP_CID_SHUTDOWN, 0,
+				hbs_len);
 		shut_param->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
 					info->local_sequence_offset,
 					info->local_current_tsn));
@@ -1222,9 +1224,8 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 			return false;
 		}
 
-		hb_chunk->type = SCTP_CID_HEARTBEAT;
-		hb_chunk->flags = 0;
-		hb_chunk->length = bpf_htons(hbs_len);
+		ingress_fill_sctp_chunk_hdr(hb_chunk, SCTP_CID_HEARTBEAT, 0,
+				hbs_len);
 		hb_param->type = SCTP_PARAM_HEARTBEAT_INFO;
 		hb_param->length = bpf_htons(sizeof(struct sctp_paramhdr) +
 				SCTP_HEARTBEAT_PARAM_LEN);
@@ -1272,7 +1273,13 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 			((__u8 *) hb_ack_chunk)[i] = info->heartbeat_buf[i];
 		}
 
-		hb_ack_chunk->type = SCTP_CID_HEARTBEAT_ACK;
+		if (hb_ack_chunk + 1 > data_end) {
+			return false;
+		}
+
+		ingress_fill_sctp_chunk_hdr(hb_ack_chunk,
+				SCTP_CID_HEARTBEAT_ACK, 0,
+				info->outstanding_heartbeat_len);
 	}
 
 	/* FIXME: this exists solely to appease the verifier */
@@ -1289,13 +1296,13 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 			return false;
 		}
 
-		chunk->type = SCTP_CID_DATA;
-		chunk->flags = (0 << 3) | /* I-bit */
-			       (0 << 2) | /* U-bit */
-			       (1 << 1) | /* B-bit */
-			       (1 << 0) ; /* E-bit */
-		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_datahdr) + data_len);
+		__u8 flags = (0 << 3) | /* I-bit */
+			     (0 << 2) | /* U-bit */
+			     (1 << 1) | /* B-bit */
+			     (1 << 0) ; /* E-bit */
+		ingress_fill_sctp_chunk_hdr(chunk, SCTP_CID_DATA, flags,
+				sizeof(struct sctp_chunkhdr) + sizeof(struct
+					sctp_datahdr) + data_len);
 		data->tsn = bpf_htonl(calc_cur_tsn(spx_seq,
 					info->remote_sequence_offset,
 					info->last_ackd_tsn));
@@ -1310,10 +1317,9 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 			return false;
 		}
 
-		chunk->type = SCTP_CID_SACK;
-		chunk->flags = 0;
-		chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr) +
-				sizeof(struct sctp_sackhdr));
+		ingress_fill_sctp_chunk_hdr(chunk, SCTP_CID_SACK, 0,
+				sizeof(struct sctp_chunkhdr) + sizeof(struct
+					sctp_sackhdr));
 		sack->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
 					info->local_sequence_offset,
 					info->local_current_tsn));
@@ -1851,9 +1857,8 @@ static __always_inline bool transform_ingress_SHUTDOWN_SENT(struct __sk_buff
 	ingress_fill_ipv6_hdr(ip6h, payload_len);
 	ingress_fill_sctp_hdr(sctph, info->sctp_sport, info->sctp_dport,
 			info->sctp_dvtag);
-	chunk->type = SCTP_CID_SHUTDOWN_ACK;
-	chunk->flags = 0;
-	chunk->length = bpf_htons(sizeof(struct sctp_chunkhdr));
+	ingress_fill_sctp_chunk_hdr(chunk, SCTP_CID_SHUTDOWN_ACK, 0,
+			sizeof(struct sctp_chunkhdr));
 
 	/* calculate CRC32c checksum */
 	__u32 csum = 0;
