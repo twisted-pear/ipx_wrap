@@ -403,6 +403,41 @@ static __always_inline void egress_fill_ipx_hdr(struct ipxhdr *ipxh, const
 	ipxh->saddr = *local_addr;
 }
 
+static __always_inline void egress_fill_spx_hdr(struct spxhdr *spxh, const
+		struct egress_transform_info *info, __u8 connection_control,
+		__u8 datastream_type, __u16 seq_no)
+{
+	spxh->connection_control = connection_control;
+	spxh->datastream_type = datastream_type;
+	spxh->src_conn_id = info->local_id;
+	spxh->dst_conn_id = info->remote_id;
+	spxh->seq_no = bpf_htons(seq_no);
+
+	__u16 spx_ack;
+	__builtin_add_overflow(info->last_ackd_tsn, 1, &spx_ack);
+	spxh->ack_no = bpf_htons(spx_ack);
+	spxh->alloc_no = bpf_htons(info->local_alloc_no);
+}
+
+static __always_inline void swap_eth_addrs(struct ethhdr *eth)
+{
+	__u8 eth_dest_backup[ETH_ALEN];
+	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+}
+
+static __always_inline void swap_ipv6_addrs(struct ipv6hdr *ip6h)
+{
+	struct in6_addr ip6_dest_backup;
+	__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr), sizeof(struct
+				in6_addr));
+	__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
+				in6_addr));
+	__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup, sizeof(struct
+				in6_addr));
+}
+
 static __always_inline bool admit_ingress_NEW(const struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
 {
@@ -624,13 +659,8 @@ static __always_inline bool transform_egress_NEW(struct __sk_buff *skb, struct
 			payload_len);
 
 	/* fill in the SPX header */
-	spxh->connection_control = SPX_CC_SYSTEM_PKT | SPX_CC_ACK_REQUIRED;
-	spxh->datastream_type = SPX_DS_NONE;
-	spxh->src_conn_id = info->local_id;
-	spxh->dst_conn_id = info->remote_id;
-	spxh->seq_no = bpf_htons(0);
-	spxh->ack_no = bpf_htons(info->last_ackd_tsn);
-	spxh->alloc_no = bpf_htons(info->local_alloc_no);
+	egress_fill_spx_hdr(spxh, info, SPX_CC_SYSTEM_PKT |
+			SPX_CC_ACK_REQUIRED, SPX_DS_NONE, 0);
 
 	return true;
 }
@@ -743,19 +773,10 @@ static __always_inline bool reflect_INIT_egress_INCOMING(struct __sk_buff *skb,
 	}
 
 	/* swap Ethernet addrs */
-	__u8 eth_dest_backup[ETH_ALEN];
-	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
-	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+	swap_eth_addrs(eth);
 
 	/* swap the IPv6 addrs */
-	struct in6_addr ip6_dest_backup;
-	__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr), sizeof(struct
-				in6_addr));
-	__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
-				in6_addr));
-	__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup, sizeof(struct
-				in6_addr));
+	swap_ipv6_addrs(ip6h);
 
 	/* adjust the payload length */
 	ip6h->payload_len = bpf_htons(payload_len);
@@ -836,10 +857,7 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 	}
 
 	/* swap Ethernet addrs (again) */
-	__u8 eth_dest_backup[ETH_ALEN];
-	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
-	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+	swap_eth_addrs(eth);
 
 	/* fill in IPv6 header */
 	egress_fill_ipv6_hdr(ip6h, info, payload_len);
@@ -852,13 +870,7 @@ static __always_inline bool transform_egress_INCOMING(struct __sk_buff *skb,
 			payload_len);
 
 	/* fill in the SPX header */
-	spxh->connection_control = SPX_CC_SYSTEM_PKT;
-	spxh->datastream_type = SPX_DS_NONE;
-	spxh->src_conn_id = info->local_id;
-	spxh->dst_conn_id = info->remote_id;
-	spxh->seq_no = bpf_htons(0);
-	spxh->ack_no = bpf_htons(info->last_ackd_tsn);
-	spxh->alloc_no = bpf_htons(info->local_alloc_no);
+	egress_fill_spx_hdr(spxh, info, SPX_CC_SYSTEM_PKT, SPX_DS_NONE, 0);
 
 	return true;
 }
@@ -950,19 +962,10 @@ static __always_inline bool transform_egress_CONN_ACK_RCVD(struct __sk_buff
 	}
 
 	/* swap Ethernet addrs */
-	__u8 eth_dest_backup[ETH_ALEN];
-	__builtin_memcpy(eth_dest_backup, eth->h_dest, ETH_ALEN);
-	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-	__builtin_memcpy(eth->h_source, eth_dest_backup, ETH_ALEN);
+	swap_eth_addrs(eth);
 
 	/* swap the IPv6 addrs */
-	struct in6_addr ip6_dest_backup;
-	__builtin_memcpy(&ip6_dest_backup, &(ip6h->daddr), sizeof(struct
-				in6_addr));
-	__builtin_memcpy(&(ip6h->daddr), &(ip6h->saddr), sizeof(struct
-				in6_addr));
-	__builtin_memcpy(&(ip6h->saddr), &ip6_dest_backup, sizeof(struct
-				in6_addr));
+	swap_ipv6_addrs(ip6h);
 
 	/* adjust the payload length */
 	size_t payload_len = sizeof(struct sctphdr) + sizeof(struct
@@ -1638,16 +1641,8 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 			payload_len);
 
 	/* fill in the SPX header */
-	spxh->connection_control = connection_control;
-	spxh->datastream_type = datastream_type;
-	spxh->src_conn_id = info->local_id;
-	spxh->dst_conn_id = info->remote_id;
-	spxh->seq_no = bpf_htons(seq_no);
-
-	__u16 spx_ack;
-	__builtin_add_overflow(info->last_ackd_tsn, 1, &spx_ack);
-	spxh->ack_no = bpf_htons(spx_ack);
-	spxh->alloc_no = bpf_htons(info->local_alloc_no);
+	egress_fill_spx_hdr(spxh, info, connection_control, datastream_type,
+			seq_no);
 
 	return true;
 }
