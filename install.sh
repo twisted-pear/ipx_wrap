@@ -24,6 +24,19 @@ ethtool -K "${IF}" tx-ipxip4-segmentation off >/dev/null
 ethtool -K "${IF}" tx-ipxip6-segmentation off >/dev/null
 ethtool -K "${IF}" tx-udp_tnl-segmentation off >/dev/null
 ethtool -K "${IF}" tx-udp_tnl-csum-segmentation off >/dev/null
+ethtool -K "${IF}" tcp-segmentation-offload off >/dev/null
+ethtool -K "${IF}" generic-receive-offload off >/dev/null
+ethtool -K "${IF}" tx-vlan-offload off >/dev/null
+ethtool -K "${IF}" tx-gre-segmentation off >/dev/null
+ethtool -K "${IF}" tx-gre-csum-segmentation off >/dev/null
+ethtool -K "${IF}" tx-gso-partial off >/dev/null
+ethtool -K "${IF}" tx-tunnel-remcsum-segmentation off >/dev/null
+ethtool -K "${IF}" tx-sctp-segmentation off >/dev/null
+ethtool -K "${IF}" tx-esp-segmentation off >/dev/null
+ethtool -K "${IF}" tx-vlan-stag-hw-insert off >/dev/null
+ethtool -K "${IF}" rx-vlan-offload off >/dev/null
+ethtool -K "${IF}" rx-vlan-stag-hw-parse off >/dev/null
+
 
 tc qdisc add dev "${IF}" clsact
 tc filter add dev "${IF}" ingress bpf object-file "${IPX_WRAP_DIR}/ipx_wrap_kern.o" section tc/ingress direct-action
