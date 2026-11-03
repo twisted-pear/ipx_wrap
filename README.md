@@ -14,8 +14,8 @@ client programs to bind to IPX sockets and transmit IPX packets.
 To propagate routes to real IPX hosts there is `ipx_wrap_ripd`. To advertise
 services on the IPX internetwork there is `ipx_wrap_sapd`.
 
-This most likely only works with a recent Linux kernel. Tested with Linux 6.18
-and libbpf 1.4.6.
+This most likely only works with a recent Linux kernel. Tested with Linux 7.2
+and libbpf 1.5.0.
 
 ## Warning!
 
@@ -74,6 +74,16 @@ with information from the IPX header. On egress, any IPv6 UDP packet with
 source and destination port equal to `213` has the IPv6 and UDP headers
 stripped out and the UDP payload is appended directly to the Ethernet header.
 
+### Sequenced Packet eXchange (SPX)
+
+SPX is implemented by translating it to SCTP in eBPF. To use SPX `ipx_wrap_mux`
+has to be running. The client processes use a special SCTP socket prepared by
+the multiplexer. Keepalives, retransmissions and timeouts are handled entirely
+by the kernel's SCTP implementation.
+
+Only SPX version 1 is supported. SPXII is not supported. Therefore, no
+packet-size negotiation is supported.
+
 ### Loading
 
 Load with:
@@ -95,6 +105,18 @@ ethtool -K <if> tx-ipxip4-segmentation off
 ethtool -K <if> tx-ipxip6-segmentation off
 ethtool -K <if> tx-udp_tnl-segmentation off
 ethtool -K <if> tx-udp_tnl-csum-segmentation off
+ethtool -K <if> tcp-segmentation-offload off
+ethtool -K <if> generic-receive-offload off
+ethtool -K <if> tx-vlan-offload off
+ethtool -K <if> tx-gre-segmentation off
+ethtool -K <if> tx-gre-csum-segmentation off
+ethtool -K <if> tx-gso-partial off
+ethtool -K <if> tx-tunnel-remcsum-segmentation off
+ethtool -K <if> tx-sctp-segmentation off
+ethtool -K <if> tx-esp-segmentation off
+ethtool -K <if> tx-vlan-stag-hw-insert off
+ethtool -K <if> rx-vlan-offload off
+ethtool -K <if> rx-vlan-stag-hw-parse off
 ```
 
 Afterwards, you still need to set the prefix and the network number for the BPF
@@ -229,9 +251,9 @@ This program depends on a running `ipx_wrap_mux`.
 Usage:
 ```
 Usage: ipxcat [-v] [-d <maximum data bytes>] [-t <packet type>] <local IPX address> <remote IPX address>
-       ipxcat [-v] -s [-1] [-d <maximum data bytes>] <local IPX address> <remote IPX address>
+       ipxcat [-v] -s [-d <maximum data bytes>] <local IPX address> <remote IPX address>
        ipxcat [-v] -l [-t <packet type>] [-b] [-r] <local IPX address>
-       ipxcat [-v] -l -s [-1] [-d <maximum data bytes>] <local IPX address>
+       ipxcat [-v] -l -s [-d <maximum data bytes>] <local IPX address>
 ```
 
 The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
@@ -257,19 +279,10 @@ will accept any packet type while a sending process will use the packet type
 `0x1e`.
 
 The `-d` option specifies the maximum amount of bytes of data transmitted per
-packet. For SPX this value is ignored and is 534. For SPXII this value must be
-between 1 and 65483 (inclusive). For IPX this value must be between 1 and 65497
-(inclusive). There is no MTU measurement unless SPXII is in use. This means
+packet. For SPX this value has to be between 1 and 534. For IPX this value must
+be between 1 and 65497 (inclusive). There is no MTU measurement. This means
 that it is up to the user to ensure packets are not too large to be
-transmitted. The default for IPX is 534. SPXII will perform a packet size
-negotiation. It will gradually reduce the packet size from the specified
-maximum down until packets go through. If the `-d` option is not specified it
-will start at 534 bytes of data.
-
-The `-1` flag specifies that only SPX version 1 should be used. This version of
-SPX does not support packet size negotiation and thus the maximum packet size
-when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
-is not specified, SPXII will be used if the connection peer supports it.
+transmitted. The default for IPX is 534.
 
 The `-r` flag causes the program to collect receive timestamps for received IPX
 packets. This flag is only allowed in IPX listening mode. Timestamps are
@@ -327,7 +340,7 @@ This program depends on a running `ipx_wrap_mux`.
 
 Usage:
 ```
-Usage: spxinetd [-v] [-1] [-d <maximum data bytes>] [-e] <local IPX address> -- <command>
+Usage: spxinetd [-v] [-d <maximum data bytes>] [-e] <local IPX address> -- <command>
 ```
 
 The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
@@ -336,16 +349,7 @@ socket number of the local IPX address is specified as zero, a random dynamic
 socket will be chosen.
 
 The `-d` option specifies the maximum amount of bytes of data transmitted per
-packet. For SPX this value is ignored and is 534. For SPXII this value must be
-between 1 and 65483 (inclusive). SPXII will perform a packet size negotiation.
-It will gradually reduce the packet size from the specified maximum down until
-packets go through. If the `-d` option is not specified it will start at 534
-bytes of data.
-
-The `-1` flag specifies that only SPX version 1 should be used. This version of
-SPX does not support packet size negotiation and thus the maximum packet size
-when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
-is not specified, SPXII will be used if the connection peer supports it.
+packet. This value has to be between 1 and 534.
 
 The `-e` flag will cause the `stderr` of the executed program to also be
 redirected via the SPX connection.
@@ -399,7 +403,7 @@ This program depends on a running `ipx_wrap_mux`.
 
 Usage:
 ```
-Usage: spxtcp [-v] [-1] [-6] [-d <maximum SPX data bytes>] [-s <remote IPX address>] [-t <remote IP address>:<remote port>] <local IPX address> <local IP address>:<local port>
+Usage: spxtcp [-v] [-6] [-d <maximum SPX data bytes>] [-s <remote IPX address>] [-t <remote IP address>:<remote port>] <local IPX address> <local IP address>:<local port>
 ```
 
 The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
@@ -424,20 +428,11 @@ and then fork. The forked process will forward data between those two
 connections, while the parent will once again wait for a new SPX (or TCP)
 connection.
 
-The `-1` flag specifies that only SPX version 1 should be used. This version of
-SPX does not support packet size negotiation and thus the maximum packet size
-when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
-is not specified, SPXII will be used if the connection peer supports it.
-
 The `-6` flag specifies that IPv6 should be used for the TCP connections. In
 that case local and remote IP addresses must be IPv6 addresses.
 
 The `-d` option specifies the maximum amount of bytes of data transmitted per
-SPX packet. For SPX this value is ignored and is 534. For SPXII this value must
-be between 1 and 65483 (inclusive). SPXII will perform a packet size
-negotiation. It will gradually reduce the packet size from the specified
-maximum down until packets go through. If the `-d` option is not specified it
-will start at 534 bytes of data.
+SPX packet. This value must be between 1 and 534.
 
 The `-s` option specifies the remote SPX address the program will connect to
 once the awaited incoming TCP connection (if any) has been established.
@@ -496,7 +491,7 @@ This program depends on a running `ipx_wrap_mux`.
 
 Usage:
 ```
-Usage: rconcl [-v] [-1] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address>
+Usage: rconcl [-v] [-d <maximum SPX data bytes>] <local IPX address> <remote IPX address>
 ```
 
 The IPX addresses are of the form `<4 byte hex network>.<6 byte hex node
@@ -510,17 +505,8 @@ displayed. The list can be navigated with the arrow-keys and a screen (or
 `Exit`) can be selected using the Enter-key. To return from a screen back to
 the list, the key combination Alt+Shift+X can be used.
 
-The `-1` flag specifies that only SPX version 1 should be used. This version of
-SPX does not support packet size negotiation and thus the maximum packet size
-when using SPX version 1 is 576 bytes (534 bytes of payload data). If this flag
-is not specified, SPXII will be used if the connection peer supports it.
-
 The `-d` option specifies the maximum amount of bytes of data transmitted per
-SPX packet. For SPX this value is ignored and is 534. For SPXII this value must
-be between 1 and 65483 (inclusive). SPXII will perform a packet size
-negotiation. It will gradually reduce the packet size from the specified
-maximum down until packets go through. If the `-d` option is not specified it
-will start at 534 bytes of data.
+SPX packet. This value is ignored and is always 534.
 
 The `-v` flag will cause the program to print more detailed information.
 
