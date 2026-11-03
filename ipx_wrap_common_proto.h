@@ -304,7 +304,6 @@ struct bpf_kspx_state {
 	struct ipx_addr local_addr;
 	__be16 remote_id;
 	__be16 local_id;
-	__u16 remote_alloc_no;
 	__u16 local_alloc_no;
 	__u32 remote_sequence_offset;
 	__u32 last_ackd_tsn;

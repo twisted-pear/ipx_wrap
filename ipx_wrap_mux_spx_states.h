@@ -1,9 +1,6 @@
 #ifndef __IPX_WRAP_MUX_SPX_STATES_H__
 #define __IPX_WRAP_MUX_SPX_STATES_H__
 
-// TODO: find a proper way to handle alloc numbers
-// TODO: find a proper way to handle the recv window credit
-
 static __always_inline struct bpf_kspx_state *get_kspx_state(struct
 		spx_conn_key *key)
 {
@@ -270,6 +267,7 @@ struct ingress_transform_info {
 	__u32 last_ackd_tsn;
 	__u32 local_sequence_offset;
 	__u32 local_current_tsn;
+	__u16 neg_size_to_remote;
 	__u16 outstanding_heartbeat_len;
 	__u8 heartbeat_buf[SCTP_MAX_HEARTBEAT_CHUNK_LEN];
 };
@@ -289,6 +287,7 @@ static __always_inline void fill_ingress_transform_info(const struct
 	info->last_ackd_tsn = spx_state->last_ackd_tsn;
 	info->local_sequence_offset = spx_state->local_sequence_offset;
 	info->local_current_tsn = spx_state->last_sent_tsn;
+	info->neg_size_to_remote = spx_state->neg_size_to_remote;
 	info->outstanding_heartbeat_len = spx_state->outstanding_heartbeat_len;
 	__builtin_memcpy(info->heartbeat_buf, spx_state->heartbeat_buf,
 			SCTP_MAX_HEARTBEAT_CHUNK_LEN);
@@ -471,7 +470,6 @@ static __always_inline void update_state_ingress_NEW(struct bpf_kspx_state
 		*spx_state, const struct spxhdr *spxh, size_t data_len)
 {
 	spx_state->remote_id = spxh->src_conn_id;
-	spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 
 	/* once we have a correct SPX conn ack, we can deal with the SCTP
 	 * cookie */
@@ -1079,8 +1077,6 @@ static __always_inline void update_state_ingress_ESTABLISHED(struct
 			(spxh->datastream_type == SPX_DS_END_OF_CONN)) {
 		spx_state->state = KSPX_SHUTDOWN_RCVD;
 	}
-
-	spx_state->remote_alloc_no = bpf_ntohs(spxh->alloc_no);
 }
 
 static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
@@ -1091,8 +1087,9 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 	size_t chunk_start_ofs = sizeof(struct sctphdr);
 	size_t sctp_padding_bytes = 0;
 
-	__u32 spx_seq = bpf_ntohs(spxh->seq_no);
-	__u32 spx_ack = bpf_ntohs(spxh->ack_no);
+	__u16 spx_seq = bpf_ntohs(spxh->seq_no);
+	__u16 spx_ack = bpf_ntohs(spxh->ack_no);
+	__u16 spx_alloc = bpf_ntohs(spxh->alloc_no);
 
 	/* prepare the PPID metadata */
 	union kspx_sctp_ppid_info ppid_info;
@@ -1326,7 +1323,18 @@ static __always_inline bool transform_ingress_ESTABLISHED(struct __sk_buff
 		sack->cum_tsn_ack = bpf_htonl(calc_cum_tsn_ack(spx_ack,
 					info->local_sequence_offset,
 					info->local_current_tsn));
-		sack->a_rwnd = bpf_htonl(SCTP_RWND_DUMMY);
+
+		/* calculate a_rwnd */
+		__u16 last_ackd_seq;
+		__builtin_sub_overflow(spx_ack, 1, &last_ackd_seq);
+		__u16 nslots;
+		__builtin_sub_overflow(spx_alloc, last_ackd_seq, &nslots);
+		if (nslots > SPX_ALLOC_SLOTS_MAX) {
+			nslots = SPX_ALLOC_SLOTS_MAX;
+		}
+		__u32 a_rwnd = nslots * info->neg_size_to_remote;
+		sack->a_rwnd = bpf_htonl(a_rwnd);
+
 		sack->num_gap_ack_blocks = bpf_htons(0);
 		sack->num_dup_tsns = bpf_htons(0);
 	}
@@ -1419,13 +1427,13 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 	{
 		/* the first 8 bytes of the SACK and SHUTDOWN chunks are
 		 * identical, so we can do this */
-		const struct sctp_shutdownhdr *sackh = (const struct
+		const struct sctp_shutdownhdr *shuth = (const struct
 				sctp_shutdownhdr *) (chunk1 + 1);
-		if (sackh + 1 > data_end) {
+		if (shuth + 1 > data_end) {
 			return false;
 		}
 
-		__u32 tsn_ack = bpf_ntohl(sackh->cum_tsn_ack);
+		__u32 tsn_ack = bpf_ntohl(shuth->cum_tsn_ack);
 
 		/* if the SPX ack would have wrapped over, increase offset */
 		__s32 spx_ack_s32;
@@ -1439,19 +1447,41 @@ static __always_inline bool update_state_egress_ESTABLISHED(struct
 		}
 
 		spx_state->last_ackd_tsn = tsn_ack;
-		__builtin_add_overflow(tsn_ack, 1,
-				&(spx_state->local_alloc_no));
 
 		/* if we sent a SHUTDOWN chunk, start shutting down the
 		 * connection */
 		if (chunk1->type == SCTP_CID_SHUTDOWN) {
 			spx_state->state = KSPX_SHUTDOWN_SENT;
+
+		/* Calculate our alloc number from a_rwnd. We need the full
+		 * SACK header for this. */
+		} else {
+			const struct sctp_sackhdr *sackh = (const struct
+					sctp_sackhdr *) (chunk1 + 1);
+			if (sackh + 1 > data_end) {
+				return false;
+			}
+
+			__u32 nslots = bpf_ntohl(sackh->a_rwnd) /
+				spx_state->neg_size_to_local;
+			if (nslots > SPX_ALLOC_SLOTS_MAX) {
+				nslots = SPX_ALLOC_SLOTS_MAX;
+			}
+
+			__u16 nslots_u16 = nslots;
+			__u16 spx_ack_u16;
+			__builtin_sub_overflow(tsn_ack,
+					spx_state->remote_sequence_offset,
+					&spx_ack_u16);
+			__builtin_add_overflow(spx_ack_u16, nslots_u16,
+					&(spx_state->local_alloc_no));
 		}
 
 		return true;
 	}
 
-	/* we can only handle SACK, HEARTBEAT and DATA chunks right now */
+	/* we can only handle SACK, HEARTBEAT, SHUTDOWN and DATA chunks right
+	 * now */
 	if (chunk1->type != SCTP_CID_DATA) {
 		return true; /* no state modification */
 	}

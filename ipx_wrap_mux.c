@@ -304,7 +304,6 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 		.local_addr = *local_addr,
 		.remote_id = remote_id,
 		.local_id = local_id,
-		.remote_alloc_no = 0,
 		.local_alloc_no = 0,
 		.remote_sequence_offset = 0,
 		.last_ackd_tsn = -1,
