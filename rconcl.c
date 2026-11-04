@@ -1264,6 +1264,7 @@ static int get_ncurses_color(__u8 win_col_attr)
 			return COLOR_WHITE;
 		default:
 			assert(0);
+			return COLOR_BLACK;
 	}
 }
 

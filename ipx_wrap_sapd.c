@@ -859,6 +859,9 @@ static bool read_cfg(const char *cfg_path)
 		}
 
 		assert(0);
+		free(e);
+		ret = false;
+		break;
 	}
 
 	fclose(cfg);
