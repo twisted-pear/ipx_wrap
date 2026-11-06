@@ -33,22 +33,6 @@ bool ipxw_mux_handle_is_error(struct ipxw_mux_handle h);
 int ipxw_mux_handle_data(struct ipxw_mux_handle h);
 int ipxw_mux_handle_conf(struct ipxw_mux_handle h);
 
-/* socket-like api */
-/* absolutely not multithreading-safe */
-
-#define IPXW_MUX_SK_PKT_TYPE_ANY 0xFF
-
-int ipxw_mux_sk_socket(int domain, int type, int protocol);
-int ipxw_mux_sk_bind(int sockfd, const struct sockaddr *addr, socklen_t
-		addrlen);
-ssize_t ipxw_mux_sk_sendto(int sockfd, const void *buf, size_t len, int flags,
-		const struct sockaddr *dest_addr, socklen_t addrlen);
-ssize_t ipxw_mux_sk_recvfrom(int sockfd, void *buf, size_t len, int flags,
-		struct sockaddr *src_addr, socklen_t *addrlen);
-int ipxw_mux_sk_getsockname(int sockfd, struct sockaddr *restrict addr,
-		socklen_t *restrict addrlen);
-int ipxw_mux_sk_close(int fd);
-
 /* client functions */
 
 /* makes the initial data sockete */
