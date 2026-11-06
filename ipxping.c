@@ -612,15 +612,14 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 
 				/* if the maximum number of Pings was reached,
 				 * exit */
-				if (cfg->max_pings != 0) {
-					if (cfg->n_pings >= cfg->max_pings) {
-						keep_going = false;
+				if (cfg->max_pings != 0 && cfg->n_pings >=
+						cfg->max_pings) {
+					keep_going = false;
+				} else {
+					/* send a ping */
+					if (!send_ping(cfg, &stats)) {
+						perror("sending Ping");
 					}
-				}
-
-				/* send a ping */
-				if (!send_ping(cfg, &stats)) {
-					perror("sending Ping");
 				}
 
 				/* consume all expirations */
