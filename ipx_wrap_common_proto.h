@@ -181,47 +181,6 @@ struct spxii_negotiate_size_hdr {
 	__be16 negotiation_size;
 } __attribute__((packed));
 
-struct ipxw_mux_spx_msg {
-	union {
-		struct ipxhdr ipxh;
-		struct ipxw_mux_msg mux_msg;
-	};
-	union {
-		struct spxhdr spxh;
-		struct {
-			__u8 end_of_msg:1,
-			     attention:1,
-			     system:1,
-			     keep_alive:1,
-			     ack:1,
-			     ack_required:1,
-			     spxii:1,
-			     negotiate_size:1;
-			__u8 datastream_type;
-			__u16 remote_alloc_no;
-			__u16 local_alloc_no;
-			__u16 remote_expected_sequence;
-			union {
-				__u16 local_current_sequence;
-				__u16 seq_no;
-			};
-			__u16 negotiation_size;
-		} __attribute__((packed));
-	};
-	union {
-		__u8 spx_data[0];
-		struct {
-			struct spxii_negotiate_size_hdr spxii_negotiate_size_h;
-			__u8 spxii_data[0];
-		};
-	};
-} __attribute__((packed));
-
-_Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
-		sizeof(struct spxhdr) + sizeof(struct
-			spxii_negotiate_size_hdr),
-		"ipxw_mux_spx_msg too large");
-
 #define SPX_MAX_PKT_LEN_WO_SIZNG 576 /* limit without size negotiation */
 #define SPXII_MAX_PKT_LEN IPXW_MUX_MSG_LEN
 
@@ -236,51 +195,6 @@ _Static_assert(sizeof(struct ipxw_mux_spx_msg) == sizeof(struct ipxhdr) +
 #define SPX_WIRE_OVERHEAD (IPX_WIRE_OVERHEAD + sizeof(struct spxhdr))
 #define SPXII_WIRE_OVERHEAD (SPX_WIRE_OVERHEAD + sizeof(struct \
 			spxii_negotiate_size_hdr))
-
-_Static_assert(SPXII_WIRE_OVERHEAD == sizeof(struct ipxw_mux_spx_msg),
-		"ipxw_mux_spx_msg size mismatch");
-
-static __always_inline __u8 *ipxw_mux_spx_msg_data(struct ipxw_mux_spx_msg
-		*msg)
-{
-	if (msg->spxii) {
-		return msg->spxii_data;
-	}
-
-	return msg->spx_data;
-}
-
-static __always_inline size_t ipxw_mux_spx_data_len(size_t msg_len, bool spxii)
-{
-	size_t overhead = spxii ? SPXII_WIRE_OVERHEAD : SPX_WIRE_OVERHEAD;
-	if (msg_len < overhead) {
-		return 0;
-	}
-
-	return msg_len - overhead;
-}
-
-static __always_inline size_t ipxw_mux_spx_msg_len(size_t data_len, bool spxii)
-{
-	if (spxii) {
-		return data_len + SPXII_WIRE_OVERHEAD;
-	}
-
-	return data_len + SPX_WIRE_OVERHEAD;
-}
-
-struct bpf_spx_state {
-	struct ipx_addr remote_addr;
-	struct ipx_addr local_addr;
-	__be16 remote_id;
-	__be16 local_id;
-	__u16 remote_alloc_no;
-	__u16 local_alloc_no;
-	__u16 remote_expected_sequence;
-	__u16 local_current_sequence;
-	__u16 neg_size_to_local;
-	__be32 prefix;
-};
 
 enum kspx_connection_state {
 	KSPX_INVALID = 0,
