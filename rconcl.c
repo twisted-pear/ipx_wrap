@@ -653,7 +653,7 @@ static struct queued_ipx_msg *rcon_prepare_request(__u16 data_len, __u16
 		return NULL;
 	}
 
-	int max_data_len = ipxw_mux_spx_max_data_len(spxh);
+	int max_data_len = SPX_MAX_DATA_LEN_WO_SIZNG;
 	int req_data_len = sizeof(struct rcon_request) + data_len;
 
 	if (max_data_len < req_data_len) {

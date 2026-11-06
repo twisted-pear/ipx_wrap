@@ -156,20 +156,13 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, struct ipxw_mux_msg *msg, int
 #define SPX_KEEP_ALIVE_TMO_TICKS 54
 #define SPX_RETRY_COUNT 10
 
-struct ipxw_mux_spx_handle_state;
-
 struct ipxw_mux_spx_handle {
 	int spx_sock;
 	int conf_sock;
 	__be16 conn_id;
-	__u16 kernel:1,
-	      spxii:1,
-	      reserved:14;
-	struct ipxw_mux_spx_handle_state *last_known_state;
 };
 
-#define ipxw_mux_spx_handle_init { .spx_sock = -1, .conf_sock = -1, .kernel = \
-	false, .spxii = false, .last_known_state = NULL }
+#define ipxw_mux_spx_handle_init { .spx_sock = -1, .conf_sock = -1 }
 
 bool ipxw_mux_spx_handle_is_error(struct ipxw_mux_spx_handle h);
 bool ipxw_mux_spx_handle_is_spxii(struct ipxw_mux_spx_handle h);
@@ -178,75 +171,24 @@ void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h);
 
 struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 		struct ipx_addr *daddr);
-struct ipxw_mux_spx_handle ipxw_mux_spx_connect(struct ipxw_mux_handle h,
-		struct ipx_addr *daddr, int spxii_size_negotiation_hint);
 
 __be16 ipxw_mux_kspx_check_for_conn_req(const void *buf, size_t len, const
 		struct sockaddr_ipx *src);
 struct ipxw_mux_spx_handle ipxw_mux_kspx_accept(struct ipxw_mux_handle h, const
 		struct sockaddr_ipx *remote_sockaddr, __be16 remote_conn_id);
-__be16 ipxw_mux_spx_check_for_conn_req(struct ipxw_mux_msg *msg, bool
-		*is_spxii);
-struct ipxw_mux_spx_handle ipxw_mux_spx_accept(struct ipxw_mux_handle h, struct
-		ipx_addr *remote_addr, __be16 remote_conn_id, int
-		spxii_size_negoriation_hint);
-
-bool ipxw_mux_spx_maintain(struct ipxw_mux_spx_handle h);
 
 void ipxw_mux_spx_conn_close(struct ipxw_mux_spx_handle *h);
-
-/* check if the connection has been fully established. before this messages
- * should not be sent or allocated as it is not clear yet if the connection
- * will be SPX or SPXII */
-bool ipxw_mux_spx_established(struct ipxw_mux_spx_handle h);
-
-int ipxw_mux_spx_max_data_len(struct ipxw_mux_spx_handle h);
 
 ssize_t ipxw_mux_kspx_send(struct ipxw_mux_spx_handle h, const void *buf,
 		size_t len, int flags, __u8 datastream_type, __u8 spx_flags);
 
-/* check if the connection is in a state where transmitting messages is
- * possible, this includes ipxw_mux_spx_established() */
-bool ipxw_mux_spx_xmit_ready(struct ipxw_mux_spx_handle h);
-
-/* pre-fills the message with data necessary for the ipxw_mux_spx_msg_data()
- * helper to work correctly, this should be called on a message before the
- * actual data is inserted */
-void ipxw_mux_spx_prepare_xmit_msg(struct ipxw_mux_spx_handle h, struct
-		ipxw_mux_spx_msg *msg);
-
-/* write message to SPX socket, may block if the caller did not check if the *
- * data socket is writeable and block is true */
-ssize_t ipxw_mux_spx_xmit(struct ipxw_mux_spx_handle h, struct ipxw_mux_spx_msg
-		*msg, size_t data_len, bool block);
-
 ssize_t ipxw_mux_kspx_recv(struct ipxw_mux_spx_handle h, void *buf, size_t len,
 		int flags, __u8 *datastream_type, __u8 *spx_flags);
-
-/* check if the connection is in a state where receiving messages is possible
- */
-bool ipxw_mux_spx_recv_ready(struct ipxw_mux_spx_handle h);
-
-/* get the length of the received message from the header, the actual lenght
- * assumes that the message is an SPXII message, this is for better
- * interoperability with ipxw_mux_spx_get_recvd(), may block */
-ssize_t ipxw_mux_spx_peek_recvd_len(struct ipxw_mux_spx_handle h, bool block);
-
-/* get a message from the SPX socket, assumes msg points to a buffer of at
- * least sizeof(ipxw_mux_spx_msg) + data_len bytes and that the maximum SPX
- * payload length that can be received is passed in data_len, may block if the
- * caller did not check if data is available and block is true, returns 0 if
- * the received message was a system message, may return less than what
- * ipxw_mux_spx_peek_recvd_len() reported, if the message is only SPX instead
- * of SPXII */
-ssize_t ipxw_mux_spx_get_recvd(struct ipxw_mux_spx_handle h, struct
-		ipxw_mux_spx_msg *msg, size_t data_len, bool block);
 
 /* helpers */
 
 int ipxw_get_outif_max_ipx_data_len_for_dst(struct ipxw_mux_handle h, struct
 		ipx_addr *dst);
-int ipxw_get_outif_max_spx_data_len_for_peer(struct ipxw_mux_spx_handle h);
 
 void sockaddr_ipx_to_ipx_addr(struct ipx_addr *addr, const struct sockaddr_ipx
 		*sockaddr);

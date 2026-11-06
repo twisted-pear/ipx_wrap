@@ -49,7 +49,6 @@ struct if_entry;
 
 struct spx_connection {
 	__be16 conn_id;
-	bool kernel; /* whether this is kernel SPX */
 	UT_hash_handle hh; /* by connection ID */
 };
 
@@ -372,53 +371,6 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 	return false;
 }
 
-static bool record_spx_conn_in_bpf(const struct ipx_addr *local_addr, const
-		struct ipx_addr *remote_addr, __be16 local_id, __be16
-		remote_id, __be32 prefix, int conn_fd)
-{
-	struct spx_conn_key spx_key = {
-		.bind_addr = *local_addr,
-		.conn_id = local_id
-	};
-
-	struct bpf_spx_state spx_state = {
-		.remote_addr = *remote_addr,
-		.local_addr = *local_addr,
-		.remote_id = remote_id,
-		.local_id = local_id,
-		.remote_alloc_no = 0,
-		.local_alloc_no = 0,
-		.remote_expected_sequence = 0,
-		.local_current_sequence = 0,
-		.neg_size_to_local = 0,
-		.prefix = prefix
-	};
-	__u64 conn_fd64 = conn_fd;
-	int err =
-		bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
-				&spx_key, sizeof(struct spx_conn_key),
-				&conn_fd64, sizeof(__u64),
-				BPF_NOEXIST);
-	if (err != 0) {
-		errno = -err;
-		return false;
-	}
-	__u32 conn_fd32 = conn_fd;
-	err =
-		bpf_map__update_elem(bpf_kern->maps.ipx_wrap_mux_spx_state,
-				&conn_fd32, sizeof(__u32), &spx_state,
-				sizeof(struct bpf_spx_state),
-				BPF_NOEXIST);
-	if (err != 0) {
-		bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
-				&spx_key, sizeof(struct spx_conn_key), 0);
-		errno = -err;
-		return false;
-	}
-
-	return true;
-}
-
 static bool record_spx_conn(struct bind_entry *e, struct
 		ipxw_mux_msg_spx_connect *conn_req, int conn_fd, struct
 		ipxw_mux_msg_spx_connect *conn_rsp, bool accepted)
@@ -448,15 +400,10 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		return false;
 	}
 
-	/* check the socket type to determine if we use user space SPX or
-	 * kernel space SPX */
-	bool kernel = false;
+	/* check the socket type to determine if we use the proper one */
+	// TODO: check protocol for SCTP as well
 	switch (get_socket_type(conn_fd)) {
-		case SOCK_DGRAM:
-			kernel = false;
-			break;
 		case SOCK_STREAM:
-			kernel = true;
 			break;
 		default:
 			conn_rsp->err = ENOTSUP;
@@ -464,89 +411,87 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	}
 
 	/* set socket options to make SCTP behave a little more like SPX */
-	if (kernel) {
-		int val = 1;
+	int val = 1;
 
-		/* we don't want fragments, one message per data chunk */
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_DISABLE_FRAGMENTS,
-					&val, sizeof(val)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		/* we want this so we can receive the PPID */
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RECVRCVINFO, &val,
-					sizeof(val)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		/* we want this so we can peek the message size of the next
-		 * packet */
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RECVNXTINFO, &val,
-					sizeof(val)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		/* only allow bursts of a single packet */
-		struct sctp_assoc_value mb = {
-			.assoc_id = SCTP_FUTURE_ASSOC,
-			.assoc_value = 1
-		};
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_MAX_BURST, &mb,
-					sizeof(mb)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		/* only allow data chunks up to this size */
-		struct sctp_assoc_value ms = {
-			.assoc_id = SCTP_FUTURE_ASSOC,
-			/* two bytes to pad out the chunk to a multiple of 4
-			 * bytes */
-			.assoc_value = SPX_MAX_DATA_LEN_WO_SIZNG + 2
-		};
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_MAXSEG, &ms,
-					sizeof(ms)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		/* set heartbeat interval, retry count, disable delayed SACK */
-		struct sctp_paddrparams pap = {
-			.spp_assoc_id = SCTP_FUTURE_ASSOC,
-			.spp_address = { 0 },
-			.spp_hbinterval = SPX_KEEP_ALIVE_TMO_TICKS * TICKS_MS,
-			.spp_pathmaxrxt = SPX_RETRY_COUNT,
-			.spp_pathmtu = SPX_SCTP_PMTU,
-			.spp_sackdelay = 0,
-			.spp_flags = SPP_HB_ENABLE | SPP_PMTUD_DISABLE |
-				SPP_SACKDELAY_DISABLE,
-			.spp_ipv6_flowlabel = 0,
-			.spp_dscp = 0
-		};
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_PEER_ADDR_PARAMS,
-					&pap, sizeof(pap)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
-
-		/* set timeouts to something SPX-like */
-		struct sctp_rtoinfo rtoi = {
-			.srto_assoc_id = SCTP_FUTURE_ASSOC,
-			.srto_initial =  1 * TICKS_MS,
-			.srto_min = 1 * TICKS_MS,
-			.srto_max = SPX_VERIFY_TMO_TICKS * TICKS_MS
-		};
-		if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RTOINFO, &rtoi,
-					sizeof(rtoi)) < 0) {
-			conn_rsp->err = errno;
-			return false;
-		}
+	/* we don't want fragments, one message per data chunk */
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_DISABLE_FRAGMENTS,
+				&val, sizeof(val)) < 0) {
+		conn_rsp->err = errno;
+		return false;
 	}
 
-	if (e->recv_direct && !kernel) {
+	/* we want this so we can receive the PPID */
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RECVRCVINFO, &val,
+				sizeof(val)) < 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	/* we want this so we can peek the message size of the next
+	 * packet */
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RECVNXTINFO, &val,
+				sizeof(val)) < 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	/* only allow bursts of a single packet */
+	struct sctp_assoc_value mb = {
+		.assoc_id = SCTP_FUTURE_ASSOC,
+		.assoc_value = 1
+	};
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_MAX_BURST, &mb,
+				sizeof(mb)) < 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	/* only allow data chunks up to this size */
+	struct sctp_assoc_value ms = {
+		.assoc_id = SCTP_FUTURE_ASSOC,
+		/* two bytes to pad out the chunk to a multiple of 4
+		 * bytes */
+		.assoc_value = SPX_MAX_DATA_LEN_WO_SIZNG + 2
+	};
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_MAXSEG, &ms,
+				sizeof(ms)) < 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	/* set heartbeat interval, retry count, disable delayed SACK */
+	struct sctp_paddrparams pap = {
+		.spp_assoc_id = SCTP_FUTURE_ASSOC,
+		.spp_address = { 0 },
+		.spp_hbinterval = SPX_KEEP_ALIVE_TMO_TICKS * TICKS_MS,
+		.spp_pathmaxrxt = SPX_RETRY_COUNT,
+		.spp_pathmtu = SPX_SCTP_PMTU,
+		.spp_sackdelay = 0,
+		.spp_flags = SPP_HB_ENABLE | SPP_PMTUD_DISABLE |
+			SPP_SACKDELAY_DISABLE,
+		.spp_ipv6_flowlabel = 0,
+		.spp_dscp = 0
+	};
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_PEER_ADDR_PARAMS,
+				&pap, sizeof(pap)) < 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	/* set timeouts to something SPX-like */
+	struct sctp_rtoinfo rtoi = {
+		.srto_assoc_id = SCTP_FUTURE_ASSOC,
+		.srto_initial =  1 * TICKS_MS,
+		.srto_min = 1 * TICKS_MS,
+		.srto_max = SPX_VERIFY_TMO_TICKS * TICKS_MS
+	};
+	if (setsockopt(conn_fd, IPPROTO_SCTP, SCTP_RTOINFO, &rtoi,
+				sizeof(rtoi)) < 0) {
+		conn_rsp->err = errno;
+		return false;
+	}
+
+	if (!e->recv_direct) {
 		conn_rsp->err = ENOTSUP;
 		return false;
 	}
@@ -566,24 +511,11 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		return false;
 	}
 	conn->conn_id = conn_id;
-	conn->kernel = kernel;
 
-	bool bpf_recorded = false;
-
-	if (kernel) {
-		fprintf(stderr, "WARN: Kernel SPX is experimental!\n");
-		bpf_recorded = record_kspx_conn_in_bpf(&bind_addr,
-				&(conn_req->addr), conn_id, (accepted ?
-					conn_req->conn_id :
-					SPX_CONN_ID_UNKNOWN), e->iface->prefix,
-				conn_fd);
-	} else {
-		bpf_recorded = record_spx_conn_in_bpf(&bind_addr,
-				&(conn_req->addr), conn_id, (accepted ?
-					conn_req->conn_id :
-					SPX_CONN_ID_UNKNOWN), e->iface->prefix,
-				conn_fd);
-	}
+	bool bpf_recorded = record_kspx_conn_in_bpf(&bind_addr,
+			&(conn_req->addr), conn_id, (accepted ?
+				conn_req->conn_id : SPX_CONN_ID_UNKNOWN),
+			e->iface->prefix, conn_fd);
 
 	if (!bpf_recorded) {
 		perror("registering SPX connection in BPF map");
@@ -807,18 +739,8 @@ static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
 		local_id)
 {
 	/* this is a no-op, the connection state is cleaned up from eBPF */
-}
-
-static void delete_spx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
-		local_id)
-{
-	struct spx_conn_key conn_key = {
-		.bind_addr = *local_addr,
-		.conn_id = local_id
-	};
-
-	bpf_map__delete_elem(bpf_kern->maps.ipx_wrap_mux_spx_sock_ingress,
-			&conn_key, sizeof(struct spx_conn_key), 0);
+	// TODO: we need a way to clean up even if userspace does not inform
+	// us!
 }
 
 static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
@@ -831,11 +753,7 @@ static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
 
 	__be16 conn_id = conn->conn_id;
 
-	if (conn->kernel) {
-		delete_kspx_conn_from_bpf(&bind_addr, conn_id);
-	} else {
-		delete_spx_conn_from_bpf(&bind_addr, conn_id);
-	}
+	delete_kspx_conn_from_bpf(&bind_addr, conn_id);
 
 	HASH_DEL(e->ht_id_to_spx_conn, conn);
 	free(conn);
