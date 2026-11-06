@@ -542,7 +542,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 
 	/* show the new SPX connection */
 	printf("SPX connection %04hx: "
-			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx -> "
+			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx %s "
 			"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
 			ntohs(conn_id),
 			ntohl(bind_addr.net),
@@ -550,6 +550,7 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			bind_addr.node[2], bind_addr.node[3],
 			bind_addr.node[4], bind_addr.node[5],
 			ntohs(bind_addr.sock),
+			accepted ? "<-" : "->",
 			ntohl(conn_req->addr.net),
 			conn_req->addr.node[0], conn_req->addr.node[1],
 			conn_req->addr.node[2], conn_req->addr.node[3],
