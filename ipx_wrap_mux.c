@@ -50,6 +50,10 @@ struct if_entry;
 struct spx_connection {
 	__be16 conn_id;
 	UT_hash_handle hh; /* by connection ID */
+	/* entries that allow us to remove the catch BPF-map entry for
+	 * retransmits of connection requests */
+	__be16 remote_conn_id;
+	struct ipx_addr remote_addr;
 };
 
 struct bind_entry {
@@ -322,7 +326,7 @@ static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
 	int err = bpf_map__update_elem(
 			bpf_spx_kern->maps.ipx_wrap_mux_kspx_state, &spx_key,
 			sizeof(struct spx_conn_key), &spx_state, sizeof(struct
-				bpf_kspx_state), BPF_ANY);
+				bpf_kspx_state), BPF_NOEXIST);
 	if (err != 0) {
 		errno = -err;
 		return false;
@@ -510,11 +514,15 @@ static bool record_spx_conn(struct bind_entry *e, struct
 		conn_rsp->err = errno;
 		return false;
 	}
+
+	__be16 remote_conn_id = (accepted ? conn_req->conn_id :
+			SPX_CONN_ID_UNKNOWN);
 	conn->conn_id = conn_id;
+	conn->remote_conn_id = remote_conn_id;
+	conn->remote_addr = conn_req->addr;
 
 	bool bpf_recorded = record_kspx_conn_in_bpf(&bind_addr,
-			&(conn_req->addr), conn_id, (accepted ?
-				conn_req->conn_id : SPX_CONN_ID_UNKNOWN),
+			&(conn_req->addr), conn_id, remote_conn_id,
 			e->iface->prefix, conn_fd);
 
 	if (!bpf_recorded) {
@@ -735,12 +743,29 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 	return false;
 }
 
-static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, __be16
-		local_id)
+static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, const
+		struct spx_connection *conn)
 {
-	/* this is a no-op, the connection state is cleaned up from eBPF */
-	// TODO: we need a way to clean up even if userspace does not inform
-	// us!
+	// TODO: need a way to clean up even if userspace does not inform us!
+
+	struct spx_conn_key spx_key = {
+		.bind_addr = *local_addr,
+		.conn_id = conn->conn_id
+	};
+
+	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
+			&spx_key, sizeof(struct spx_conn_key), 0);
+
+	struct spx_remote_conn_key remote_spx_key = {
+		.local_addr = *local_addr,
+		.remote_addr = conn->remote_addr,
+		.conn_id = conn->remote_conn_id
+	};
+
+	bpf_map__delete_elem(
+			bpf_spx_kern->maps.ipx_wrap_mux_kspx_remote_to_local_id,
+			&remote_spx_key, sizeof(struct spx_remote_conn_key),
+			0);
 }
 
 static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
@@ -753,7 +778,7 @@ static void delete_spx_conn(struct bind_entry *e, struct spx_connection *conn)
 
 	__be16 conn_id = conn->conn_id;
 
-	delete_kspx_conn_from_bpf(&bind_addr, conn_id);
+	delete_kspx_conn_from_bpf(&bind_addr, conn);
 
 	HASH_DEL(e->ht_id_to_spx_conn, conn);
 	free(conn);
