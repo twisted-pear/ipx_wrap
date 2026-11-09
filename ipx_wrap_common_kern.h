@@ -312,10 +312,7 @@ static __always_inline int mark_and_pass_through(struct __sk_buff *skb, enum
 		cb_mark mark)
 {
 	set_mark(skb, mark);
-	//return TC_ACT_UNSPEC;
-	// TODO: Instead of passing through we reinject here for better
-	// visibility. Change this back later!
-	return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
+	return TC_ACT_UNSPEC;
 }
 
 #endif /* __IPX_WRAP_COMMON_KERN_H__ */
