@@ -156,7 +156,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	\
 	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
-		bpf_printk("%s: shot, failed to get state", __func__); \
+		bpf_printk("%s: [%04x] shot, failed to get state", __func__, \
+				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
 	if (spx_state->state != state_var) { \
@@ -164,7 +165,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 		 * it was selected in the main program but before the \
 		 * tail-call is called. There is nothing we can do here. */ \
 		put_kspx_state(spx_state); \
-		bpf_printk("%s: shot, unexpected state", __func__); \
+		bpf_printk("%s: [%04x] shot, unexpected state", __func__, \
+				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
 
@@ -202,7 +204,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
 		/* SPX connection is already closed, the conn_key is stale */ \
-		bpf_printk("%s: shot, failed to get state", __func__); \
+		bpf_printk("%s: [%04x] shot, failed to get state", __func__, \
+				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
 	\
@@ -211,7 +214,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 		 * it was selected in the main program but before the \
 		 * tail-call is called. There is nothing we can do here. */ \
 		put_kspx_state(spx_state); \
-		bpf_printk("%s: shot, unexpected state", __func__); \
+		bpf_printk("%s: [%04x] shot, unexpected state", __func__, \
+				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
 	\
@@ -219,7 +223,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	 * any state. */ \
 	if (check_abort(chunk1, data_end)) { \
 		abort_assoc(spx_state, &conn_key); \
-		bpf_printk("%s: connection aborted", __func__); \
+		bpf_printk("%s: [%04x] connection aborted", __func__, \
+				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	}
 
