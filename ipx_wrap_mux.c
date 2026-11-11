@@ -276,19 +276,53 @@ static bool has_net_bind_service(struct ipxw_mux_handle h)
 	return on == CAP_SET;
 }
 
-static int get_socket_type(int fd)
+static bool get_int_sockopt(int fd, int level, int option, int *val)
 {
-	int type = -1;
+	int ret = 0;
 	socklen_t type_len = sizeof(int);
-	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_len) != 0) {
-		return -1;
+	if (getsockopt(fd, level, option, &ret, &type_len) != 0) {
+		return false;
 	}
 
 	if (type_len != sizeof(int)) {
-		return -1;
+		return false;
 	}
 
-	return type;
+	*val = ret;
+	return true;
+}
+
+static bool check_socket_params(int fd, int family, int type, int protocol)
+{
+	int actual_family = AF_UNSPEC;
+	int actual_type = SOCK_SEQPACKET;
+	int actual_protocol = IPPROTO_TCP;
+
+	if (!get_int_sockopt(fd, SOL_SOCKET, SO_DOMAIN, &actual_family)) {
+		return false;
+	}
+
+	if (!get_int_sockopt(fd, SOL_SOCKET, SO_TYPE, &actual_type)) {
+		return false;
+	}
+
+	if (!get_int_sockopt(fd, SOL_SOCKET, SO_PROTOCOL, &actual_protocol)) {
+		return false;
+	}
+
+	if (actual_family != family) {
+		return false;
+	}
+
+	if (actual_type != type) {
+		return false;
+	}
+
+	if (actual_protocol != protocol) {
+		return false;
+	}
+
+	return true;
 }
 
 static bool record_kspx_conn_in_bpf(const struct ipx_addr *local_addr, const
@@ -389,6 +423,13 @@ static bool record_spx_conn(struct bind_entry *e, struct
 	conn_rsp->addr = bind_addr;
 	conn_rsp->err = ENOTSUP;
 
+	/* check if the socket was created with the correct parameters */
+	if (!check_socket_params(conn_fd, AF_INET6, SOCK_STREAM, IPPROTO_SCTP))
+	{
+		conn_rsp->err = ENOTSUP;
+		return false;
+	}
+
 	/* bind the socket to a dummy address */
 	struct sockaddr_in6 dummy_bind = {
 		.sin6_family = AF_INET6,
@@ -402,16 +443,6 @@ static bool record_spx_conn(struct bind_entry *e, struct
 			< 0) {
 		conn_rsp->err = errno;
 		return false;
-	}
-
-	/* check the socket type to determine if we use the proper one */
-	// TODO: check protocol for SCTP as well
-	switch (get_socket_type(conn_fd)) {
-		case SOCK_STREAM:
-			break;
-		default:
-			conn_rsp->err = ENOTSUP;
-			return false;
 	}
 
 	/* set socket options to make SCTP behave a little more like SPX */
@@ -1347,6 +1378,14 @@ static ssize_t handle_bind_msg_sub(struct if_entry *iface, int ctrl_sock, int
 	assert(bind_msg.type == IPXW_MUX_BIND);
 
 	do {
+		/* check if the data socket was created with the correct
+		 * parameters */
+		if (!check_socket_params(ipxw_mux_handle_data(h), AF_INET6,
+					SOCK_DGRAM, IPPROTO_UDP)) {
+			resp_msg.err.err = ENOTSUP;
+			break;
+		}
+
 		/* bind the socket to a dummy IPv6 address */
 		struct sockaddr_in6 dummy_bind = {
 			.sin6_family = AF_INET6,
