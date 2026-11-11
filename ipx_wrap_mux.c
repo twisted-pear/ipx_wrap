@@ -778,16 +778,9 @@ static bool record_bind(struct if_entry *iface, struct ipxw_mux_handle h, int
 static void delete_kspx_conn_from_bpf(const struct ipx_addr *local_addr, const
 		struct spx_connection *conn)
 {
-	// TODO: need a way to clean up even if userspace does not inform us!
-
-	struct spx_conn_key spx_key = {
-		.bind_addr = *local_addr,
-		.conn_id = conn->conn_id
-	};
-
-	bpf_map__delete_elem(bpf_spx_kern->maps.ipx_wrap_mux_kspx_state,
-			&spx_key, sizeof(struct spx_conn_key), 0);
-
+	/* We only clean up the remote connection key structure. The state
+	 * structure is removed in eBPF when the SCTP association shuts down or
+	 * aborts */
 	struct spx_remote_conn_key remote_spx_key = {
 		.local_addr = *local_addr,
 		.remote_addr = conn->remote_addr,
