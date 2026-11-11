@@ -1820,12 +1820,6 @@ static __always_inline bool admit_ingress_SHUTDOWN_SENT(const struct
 		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
 		data_len)
 {
-	/* do not permit end-of-connection packets here */
-	if (((spxh->connection_control & SPX_CC_ACK_REQUIRED) != 0) &&
-			spxh->datastream_type == SPX_DS_END_OF_CONN) {
-		return false;
-	}
-
 	return admit_ingress_ESTABLISHED(spx_state, spxh, data_len);
 }
 
@@ -1833,7 +1827,7 @@ static __always_inline void update_state_ingress_SHUTDOWN_SENT(struct
 		bpf_kspx_state *spx_state, const struct spxhdr *spxh, size_t
 		data_len)
 {
-	update_state_ingress_ESTABLISHED(spx_state, spxh, data_len);
+	/* no-op */
 }
 
 static __always_inline bool transform_ingress_SHUTDOWN_SENT(struct __sk_buff
