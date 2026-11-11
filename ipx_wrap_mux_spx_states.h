@@ -169,7 +169,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	} \
 
 #define EXIT_UNLOCKED_INGRESS(verdict, message) \
-	bpf_printk("%s: " message, __func__); \
+	bpf_printk("%s: [%04x] " message, __func__, \
+			bpf_ntohs(conn_key.conn_id)); \
 	return verdict;
 
 #define EXIT_INGRESS(verdict, message) \
@@ -223,7 +224,8 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	}
 
 #define EXIT_UNLOCKED_EGRESS(verdict, message) \
-	bpf_printk("%s: " message, __func__); \
+	bpf_printk("%s: [%04x] " message, __func__, \
+			bpf_ntohs(conn_key.conn_id)); \
 	return verdict;
 
 #define EXIT_EGRESS(verdict, message) \
