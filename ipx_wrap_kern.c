@@ -328,37 +328,23 @@ static __always_inline __sum16 calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh,
 	return ret;
 }
 
-static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
+static __always_inline void pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 		if_config *ifcfg, struct ipv6_and_udphdr *newhdr, struct
 		__sk_buff *ctx)
 {
-	/* increase TC here as it is not constructed from the IPv6 hop limit on
-	 * egress */
-	ipxh->tc++;
-
 	/* build new IPv6 and UDP headers */
-	fill_ipv6_from_ipx_basic(ipxh, ifcfg, &newhdr->ip6h);
+	fill_ipv6_from_ipx_basic(ipxh, ifcfg, &(newhdr->ip6h));
 
-	newhdr->ip6h.payload_len = bpf_htons(bpf_ntohs(ipxh->pktlen) +
-			sizeof(struct udphdr));
+	size_t payload_len = bpf_ntohs(ipxh->pktlen) + sizeof(struct udphdr);
+
+	newhdr->ip6h.payload_len = bpf_htons(payload_len);
 	newhdr->ip6h.nexthdr = IPPROTO_UDP;
 
 	newhdr->udph.source = bpf_htons(IPX_IN_IPV6_PORT);
 	newhdr->udph.dest = bpf_htons(IPX_IN_IPV6_PORT);
-	newhdr->udph.len = bpf_htons(bpf_ntohs(ipxh->pktlen) + sizeof(struct
-				udphdr));
+	newhdr->udph.len = bpf_htons(payload_len);
 
-	struct ipv6_eui64_addr *daddr6 = (void *) &newhdr->ip6h.daddr;
-
-	/* destination network is the local net... */
-	if (ipxh->daddr.net == IPX_NET_LOCAL) {
-		/* ... and the sender is in the same network as us... */
-		if (ipxh->saddr.net == ifcfg->network || ipxh->saddr.net ==
-				IPX_NET_LOCAL) {
-			/* ...fill in the network in the IPv6 header */
-			daddr6->ipx_net = ifcfg->network;
-		}
-	}
+	struct ipv6_eui64_addr *daddr6 = (void *) &(newhdr->ip6h.daddr);
 
 	/* destination node is broadcast... */
 	if (__builtin_memcmp(ipxh->daddr.node, IPX_BCAST_NODE,
@@ -374,15 +360,34 @@ static __always_inline size_t pack_ipx_in_ipv6(struct ipxhdr *ipxh, struct
 	}
 
 	/* fill the UDP checksum */
-	newhdr->udph.check = calc_ipx_in_ipv6_csum(ipxh, &newhdr->ip6h,
-			&newhdr->udph, ctx);
-
-	return sizeof(struct ipv6_and_udphdr);
+	newhdr->udph.check = calc_ipx_in_ipv6_csum(ipxh, &(newhdr->ip6h),
+			&(newhdr->udph), ctx);
 }
 
-static __always_inline size_t unpack_ipx_in_ipv6(void)
+static __always_inline bool check_incoming_ipx_pkt(const struct ipxhdr *ipxh,
+		size_t pktlen)
 {
-	return 0;
+	if (ipxh->tc > IPX_TC_MAX) {
+		return false;
+	}
+
+	if (bpf_ntohs(ipxh->pktlen) != pktlen) {
+		return false;
+	}
+
+	return true;
+}
+
+static __always_inline void fill_incoming_ipx_nets(struct ipxhdr *ipxh, __be32
+		source_net)
+{
+	if (ipxh->saddr.net == IPX_NET_LOCAL) {
+		ipxh->saddr.net = source_net;
+	}
+
+	if (ipxh->daddr.net == IPX_NET_LOCAL) {
+		ipxh->daddr.net = source_net;
+	}
 }
 
 static __always_inline bool is_reinjected(struct __sk_buff *skb)
@@ -436,45 +441,44 @@ int ipx_wrap_in(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	size_t oldhdr_size;
-	size_t newhdr_size;
-	struct ipv6_and_udphdr newhdr;
-	__builtin_memset(&newhdr, 0, sizeof(struct ipv6_and_udphdr));
-
-	oldhdr_size = 0;
-	newhdr_size = pack_ipx_in_ipv6(ipxh, ifcfg, &newhdr, ctx);
-
-	/* install new IPv6 header */
-	eth->h_proto = bpf_htons(ETH_P_IPV6);
-
-	__s32 hlen_diff = newhdr_size - oldhdr_size;
-	if (bpf_skb_change_head(ctx, hlen_diff, 0) < 0) {
+	if (!check_incoming_ipx_pkt(ipxh, ctx->len - sizeof(struct ethhdr))) {
 		return TC_ACT_SHOT;
 	}
 
+	fill_incoming_ipx_nets(ipxh, ifcfg->network);
+
+	/* back up the ethernet header */
+	struct ethhdr eth_backup;
+	__builtin_memcpy(&eth_backup, eth, sizeof(struct ethhdr));
+
+	/* make room for the IPv6 and UDP headers */
+
+	/* We have to use change_head here, since adjust_room only works for
+	 * IPv4 and IPv6 packets. */
+	if (bpf_skb_change_head(ctx, sizeof(struct ipv6_and_udphdr), 0) != 0) {
+		return TC_ACT_SHOT;
+	}
+
+	/* pull and reverify the pointers */
 	bpf_skb_pull_data(ctx, 0);
 	data_end = (void *)(long)ctx->data_end;
 	data = (void *)(long)ctx->data;
 
-	if (data + hlen_diff + sizeof(struct ethhdr) > data_end) {
-		return TC_ACT_SHOT;
-	}
-	__builtin_memmove(data, data + hlen_diff, sizeof(struct ethhdr));
+	eth = data;
+	struct ipv6_and_udphdr *newhdr = (void *) (eth + 1);
+	ipxh = (void *) (newhdr + 1);
 
-	cur.pos = data;
-	if (parse_ethhdr(&cur, data_end, &eth) < 0) {
-		return TC_ACT_SHOT;
-	}
-	if (cur.pos + newhdr_size > data_end) {
+	if (ipxh + 1 > data_end) {
 		return TC_ACT_SHOT;
 	}
 
-	if (newhdr_size == sizeof(struct ipv6_and_udphdr)) {
-		__builtin_memcpy(cur.pos, &newhdr, sizeof(struct
-					ipv6_and_udphdr));
-	} else {
-		return TC_ACT_SHOT;
-	}
+	/* restore and adjust the ethernet header */
+	__builtin_memcpy(eth, &eth_backup, sizeof(struct ethhdr));
+	eth->h_proto = bpf_htons(ETH_P_IPV6);
+
+	/* install new IPv6 and UDP headers */
+	__builtin_memset(newhdr, 0, sizeof(struct ipv6_and_udphdr));
+	pack_ipx_in_ipv6(ipxh, ifcfg, newhdr, ctx);
 
 	/* mark and reinject the packet to trick the network stack */
 	return mark_and_reinject(ctx, IPX_TO_IPV6UDP_REINJECT_MARK);
@@ -535,19 +539,17 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 		return TC_ACT_SHOT;
 	}
 
-	size_t oldhdr_size = sizeof(struct iphdr) + sizeof(struct udphdr);
-	size_t newhdr_size = unpack_ipx_in_ipv6();
-
-	/* install new IPX header */
+	/* set the Ethernet protocol to IPX */
 	eth->h_proto = bpf_htons(ETH_P_IPX);
 
-	/* linux won't allow us to make the packet shorter than the protocol
+	/* Linux won't allow us to make the packet shorter than the protocol
 	 * (IPv4 or IPv6) header, so we first convert to IPv4 so that we can
 	 * send smaller packets */
 	if (bpf_skb_change_proto(ctx, bpf_htons(ETH_P_IP), 0) < 0) {
 		return TC_ACT_SHOT;
 	}
-	__s32 hlen_diff = (newhdr_size - oldhdr_size);
+	__s32 hlen_diff = -(__s32)(sizeof(struct iphdr) + sizeof(struct
+				udphdr));
 
 	/* adjust packet room so that an IPX header fits, instead of an IPv4
 	 * header */
@@ -559,21 +561,16 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 	data_end = (void *)(long)ctx->data_end;
 	data = (void *)(long)ctx->data;
 
-	/* actually copy the IPX header */
-	void *newhdr_start = data + sizeof(struct ethhdr);
-	if (newhdr_start + newhdr_size > data_end) {
-		return TC_ACT_SHOT;
-	}
-	if (newhdr_size != 0) {
+	eth = data;
+	struct ipxhdr *ipxh = (void *) (eth + 1);
+	if (ipxh + 1 > data_end) {
 		return TC_ACT_SHOT;
 	}
 
 	/* if the packet did not originate on this host... */
 	if (ctx->ingress_ifindex != 0) {
-		struct ipxhdr *ipxh = newhdr_start;
-		if (ipxh + 1 > data_end) {
-			return TC_ACT_SHOT;
-		}
+		/* increase TC */
+		ipxh->tc++;
 
 		/* ... and the packet is destined towards the broadcast address
 		 * of this interface */
