@@ -1590,7 +1590,7 @@ static _Noreturn void do_sub_process(struct if_entry *iface, int ctrl_sock)
 {
 	int epoll_fd = -1;
 
-	epoll_fd = epoll_create1(0);
+	epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(iface, epoll_fd, ctrl_sock, MUX_ERR_EPOLL_FD);
@@ -1743,7 +1743,8 @@ static struct sub_process *add_sub(struct ipv6_eui64_addr *ipv6_addr, const
 	int sv[2] = { -1, -1 };
 	struct if_entry *iface = NULL;
 	do {
-		if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0) {
+		if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) <
+				0) {
 			break;
 		}
 		sub->sub_sock = sv[0];
@@ -1922,7 +1923,7 @@ static bool scan_interfaces(__be32 prefix, int epoll_fd, int ctrl_sock)
 
 static int setup_timer(int epoll_fd)
 {
-	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
+	int tmr = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
 	if (tmr < 0) {
 		return -1;
 	}
@@ -1991,7 +1992,7 @@ int main(int argc, char **argv)
 		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_BPF);
 	}
 
-	epoll_fd = epoll_create1(0);
+	epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(NULL, epoll_fd, ctrl_sock, MUX_ERR_EPOLL_FD);

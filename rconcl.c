@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/queue.h>
-#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -46,7 +45,6 @@ enum rconcl_error_codes {
 	RCONCL_ERR_EPOLL_WAIT,
 	RCONCL_ERR_TMR_FAILURE,
 	RCONCL_ERR_SPX_FAILURE,
-	RCONCL_ERR_SPX_MAINT,
 	RCONCL_ERR_CONNECT,
 	RCONCL_ERR_MSG_ALLOC,
 	RCONCL_ERR_MSG_REASSEMBLE,
@@ -1615,7 +1613,7 @@ static _Noreturn void do_rconcl(struct rconcl_cfg *cfg)
 		cleanup_and_exit(-1, RCONCL_ERR_PASS);
 	}
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, RCONCL_ERR_EPOLL_FD);

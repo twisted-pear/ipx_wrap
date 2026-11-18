@@ -84,6 +84,11 @@ void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 	/* do nothing */
 }
 
+void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
+{
+	/* do nothing */
+}
+
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 {
 	/* do nothing */

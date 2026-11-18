@@ -1,9 +1,9 @@
+#define _GNU_SOURCE
 #include <assert.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
-#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -403,7 +403,7 @@ static _Noreturn void do_spx_to_tcp(int epoll_fd, struct spxtcp_cfg *cfg,
 
 	/* initial setup */
 
-	epoll_fd = epoll_create1(0);
+	epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, cfg, SPXTCP_ERR_EPOLL_FD);
@@ -536,7 +536,7 @@ static int tcp_bind(struct spxtcp_cfg *cfg)
 		sa_len = sizeof(cfg->tcp_local_addr4);
 	}
 
-	int sock = socket(domain, SOCK_STREAM, IPPROTO_TCP);
+	int sock = socket(domain, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
 	if (sock == -1) {
 		return -1;
 	}
@@ -831,7 +831,8 @@ static int tcp_accept(struct spxtcp_cfg *cfg)
 	} sin;
 	socklen_t sin_len = sizeof(sin);
 
-	int ret = accept(tcpa, (struct sockaddr *) &sin, &sin_len);
+	int ret = accept4(tcpa, (struct sockaddr *) &sin, &sin_len,
+			SOCK_CLOEXEC);
 	if (ret < 0) {
 		return -1;
 	}
@@ -952,7 +953,7 @@ static _Noreturn void do_wait_for_conns(struct spxtcp_cfg *cfg)
 
 	/* initial setup */
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, cfg, SPXTCP_ERR_EPOLL_FD);

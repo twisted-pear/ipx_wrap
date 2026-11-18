@@ -898,6 +898,11 @@ void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 	}
 }
 
+void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
+{
+	// TODO
+}
+
 void do_print_database(void)
 {
 	printf("# Service Database\n");

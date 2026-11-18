@@ -140,7 +140,7 @@ static void signal_handler(int signal)
 
 static int setup_timer(int epoll_fd, time_t secs)
 {
-	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
+	int tmr = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
 	if (tmr < 0) {
 		return -1;
 	}
@@ -709,7 +709,7 @@ int main(int argc, char **argv)
 
 	/* initial setup */
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, -1, &cfg, IPXDIAG_ERR_EPOLL_FD);

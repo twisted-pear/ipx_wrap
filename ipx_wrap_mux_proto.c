@@ -52,7 +52,8 @@ int ipxw_mux_handle_conf(struct ipxw_mux_handle h)
 
 int ipxw_mux_mk_data_sock(void)
 {
-	int data_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	int data_sock = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC,
+			IPPROTO_UDP);
 	if (data_sock < 0) {
 		return -1;
 	}
@@ -75,7 +76,20 @@ struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
 	int sv_conf[2] = { -1, -1 };
 
 	do {
-		if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv_conf) < 0) {
+		int conf_flags = SOCK_CLOEXEC;
+
+		/* if the data socket does not have O_CLOEXEC, we don't set it
+		 * on the config socket either */
+		int data_flags = fcntl(data_sock, F_GETFD);
+		if (data_flags == -1) {
+			break;
+		}
+		if ((data_flags & FD_CLOEXEC) == 0) {
+			conf_flags = 0;
+		}
+
+		if (socketpair(AF_UNIX, SOCK_SEQPACKET | conf_flags, 0,
+					sv_conf) < 0) {
 			break;
 		}
 
@@ -85,7 +99,7 @@ struct ipxw_mux_handle ipxw_mux_bind_data_sock(const struct ipxw_mux_msg
 			break;
 		}
 
-		ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+		ctrl_sock = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 		if (ctrl_sock < 0) {
 			break;
 		}
@@ -950,7 +964,7 @@ bool ipxw_mux_get_rx_timestamp(void *ctrl, size_t ctrl_len, struct
 
 int ipxw_mux_mk_ctrl_sock()
 {
-	int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+	int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (ctrl_sock < 0) {
 		return -1;
 	}
@@ -1362,12 +1376,13 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 		return ret;
 	}
 
-	int spx_sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_SCTP);
+	int spx_sock = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC,
+			IPPROTO_SCTP);
 	if (spx_sock < 0) {
 		return ret;
 	}
 
-	int conf_sock = dup(h.conf_sock);
+	int conf_sock = fcntl(h.conf_sock, F_DUPFD_CLOEXEC, 0);
 	if (conf_sock == -1) {
 		close(spx_sock);
 		return ret;
@@ -1708,7 +1723,8 @@ static int get_src_to_dst_outif(struct in6_addr *src, struct in6_addr *dst)
 	} nlmsg;
 	memset(&nlmsg, 0, sizeof(nlmsg));
 
-	int nlsock = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+	int nlsock = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC,
+			NETLINK_ROUTE);
 	if (nlsock < 0) {
 		return -1;
 	}

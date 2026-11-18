@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
-#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include "ipx_wrap_mux_proto.h"
@@ -34,7 +33,6 @@ enum ipxcat_error_codes {
 	IPXCAT_ERR_CONF_FAILURE,
 	IPXCAT_ERR_IPX_FAILURE,
 	IPXCAT_ERR_SPX_FAILURE,
-	IPXCAT_ERR_SPX_MAINT,
 	IPXCAT_ERR_SPX_CONNECT,
 	IPXCAT_ERR_SPX_ACCEPT,
 	IPXCAT_ERR_MSG_ALLOC,
@@ -1098,7 +1096,7 @@ int main(int argc, char **argv)
 
 	/* initial setup */
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, &cfg, IPXCAT_ERR_EPOLL_FD);

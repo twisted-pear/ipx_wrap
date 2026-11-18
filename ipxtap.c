@@ -378,7 +378,7 @@ int main(int argc, char **argv)
 
 	/* initial setup */
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, IPXTAP_ERR_EPOLL_FD);

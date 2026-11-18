@@ -1778,7 +1778,7 @@ static __always_inline bool reflect_CONNREQ_ingress_PRE_ESTABLISHED(struct
 
 	/* cut the SKB down to size */
 	if (bpf_skb_change_tail(skb, ack_len, 0) != 0) {
-		return TC_ACT_SHOT;
+		return false;
 	}
 
 	/* set outgoing interface index */

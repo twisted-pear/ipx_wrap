@@ -1,6 +1,7 @@
 #include "ipx_wrap_service_lib.h"
 
 static struct if_entry *ht_sock_to_if = NULL;
+static struct if_entry *ht_conf_sock_to_if = NULL;
 static struct if_entry *ht_ipx_addr_to_if = NULL;
 
 static volatile sig_atomic_t reload_now = false;
@@ -102,7 +103,8 @@ static ssize_t send_queued_msgs(struct if_entry *iface, int epoll_fd)
 	return err;
 }
 
-static void cleanup_iface(struct if_entry *iface)
+static void cleanup_iface(struct if_entry *iface, int epoll_fd, void
+		*service_ctx)
 {
 	/* unbind from the muxer */
 	ipxw_mux_unbind(iface->mux_handle);
@@ -115,8 +117,11 @@ static void cleanup_iface(struct if_entry *iface)
 	}
 
 	/* remove the interface from all hash tables */
+	HASH_DELETE(h_conf_sock, ht_conf_sock_to_if, iface);
 	HASH_DELETE(h_data_sock, ht_sock_to_if, iface);
 	HASH_DELETE(h_ipx_addr, ht_ipx_addr_to_if, iface);
+
+	service_ifdown(iface, epoll_fd, service_ctx);
 
 	free(iface);
 }
@@ -128,7 +133,7 @@ _Noreturn void cleanup_and_exit(int tmr_fd, int epoll_fd, void *service_ctx,
 	struct if_entry *e;
 	struct if_entry *tmp;
 	HASH_ITER(h_data_sock, ht_sock_to_if, e, tmp) {
-		cleanup_iface(e);
+		cleanup_iface(e, epoll_fd, service_ctx);
 	}
 
 	service_cleanup_and_exit(service_ctx);
@@ -197,8 +202,15 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 		};
 		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
 					ipxw_mux_handle_data(iface->mux_handle),
-					&ev) < 0)
-		{
+					&ev) < 0) {
+			break;
+		}
+
+		ev.events = EPOLLERR | EPOLLHUP;
+		ev.data.fd = ipxw_mux_handle_conf(iface->mux_handle);
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
+					ipxw_mux_handle_conf(iface->mux_handle),
+					&ev) < 0) {
 			break;
 		}
 
@@ -208,6 +220,9 @@ static struct if_entry *add_iface(struct ipv6_eui64_addr *ipv6_addr, const
 		HASH_ADD_KEYPTR(h_data_sock, ht_sock_to_if,
 				&iface->mux_handle.data_sock,
 				sizeof(iface->mux_handle.data_sock), iface);
+		HASH_ADD_KEYPTR(h_conf_sock, ht_conf_sock_to_if,
+				&iface->mux_handle.conf_sock,
+				sizeof(iface->mux_handle.conf_sock), iface);
 
 		printf("adding interface "
 				"%08x.%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.%04hx\n",
@@ -288,7 +303,7 @@ static bool scan_interfaces(const struct if_bind_config *ifcfg, int epoll_fd,
 	struct if_entry *tmp;
 	HASH_ITER(h_ipx_addr, ht_ipx_addr_to_if, e, tmp) {
 		if (!e->keep) {
-			cleanup_iface(e);
+			cleanup_iface(e, epoll_fd, service_ctx);
 		} else {
 			e->keep = false;
 		}
@@ -299,7 +314,7 @@ static bool scan_interfaces(const struct if_bind_config *ifcfg, int epoll_fd,
 
 static int setup_timer(int epoll_fd, time_t secs)
 {
-	int tmr = timerfd_create(CLOCK_MONOTONIC, 0);
+	int tmr = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
 	if (tmr < 0) {
 		return -1;
 	}
@@ -330,7 +345,7 @@ static int setup_timer(int epoll_fd, time_t secs)
 bool is_timeout_expired(time_t now_secs, time_t timeout_secs, time_t last)
 {
 	double diff = difftime(now_secs, last);
-	if (diff > timeout_secs) {
+	if (diff >= timeout_secs) {
 		return true;
 	}
 
@@ -378,7 +393,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 	int epoll_fd = -1;
 	int tmr_fd = -1;
 
-	epoll_fd = epoll_create1(0);
+	epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(tmr_fd, epoll_fd, service_ctx,
@@ -496,9 +511,27 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 				continue;
 			}
 
+			struct if_entry *iface = NULL;
+
+			/* one of the interface config sockets */
+
+			int conf_sock = evs[i].data.fd;
+			HASH_FIND(h_conf_sock, ht_conf_sock_to_if, &conf_sock,
+					sizeof(conf_sock), iface);
+			if (iface != NULL) {
+				/* something went wrong, remove interface */
+				if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
+					fprintf(stderr, "interface lost\n");
+					cleanup_iface(iface, epoll_fd,
+							service_ctx);
+				}
+
+				continue;
+			}
+
 			/* one of the interface sockets */
 
-			struct if_entry *iface;
+			iface = NULL;
 			int data_sock = evs[i].data.fd;
 			HASH_FIND(h_data_sock, ht_sock_to_if, &data_sock,
 					sizeof(data_sock), iface);
@@ -530,7 +563,8 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 				if (err < 0) {
 					/* get rid of the interface */
 					perror("sending msg");
-					cleanup_iface(iface);
+					cleanup_iface(iface, epoll_fd,
+							service_ctx);
 					continue;
 				} else if (err == 0) {
 					/* nothing happened */
@@ -540,7 +574,7 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 			/* something went wrong, remove interface */
 			if (evs[i].events & (EPOLLERR | EPOLLHUP)) {
 				fprintf(stderr, "interface lost\n");
-				cleanup_iface(iface);
+				cleanup_iface(iface, epoll_fd, service_ctx);
 				continue;
 			}
 		}

@@ -623,6 +623,11 @@ void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 	}
 }
 
+void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
+{
+	// TODO
+}
+
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 {
 	assert(ctx != NULL);

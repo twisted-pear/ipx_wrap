@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
-#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -466,7 +465,7 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 {
 	/* initial setup */
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, &spxh, cfg, SPXINETD_ERR_EPOLL_FD);
@@ -899,7 +898,7 @@ int main(int argc, char **argv)
 
 	/* initial setup */
 
-	int epoll_fd = epoll_create1(0);
+	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("create epoll fd");
 		cleanup_and_exit(epoll_fd, NULL, &cfg, SPXINETD_ERR_EPOLL_FD);
