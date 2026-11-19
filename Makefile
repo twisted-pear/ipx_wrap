@@ -15,6 +15,8 @@ SERVICE_TARGETS = ipx_wrap_ripd ipx_wrap_sapd ipx_wrap_pongd
 MUXER_TARGETS = ipx_wrap_mux
 BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o ipx_wrap_mux_spx_kern.o
 
+INTEGRATION_TEST_GROUPS = basic1 basic2
+
 ifdef NDEBUG
 CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -DNDEBUG
 else
@@ -79,7 +81,34 @@ $(RCON_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_w
 $(SERVICE_TARGETS): %: %.c common.h ipx_wrap_mux_proto.o ipx_wrap_mux_proto.h ipx_wrap_common_proto.h ipx_wrap_service_lib.o ipx_wrap_service_lib.h
 	$(CC) $(CFLAGS) -o $@ $< ipx_wrap_mux_proto.o ipx_wrap_service_lib.o
 
-clean:
-	rm -f *.o *.ll *.skel.h *.h~ $(USER_TARGETS) $(IFD_TARGETS) $(MUX_TARGETS) $(RCON_TARGETS) $(MUXER_TARGETS) $(SERVICE_TARGETS) vmlinux.h vmlinux.btf
+INTEGRATION_TEST_NETWORKS = $(foreach dir,$(INTEGRATION_TEST_GROUPS),tests/$(dir)/network.yaml)
+INTEGRATION_TESTS_FILES = $(foreach dir,$(INTEGRATION_TEST_GROUPS),$(wildcard tests/$(dir)/*.test.yaml))
+INTEGRATION_TESTS_COMPOSE = $(INTEGRATION_TESTS_FILES:.test.yaml=.compose.yaml)
+INTEGRATION_TESTS = $(INTEGRATION_TESTS_FILES:.test.yaml=)
 
-.PHONY: all clean
+$(INTEGRATION_TEST_NETWORKS): %/network.yaml: %/topo.yaml tests/templates.yaml
+	cat tests/templates.yaml $< > $@
+
+$(INTEGRATION_TESTS): %: %.compose.yaml tests/defaults.env
+	docker compose --progress quiet \
+		--env-file tests/defaults.env \
+		--project-directory `dirname $<` \
+		-f $< up --quiet-build --quiet-pull \
+		--attach test_runner --exit-code-from test_runner; \
+		RET=$$?; docker compose --progress quiet \
+		--env-file tests/defaults.env \
+		--project-directory `dirname $<` \
+		-f $< down --volumes; exit $$RET
+
+integration-tests: $(INTEGRATION_TESTS)
+
+clean:
+	rm -f *.o *.ll *.skel.h *.h~ $(USER_TARGETS) $(IFD_TARGETS) $(MUX_TARGETS) $(RCON_TARGETS) $(MUXER_TARGETS) $(SERVICE_TARGETS) vmlinux.h vmlinux.btf $(INTEGRATION_TESTS_COMPOSE) $(INTEGRATION_TEST_NETWORKS)
+
+.PHONY: all integration-tests clean $(INTEGRATION_TESTS)
+
+.INTERMEDIATE: $(INTEGRATION_TESTS_COMPOSE) $(INTEGRATION_TEST_NETWORKS)
+
+.SECONDEXPANSION:
+%.compose.yaml: %.test.yaml tests/templates.yaml $$(dir $$@)network.yaml
+	cat tests/templates.yaml $< > $@

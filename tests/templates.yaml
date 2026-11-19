@@ -1,0 +1,37 @@
+x-ipx-host-basic: &service-ipx-host-basic
+  image: ipx-host
+  pull_policy: build
+  build:
+    context: ../..
+  user: root
+  tty: true
+  init: true
+  cap_add:
+    - BPF
+    - NET_ADMIN
+    - PERFMON
+  sysctls:
+    - net.ipv4.ip_forward=0
+    - net.ipv4.conf.all.forwarding=0
+    - net.ipv4.conf.default.forwarding=0
+    - net.ipv6.conf.all.forwarding=1
+    - net.ipv6.conf.default.forwarding=1
+  environment:
+    - IPX_PREFIX
+  command: /bin/sh -c "./scripts/start_interfaces.sh $${IPX_PREFIX}"
+  healthcheck:
+    test: /bin/sh -c "./scripts/healthchk_interfaces_started.sh $${IPX_PREFIX}"
+    interval: 1m
+    timeout: 5s
+    retries: 0
+    start_period: 5s
+    start_interval: 1s
+
+x-ipx-net: &network-ipx-net
+  enable_ipv4: false
+  enable_ipv6: true
+  internal: true
+  driver: bridge
+  driver_opts:
+    com.docker.network.bridge.gateway_mode_ipv4: isolated
+    com.docker.network.bridge.gateway_mode_ipv6: isolated

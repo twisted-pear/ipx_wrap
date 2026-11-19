@@ -1,10 +1,11 @@
 x-ipx-host: &service-ipx-host
   image: ipx-host
-  tty: true
-  init: true
   pull_policy: build
   build:
     context: .
+  user: root
+  tty: true
+  init: true
   cap_add:
     - NET_ADMIN
   sysctls:
@@ -19,11 +20,12 @@ x-ipx-host: &service-ipx-host
 
 x-ipx-sidecar: &service-ipx-sidecar
   image: ipx-host
-  tty: true
-  init: true
   pull_policy: build
   build:
     context: .
+  user: root
+  tty: true
+  init: true
   cap_add:
     - BPF
     - NET_ADMIN

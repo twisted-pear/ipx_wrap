@@ -1,0 +1,12 @@
+#TODO: ipxcat
+include:
+  - ./network.yaml
+
+services:
+  test_runner:
+    image: ipx-host
+    network_mode: "service:ipxhost001"
+    depends_on:
+      ipxhost001:
+        condition: service_healthy
+    command: /bin/sh -c "ip addr"

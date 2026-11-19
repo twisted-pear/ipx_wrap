@@ -25,3 +25,5 @@
 /vmlinux.h
 /vmlinux.btf
 /mux_sk_tests
+/tests/*/network.yaml
+/tests/*/*.compose.yaml

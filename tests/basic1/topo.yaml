@@ -1,0 +1,23 @@
+services:
+  ipxhost001:
+    <<: *service-ipx-host-basic
+    networks:
+      ipxnet_001_to_002:
+        mac_address: 00:de:ad:00:01:01
+        ipv6_address: ${IPX_PREFIX}:0000:0001:00de:adff:fe00:0101
+
+  ipxhost002:
+    <<: *service-ipx-host-basic
+    networks:
+      ipxnet_001_to_002:
+        mac_address: 00:de:ad:00:01:02
+        ipv6_address: ${IPX_PREFIX}:0000:0001:00de:adff:fe00:0102
+
+networks:
+  ipxnet_001_to_002:
+    <<: *network-ipx-net
+    ipam:
+      driver: default
+      config:
+        - subnet: ${IPX_PREFIX}:0000:0001::/64
+          ip_range: ${IPX_PREFIX}:0000:0001::/64
