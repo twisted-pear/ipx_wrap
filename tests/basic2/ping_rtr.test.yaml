@@ -2,6 +2,16 @@ include:
   - ./network.yaml
 
 services:
+  pongdrtr:
+    image: ipx-host
+    network_mode: "service:ipxrtr"
+    depends_on:
+      ipxrtr:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    command: /bin/sh -c "./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
   pongd001:
     image: ipx-host
     network_mode: "service:ipxhost001"
@@ -36,8 +46,8 @@ services:
     image: ipx-host
     network_mode: "service:ipxrtr"
     depends_on:
-      ipxrtr:
-        condition: service_healthy
+      pongdrtr:
+        condition: service_started
       pongd001:
         condition: service_started
       pongd002:

@@ -2,7 +2,17 @@ include:
   - ./network.yaml
 
 services:
-  pongd:
+  pongd001:
+    image: ipx-host
+    network_mode: "service:ipxhost001"
+    depends_on:
+      ipxhost001:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    command: /bin/sh -c "./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
+  pongd002:
     image: ipx-host
     network_mode: "service:ipxhost002"
     depends_on:
@@ -18,6 +28,8 @@ services:
     depends_on:
       ipxhost001:
         condition: service_healthy
-      pongd:
+      pongd001:
+        condition: service_started
+      pongd002:
         condition: service_started
     command: bats tests/basic1/ping.bats

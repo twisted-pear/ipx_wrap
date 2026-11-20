@@ -403,6 +403,24 @@ static __always_inline bool is_reinjected(struct __sk_buff *skb)
 	return false;
 }
 
+static __always_inline bool is_loopback(const struct ethhdr *eth, const struct
+		ipxhdr *ipxh, __be32 if_net)
+{
+	if (ipxh->daddr.net != if_net) {
+		return false;
+	}
+
+	if (__builtin_memcmp(eth->h_source, ipxh->daddr.node, ETH_ALEN) != 0) {
+		return false;
+	}
+
+	if (__builtin_memcmp(eth->h_source, eth->h_dest, ETH_ALEN) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
 SEC("tc/ingress")
 int ipx_wrap_in(struct __sk_buff *ctx)
 {
@@ -580,6 +598,10 @@ int ipx_wrap_out(struct __sk_buff *ctx)
 					sizeof(ipxh->daddr.node)) == 0) {
 			/* then also loop it back into this interface */
 			mark_clone_reinject_and_clear(ctx, CB_MARK_NONE);
+		}
+	} else {
+		if (is_loopback(eth, ipxh, ifcfg->network)) {
+			return mark_and_reinject(ctx, CB_MARK_NONE);
 		}
 	}
 
