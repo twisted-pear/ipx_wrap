@@ -20,4 +20,4 @@ services:
         condition: service_healthy
       pongd:
         condition: service_started
-    command: /bin/sh -c "./ipxping -c 2 00000001.00dead000101.0000 00000001.00dead000102.9086"
+    command: bats tests/basic1/ping.bats

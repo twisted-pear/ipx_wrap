@@ -6,7 +6,7 @@ RUN apt install -y iputils-ping tcpdump procps netcat-openbsd ndisc6 socat bats 
 RUN apt install -y openssh-server openssh-client
 RUN apt install -y iperf3
 RUN useradd -u 1000 -m -s /bin/bash ipxuser
-COPY --exclude=tests . /home/ipxuser/ipx_wrap
+COPY --exclude=tests/*/*.yaml . /home/ipxuser/ipx_wrap
 RUN chown -R ipxuser:ipxuser /home/ipxuser/ipx_wrap
 USER ipxuser
 WORKDIR /home/ipxuser/ipx_wrap

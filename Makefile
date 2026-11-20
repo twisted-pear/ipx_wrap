@@ -89,10 +89,11 @@ INTEGRATION_TESTS_COMPOSE = $(INTEGRATION_TESTS_FILES:.test.yaml=.compose.yaml)
 INTEGRATION_TESTS = $(INTEGRATION_TESTS_FILES:.test.yaml=)
 
 $(INTEGRATION_TEST_NETWORKS): %/network.yaml: %/topo.yaml tests/templates.yaml
-	cat tests/templates.yaml $< > $@
+	@cat tests/templates.yaml $< > $@
 
-$(INTEGRATION_TESTS): %: %.compose.yaml tests/defaults.env
-	docker compose --progress quiet \
+$(INTEGRATION_TESTS): %: %.compose.yaml %.bats tests/defaults.env
+	@echo "Running test suite $@..."
+	@docker compose --progress quiet \
 		--env-file tests/defaults.env \
 		--project-directory `dirname $<` \
 		-f $< up --quiet-build --quiet-pull \
@@ -113,4 +114,4 @@ clean:
 
 .SECONDEXPANSION:
 %.compose.yaml: %.test.yaml tests/templates.yaml $$(dir $$@)network.yaml
-	cat tests/templates.yaml $< > $@
+	@cat tests/templates.yaml $< > $@

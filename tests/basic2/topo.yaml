@@ -1,23 +1,57 @@
 services:
-  ipxhost001:
-    <<: *service-ipx-host-basic
+  ipxrtr:
+    <<: *service-ipx-host-mux
     networks:
-      ipxnet_001_to_002:
+      ipxnet_rtr_to_001:
+        mac_address: 00:de:ad:00:01:0f
+        ipv6_address: ${IPX_PREFIX}:0000:0001:00de:adff:fe00:010f
+      ipxnet_rtr_to_002:
+        mac_address: 00:de:ad:00:02:0f
+        ipv6_address: ${IPX_PREFIX}:0000:0002:00de:adff:fe00:020f
+      ipxnet_rtr_to_003:
+        mac_address: 00:de:ad:00:03:0f
+        ipv6_address: ${IPX_PREFIX}:0000:0003:00de:adff:fe00:030f
+
+  ipxhost001:
+    <<: *service-ipx-host-mux
+    networks:
+      ipxnet_rtr_to_001:
         mac_address: 00:de:ad:00:01:01
         ipv6_address: ${IPX_PREFIX}:0000:0001:00de:adff:fe00:0101
 
   ipxhost002:
-    <<: *service-ipx-host-basic
+    <<: *service-ipx-host-mux
     networks:
-      ipxnet_001_to_002:
-        mac_address: 00:de:ad:00:01:02
-        ipv6_address: ${IPX_PREFIX}:0000:0001:00de:adff:fe00:0102
+      ipxnet_rtr_to_002:
+        mac_address: 00:de:ad:00:02:02
+        ipv6_address: ${IPX_PREFIX}:0000:0002:00de:adff:fe00:0202
+
+  ipxhost003:
+    <<: *service-ipx-host-mux
+    networks:
+      ipxnet_rtr_to_003:
+        mac_address: 00:de:ad:00:03:03
+        ipv6_address: ${IPX_PREFIX}:0000:0003:00de:adff:fe00:0303
 
 networks:
-  ipxnet_001_to_002:
+  ipxnet_rtr_to_001:
     <<: *network-ipx-net
     ipam:
       driver: default
       config:
         - subnet: ${IPX_PREFIX}:0000:0001::/64
           ip_range: ${IPX_PREFIX}:0000:0001::/64
+  ipxnet_rtr_to_002:
+    <<: *network-ipx-net
+    ipam:
+      driver: default
+      config:
+        - subnet: ${IPX_PREFIX}:0000:0002::/64
+          ip_range: ${IPX_PREFIX}:0000:0002::/64
+  ipxnet_rtr_to_003:
+    <<: *network-ipx-net
+    ipam:
+      driver: default
+      config:
+        - subnet: ${IPX_PREFIX}:0000:0003::/64
+          ip_range: ${IPX_PREFIX}:0000:0003::/64
