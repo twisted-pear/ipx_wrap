@@ -3,6 +3,8 @@ x-ipx-host-basic: &service-ipx-host-basic
   pull_policy: build
   build:
     context: ../..
+    args:
+      - NDEBUG=${NDEBUG-0}
   user: root
   tty: true
   init: true

@@ -17,12 +17,14 @@ BPF_OBJ = ipx_wrap_kern.o ipx_wrap_mux_kern.o ipx_wrap_mux_spx_kern.o
 
 INTEGRATION_TEST_GROUPS = basic1 basic2
 
-ifdef NDEBUG
-CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -DNDEBUG
-else
-CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2 -fsanitize=address -fsanitize=leak -g
-endif
+CFLAGS = -Wall -I $(LIBBPF_PREFIX)/include/ -O2
 BPF_CFLAGS = -D __BPF_TRACING__ -I $(LIBBPF_PREFIX)/include/ -Wall -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wno-address-of-packed-member -Wno-missing-declarations -Werror -O2
+ifeq ($(NDEBUG),1)
+CFLAGS += -DNDEBUG
+BPF_CFLAGS += -DNDEBUG
+else
+CFLAGS += -fsanitize=address -fsanitize=leak -g
+endif
 USER_LIBS = -lbpf
 MUXER_LIBS = -lcap -lbpf
 MUX_LIBS = -lm
