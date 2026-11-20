@@ -19,6 +19,7 @@
 
 enum ipxping_error_codes {
 	IPXPING_ERR_OK = 0,
+	IPXPING_ERR_LOSS,
 	IPXPING_ERR_USAGE,
 	IPXPING_ERR_EPOLL_FD,
 	IPXPING_ERR_TMR_FD,
@@ -683,7 +684,14 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 
 	print_stats(&stats, &(cfg->remote_addr));
 
-	cleanup_and_exit(epoll_fd, tmr_fd, cfg, IPXPING_ERR_OK);
+	enum ipxping_error_codes exit_code = IPXPING_ERR_LOSS;
+
+	/* if we got any packets back we return 0 and 1 otherwise */
+	if (stats.n_pings_with_replies > 0) {
+		exit_code = IPXPING_ERR_OK;
+	}
+
+	cleanup_and_exit(epoll_fd, tmr_fd, cfg, exit_code);
 }
 
 static _Noreturn void usage(void)
