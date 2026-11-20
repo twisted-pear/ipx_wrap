@@ -1,12 +1,23 @@
-#TODO: ping
 include:
   - ./network.yaml
 
 services:
+  pongd:
+    image: ipx-host
+    network_mode: "service:ipxhost002"
+    depends_on:
+      ipxhost002:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    command: /bin/sh -c "./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
   test_runner:
     image: ipx-host
     network_mode: "service:ipxhost001"
     depends_on:
       ipxhost001:
         condition: service_healthy
-    command: /bin/sh -c "ip addr"
+      pongd:
+        condition: service_started
+    command: /bin/sh -c "./ipxping -c 2 00000001.00dead000101.0000 00000001.00dead000102.9086"
