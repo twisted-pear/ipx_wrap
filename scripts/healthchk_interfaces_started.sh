@@ -10,9 +10,10 @@ usage()
 
 [ "${#}" -ne 1 ] && usage
 
+IPX_PREFIX="${1}"
+
 SCRIPTS_DIR="`dirname ${0}`"
 IPX_WRAP_DIR="`dirname ${SCRIPTS_DIR}`"
-
 
 ip -6 -o addr | grep "inet6 ${IPX_PREFIX}:" | while read IFLINE; do
 	IFACE=`echo "${IFLINE}" | cut -d ' ' -f 2`

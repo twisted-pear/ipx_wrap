@@ -16,6 +16,8 @@ usage()
 
 [ "${#}" -ne 1 ] && usage
 
+IPX_PREFIX="${1}"
+
 SCRIPTS_DIR="`dirname ${0}`"
 IPX_WRAP_DIR="`dirname ${SCRIPTS_DIR}`"
 

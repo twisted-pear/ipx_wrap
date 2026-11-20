@@ -27,6 +27,17 @@ x-ipx-host-basic: &service-ipx-host-basic
     start_period: 5s
     start_interval: 1s
 
+x-ipx-host-mux: &service-ipx-host-mux
+  <<: *service-ipx-host-basic
+  command: /bin/sh -c "./scripts/start_mux.sh $${IPX_PREFIX}"
+  healthcheck:
+    test: /bin/sh -c "./scripts/healthchk_mux_started.sh $${IPX_PREFIX}"
+    interval: 1m
+    timeout: 5s
+    retries: 0
+    start_period: 5s
+    start_interval: 1s
+
 x-ipx-net: &network-ipx-net
   enable_ipv4: false
   enable_ipv6: true
