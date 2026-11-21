@@ -74,41 +74,44 @@ static void handle_ping(struct queued_ipx_msg *ping, struct if_entry *in_if,
 	perror("sending Pong");
 }
 
-void service_cleanup_and_exit(void *ctx)
+void service_cleanup_and_exit([[maybe_unused]] void *ctx)
 {
 	/* do nothing */
 }
 
-void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
+void service_ifup([[maybe_unused]] struct if_entry *iface, [[maybe_unused]] int
+		epoll_fd, [[maybe_unused]] void *ctx)
 {
 	/* do nothing */
 }
 
-void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
+void service_ifdown([[maybe_unused]] struct if_entry *iface, [[maybe_unused]]
+		int epoll_fd, [[maybe_unused]] void *ctx)
 {
 	/* do nothing */
 }
 
-bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
+bool service_maintenance([[maybe_unused]] void *ctx, [[maybe_unused]] time_t
+		now_secs, [[maybe_unused]] int epoll_fd)
 {
 	/* do nothing */
 	return true;
 }
 
-void service_handle_signal(int signal)
+void service_handle_signal([[maybe_unused]] int signal)
 {
 	/* do nothing */
 }
 
 bool service_handle_msg(struct queued_ipx_msg *msg, struct if_entry *iface, int
-		epoll_fd, void *ctx)
+		epoll_fd, [[maybe_unused]] void *ctx)
 {
 	handle_ping(msg, iface, epoll_fd);
 
 	return true;
 }
 
-bool service_reload(void *ctx)
+bool service_reload([[maybe_unused]] void *ctx)
 {
 	/* do nothing */
 	return true;

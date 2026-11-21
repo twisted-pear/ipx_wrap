@@ -605,12 +605,13 @@ static void prepare_rip_updates(__be32 prefix, int epoll_fd)
 	for_each_iface(per_iface_rip_update, &ctx);
 }
 
-void service_cleanup_and_exit(void *ctx)
+void service_cleanup_and_exit([[maybe_unused]] void *ctx)
 {
 	/* do nothing */
 }
 
-void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
+void service_ifup(struct if_entry *iface, int epoll_fd, [[maybe_unused]] void
+		*ctx)
 {
 	struct queued_ipx_msg *msg = mk_rip_request_for_iface(iface,
 			IPX_NET_ALL_ROUTES);
@@ -626,6 +627,9 @@ void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
 {
 	// TODO
+	(void)(iface);
+	(void)(epoll_fd);
+	(void)(ctx);
 }
 
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
@@ -644,7 +648,7 @@ bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
 	return true;
 }
 
-void service_handle_signal(int signal)
+void service_handle_signal([[maybe_unused]] int signal)
 {
 	/* do nothing */
 }
@@ -659,7 +663,7 @@ bool service_handle_msg(struct queued_ipx_msg *msg, struct if_entry *iface, int
 	return true;
 }
 
-bool service_reload(void *ctx)
+bool service_reload([[maybe_unused]] void *ctx)
 {
 	return true;
 }

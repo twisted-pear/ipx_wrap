@@ -93,7 +93,7 @@ static void print_child_status(pid_t child_pid, int wstatus)
 	}
 }
 
-static bool write_to_exec_proc(int epoll_fd, struct spxinetd_cfg *cfg);
+static bool write_to_exec_proc(int epoll_fd);
 
 static _Noreturn void cleanup_and_exit(int epoll_fd, struct ipxw_mux_spx_handle
 		*spxh, struct spxinetd_cfg *cfg, enum spxinetd_error_codes
@@ -378,7 +378,7 @@ static bool do_exec(int epoll_fd, struct ipxw_mux_spx_handle spxh, struct
 	return false;
 }
 
-static bool write_to_exec_proc(int epoll_fd, struct spxinetd_cfg *cfg)
+static bool write_to_exec_proc(int epoll_fd)
 {
 	/* no msgs to write */
 	if (counted_ipx_msg_queue_empty(&in_queue)) {
@@ -553,7 +553,7 @@ static _Noreturn void do_sub(struct spxinetd_cfg *cfg, struct
 				}
 
 				/* write to exec process */
-				write_to_exec_proc(epoll_fd, cfg);
+				write_to_exec_proc(epoll_fd);
 
 				continue;
 			}

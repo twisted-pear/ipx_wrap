@@ -102,14 +102,14 @@ struct rcon_request {
 	__be16 code;
 	__be32 screen_id;
 	__u8 data[0];
-};
+} __attribute__((packed));
 
 struct rcon_reply {
 	__be16 data_len;
 	__be16 code;
 	__be32 screen_id;
 	__u8 data[0];
-};
+} __attribute__((packed));
 
 struct rcon_screen {
 	__be32 screen_id;
@@ -618,8 +618,11 @@ static int rcon_data_next_int(__u8 *data, __u16 len, __u16 start, __s32 *out)
 		return -1;
 	}
 
-	*out = (__s32)((data[start] << 24) | (data[start+1] << 16) |
-			(data[start+2] << 8) | data[start+3]);
+	__u32 b0 = ((__u32)(data[start])) << 24;
+	__u32 b1 = ((__u32)(data[start+1])) << 16;
+	__u32 b2 = ((__u32)(data[start+2])) << 8;
+	__u32 b3 = ((__u32)(data[start+3])) << 0;
+	*out = (__s32)(b0 | b1 | b2 | b3);
 	return start + 4;
 }
 
@@ -814,11 +817,16 @@ static bool rcon_auth(int epoll_fd, struct rconcl_cfg *cfg, const char *password
 
 		/* calculate response to server's challenge */
 		__u8 pw_hash[MD5_DIGEST_LENGTH + RCON_NONCE_LEN];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+		/* The protocol requires MD5. No point in printing warnings, I
+		 * know it's not safe. */
 		MD5((const unsigned char *) password, strlen(password),
 				pw_hash);
 		memcpy(pw_hash + MD5_DIGEST_LENGTH, rep->data, RCON_NONCE_LEN);
 		__u8 nonce_hash[MD5_DIGEST_LENGTH];
 		MD5(pw_hash, MD5_DIGEST_LENGTH + RCON_NONCE_LEN, nonce_hash);
+#pragma GCC diagnostic pop
 
 		free(msg);
 		msg = NULL;
@@ -1495,6 +1503,7 @@ static bool rcon_handle_reply(int epoll_fd, struct queued_ipx_msg *msg)
 		case RCON_REPLY_SCREEN_COPY:
 			update = false;
 			/* fall through on purpuse */
+			[[fallthrough]];
 		case RCON_REPLY_SCREEN_CHANGE:
 			int pos = 0;
 

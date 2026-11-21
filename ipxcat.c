@@ -91,7 +91,7 @@ static struct ipxw_mux_spx_handle spxh = ipxw_mux_spx_handle_init;
 static ssize_t fgets_bin(char *s, size_t size, FILE *stream)
 {
 	ssize_t i;
-	for (i = 0; i < size; i++) {
+	for (i = 0; i < (ssize_t) size; i++) {
 		int c = fgetc(stream);
 		if (c == EOF) {
 			break;

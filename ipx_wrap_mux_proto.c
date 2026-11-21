@@ -320,7 +320,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 		return -1;
 	}
 
-	if (sent_len != in_len) {
+	if (sent_len != (ssize_t) in_len) {
 		errno = ECOMM;
 		return -1;
 	}
@@ -352,7 +352,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	}
 
 	/* we must at least receive a whole message */
-	if (rcvd_len < sizeof(struct ipxw_mux_msg)) {
+	if (rcvd_len < (ssize_t) sizeof(struct ipxw_mux_msg)) {
 		errno = EREMOTEIO;
 		return -1;
 	}
@@ -371,7 +371,7 @@ ssize_t ipxw_mux_send_recv_conf_msg(struct ipxw_mux_handle h, const struct
 	}
 
 	/* the reply message must contain the correct length, if it has one */
-	if (rcvd_len != out_len) {
+	if (rcvd_len != (ssize_t) out_len) {
 		errno = EREMOTEIO;
 		return -1;
 	}
@@ -503,7 +503,7 @@ ssize_t ipxw_mux_xmit_with_ctrl(struct ipxw_mux_handle h, const struct
 		return -1;
 	}
 
-	if (sent_len != msg_len) {
+	if (sent_len != (ssize_t) msg_len) {
 		errno = ECOMM;
 		return -1;
 	}
@@ -757,7 +757,7 @@ ssize_t ipxw_mux_get_recvd_with_ctrl(struct ipxw_mux_handle h, struct
 	}
 
 	/* need at least a full msg */
-	if (rcvd_len < sizeof(struct ipxw_mux_msg)) {
+	if (rcvd_len < (ssize_t) sizeof(struct ipxw_mux_msg)) {
 		errno = EREMOTEIO;
 		return -1;
 	}
@@ -1184,7 +1184,7 @@ ssize_t ipxw_mux_do_conf(int conf_sock, struct ipxw_mux_msg *msg, bool
 	}
 
 	/* must at least receive a full mux msg */
-	if (rcvd_msg_len < sizeof(struct ipxw_mux_msg)) {
+	if (rcvd_msg_len < (ssize_t) sizeof(struct ipxw_mux_msg)) {
 		errno = EREMOTEIO;
 		return -1;
 	}
@@ -1327,7 +1327,7 @@ ssize_t ipxw_mux_recv_conf(int conf_sock, struct ipxw_mux_msg *msg, int
 		return -1;
 	}
 
-	if (sent_len != msg_len) {
+	if (sent_len != (ssize_t) msg_len) {
 		errno = ECOMM;
 		return -1;
 	}
@@ -1395,7 +1395,7 @@ static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle
 }
 
 static bool ipxw_mux_spx_connect(int spx_sock, __be32 prefix, struct ipx_addr
-		*saddr, struct ipx_addr *daddr)
+		*daddr)
 {
 	/* connect the socket so that sending without a specific
 	 * destination address works */
@@ -1496,9 +1496,7 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_connect(struct ipxw_mux_handle h,
 
 		ret.conn_id = connect_rsp.spx_connect.conn_id;
 
-		if (!ipxw_mux_spx_connect(ret.spx_sock, h.prefix,
-					&(connect_rsp.spx_connect.addr),
-					daddr)) {
+		if (!ipxw_mux_spx_connect(ret.spx_sock, h.prefix, daddr)) {
 			break;
 		}
 
@@ -1552,7 +1550,6 @@ struct ipxw_mux_spx_handle ipxw_mux_kspx_accept(struct ipxw_mux_handle h, const
 		ret.conn_id = accept_rsp.spx_accept.conn_id;
 
 		if (!ipxw_mux_spx_connect(ret.spx_sock, h.prefix,
-					&(accept_rsp.spx_accept.addr),
 					&remote_addr)) {
 			break;
 		}
@@ -1839,7 +1836,7 @@ int ipxw_get_outif_max_ipx_data_len_for_dst(struct ipxw_mux_handle h, struct
 		return -1;
 	}
 
-	if (mtu < IPX_WRAP_OVERHEAD) {
+	if (mtu < (int) IPX_WRAP_OVERHEAD) {
 		return 0;
 	}
 

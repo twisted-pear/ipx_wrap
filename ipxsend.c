@@ -79,7 +79,7 @@ static _Noreturn void usage(void)
 	exit(IPXSEND_ERR_USAGE);
 }
 
-static bool verify_cfg(struct ipxsend_cfg *cfg)
+static bool verify_cfg([[maybe_unused]] struct ipxsend_cfg *cfg)
 {
 	return true;
 }

@@ -178,7 +178,7 @@ static _Noreturn void do_ipxtap(struct ipxtap_cfg *cfg, int epoll_fd)
 		perror("getting output interface max data length");
 		cleanup_and_exit(epoll_fd, IPXTAP_ERR_GET_OIF_DATA_LEN);
 	}
-	if (max_oif_data_len < sizeof(struct ethhdr)) {
+	if (max_oif_data_len < (int) sizeof(struct ethhdr)) {
 		fprintf(stderr, "output interface MTU too small\n");
 		cleanup_and_exit(epoll_fd, IPXTAP_ERR_OIF_DATA_LEN_ZERO);
 	}
@@ -317,7 +317,7 @@ static _Noreturn void usage(void)
 	exit(IPXTAP_ERR_USAGE);
 }
 
-static bool verify_cfg(struct ipxtap_cfg *cfg)
+static bool verify_cfg([[maybe_unused]] struct ipxtap_cfg *cfg)
 {
 	return true;
 }

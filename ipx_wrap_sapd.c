@@ -177,10 +177,11 @@ static bool insert_srv_entry(struct srv_entry *e)
 
 	/* in a production build (without asserts) these two variables will be
 	 * unused, that is ok, the compiler can optimize them away */
-	struct srv_entry *found_addr = get_srv_entry_by_ipx_addr(&e->data.srv_addr);
+	[[maybe_unused]] struct srv_entry *found_addr =
+		get_srv_entry_by_ipx_addr(&e->data.srv_addr);
 	assert(found_addr == NULL);
 
-	struct srv_entry *found_type_and_name =
+	[[maybe_unused]] struct srv_entry *found_type_and_name =
 		get_srv_entry_by_srv_type_and_name(e->data.srv_type,
 				e->data.srv_name);
 	assert(found_type_and_name == NULL);
@@ -711,7 +712,7 @@ static void cleanup_srv_type_list(struct srv_type_list *l)
 	free(l);
 }
 
-void service_cleanup_and_exit(void *ctx)
+void service_cleanup_and_exit([[maybe_unused]] void *ctx)
 {
 	/* clean up the database */
 	struct srv_type_list *le;
@@ -885,7 +886,8 @@ static void timeout_srv_entries(time_t now_secs)
 	}
 }
 
-void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
+void service_ifup(struct if_entry *iface, int epoll_fd, [[maybe_unused]] void
+		*ctx)
 {
 	struct queued_ipx_msg *msg = mk_sap_request_for_iface(iface,
 			SAP_SRV_TYPE_WILD, false);
@@ -901,6 +903,9 @@ void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
 {
 	// TODO
+	(void)(iface);
+	(void)(epoll_fd);
+	(void)(ctx);
 }
 
 void do_print_database(void)
@@ -962,7 +967,7 @@ void service_handle_signal(int signal)
 }
 
 bool service_handle_msg(struct queued_ipx_msg *msg, struct if_entry *iface, int
-		epoll_fd, void *ctx)
+		epoll_fd, [[maybe_unused]] void *ctx)
 {
 	handle_sap_msg(msg, iface, epoll_fd);
 

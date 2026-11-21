@@ -101,7 +101,7 @@ static _Noreturn void usage(void)
 	exit(IPXRECV_ERR_USAGE);
 }
 
-static bool verify_cfg(struct ipxrecv_cfg *cfg)
+static bool verify_cfg([[maybe_unused]] struct ipxrecv_cfg *cfg)
 {
 	return true;
 }

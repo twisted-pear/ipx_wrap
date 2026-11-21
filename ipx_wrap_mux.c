@@ -212,7 +212,7 @@ static __be16 find_next_free_dyn_sock(struct if_entry *iface)
 	struct bind_entry *e = NULL;
 
 	offset = offset % range;
-	for (int i = 0; i < range; i++) {
+	for (unsigned int i = 0; i < range; i++) {
 		__u16 candidate = ((offset + i) % range) +
 			ntohs(IPX_MIN_DYNAMIC_SOCKET);
 
@@ -239,7 +239,7 @@ static __be16 find_next_free_spx_conn_id(struct bind_entry *e)
 	struct spx_connection *c = NULL;
 
 	offset = offset % range;
-	for (int i = 0; i < range; i++) {
+	for (unsigned int i = 0; i < range; i++) {
 		__u16 candidate = ((offset + i) % range);
 
 		c = get_spx_conn_by_conn_id(e, htons(candidate));
@@ -880,14 +880,16 @@ static bool queue_conf_msg(struct bind_entry *be, struct ipxw_mux_msg *msg, int 
 	return true;
 }
 
-static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
-		void *ctx)
+static bool handle_conf_msg([[maybe_unused]] int conf_sock, struct ipxw_mux_msg
+		*msg, int fd, void *ctx)
 {
 	struct do_ctx *context = (struct do_ctx *) ctx;
 	struct bind_entry *be_conf = context->be;
 	if (be_conf == NULL) {
 		return false;
 	}
+
+	assert(be_conf->conf_sock == conf_sock);
 
 	/* check message type and prepare response */
 	struct ipxw_mux_msg *rsp_msg = NULL;
@@ -922,6 +924,7 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 			spx_accepted = true;
 			spx_rsp_type = IPXW_MUX_SPX_ACCEPT;
 			/* fall through on purpose */
+			[[fallthrough]];
 		case IPXW_MUX_SPX_CONNECT:
 			/* we need the fd */
 			if (fd < 0) {

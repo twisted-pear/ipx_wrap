@@ -136,8 +136,9 @@ static int setup_timer(int epoll_fd, struct timespec *interval)
 	return tmr;
 }
 
-static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd, struct
-		ipxping_cfg *cfg, enum ipxping_error_codes code)
+static _Noreturn void cleanup_and_exit(int epoll_fd, int tmr_fd,
+		[[maybe_unused]] struct ipxping_cfg *cfg, enum
+		ipxping_error_codes code)
 {
 	if (tmr_fd >= 0) {
 		close(tmr_fd);
@@ -356,7 +357,7 @@ static bool recv_pong(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 	sockaddr_ipx_to_ipx_addr(&pong_saddr, &saddr);
 
 	/* need at least a full Ping msg */
-	if (rcvd_len < sizeof(struct ping_pkt)) {
+	if (rcvd_len < (ssize_t) sizeof(struct ping_pkt)) {
 		if (cfg->verbose) {
 			fprintf(stderr, "received truncated Pong from ");
 			print_ipxaddr(stderr, &(pong_saddr));
@@ -530,7 +531,7 @@ static _Noreturn void do_ipxping(struct ipxping_cfg *cfg, int epoll_fd, int
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg,
 				IPXPING_ERR_GET_OIF_DATA_LEN);
 	}
-	if (max_oif_data_len < sizeof(struct ping_pkt)) {
+	if (max_oif_data_len < (int) sizeof(struct ping_pkt)) {
 		fprintf(stderr, "output interface MTU too small\n");
 		cleanup_and_exit(epoll_fd, tmr_fd, cfg,
 				IPXPING_ERR_OIF_DATA_LEN_ZERO);

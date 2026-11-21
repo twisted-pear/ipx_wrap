@@ -223,8 +223,8 @@ static bool send_out_tcp_msg(int epoll_fd)
 	return true;
 }
 
-static _Noreturn void cleanup_and_exit(int epoll_fd, struct spxtcp_cfg *cfg,
-		enum spxtcp_error_codes code)
+static _Noreturn void cleanup_and_exit(int epoll_fd, [[maybe_unused]] struct
+		spxtcp_cfg *cfg, enum spxtcp_error_codes code)
 {
 	if (epoll_fd >= 0) {
 		close(epoll_fd);

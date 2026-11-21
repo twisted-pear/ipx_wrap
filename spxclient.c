@@ -103,7 +103,7 @@ static _Noreturn void usage(void)
 	exit(SPXCLIENT_ERR_USAGE);
 }
 
-static bool verify_cfg(struct spxclient_cfg *cfg)
+static bool verify_cfg([[maybe_unused]] struct spxclient_cfg *cfg)
 {
 	return true;
 }
