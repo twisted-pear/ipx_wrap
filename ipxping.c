@@ -205,7 +205,7 @@ static bool send_ping(struct ipxping_cfg *cfg, struct ipxping_stats *stats)
 		}
 
 		/* set timestamp ID, this will be used to retrieve the TX timestamp */
-		__u32 ts_id = (cfg->proc_id << 16) | cfg->cur_msg_id;
+		__u32 ts_id = (((__u32) cfg->proc_id) << 16) | cfg->cur_msg_id;
 
 		__u8 ctrl_data[CTRL_DATA_LEN];
 		ssize_t ctrl_data_len = ipxw_mux_set_tx_timestamp_id(ctrl_data,
