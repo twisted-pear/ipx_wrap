@@ -282,7 +282,8 @@ static __always_inline __sum16 calc_ipx_in_ipv6_csum(struct ipxhdr *ipxh,
 
 	/* UDP header */
 	udph->check = 0;
-	diff = bpf_csum_diff(NULL, 0, (__be32 *) udph, sizeof(udph), diff);
+	diff = bpf_csum_diff(NULL, 0, (__be32 *) udph, sizeof(struct udphdr),
+			diff);
 
 	/* payload */
 	size_t payload_len = (__u16) bpf_ntohs(ipxh->pktlen);

@@ -266,7 +266,7 @@ static bool has_net_bind_service(struct ipxw_mux_handle h)
 	}
 
 	cap_flag_value_t on;
-	if (cap_get_flag(data_caps, CAP_NET_BIND_SERVICE, CAP_PERMITTED, &on)
+	if (cap_get_flag(data_caps, CAP_NET_BIND_SERVICE, CAP_EFFECTIVE, &on)
 			!= 0) {
 		cap_free(data_caps);
 		return false;
@@ -921,6 +921,7 @@ static bool handle_conf_msg(int conf_sock, struct ipxw_mux_msg *msg, int fd,
 		case IPXW_MUX_SPX_ACCEPT:
 			spx_accepted = true;
 			spx_rsp_type = IPXW_MUX_SPX_ACCEPT;
+			/* fall through on purpose */
 		case IPXW_MUX_SPX_CONNECT:
 			/* we need the fd */
 			if (fd < 0) {

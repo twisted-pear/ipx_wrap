@@ -152,7 +152,7 @@ static int get_next_rip_entry(FILE *rtable, struct rip_entry *re, __u32
 		my_prefix, __u32 my_net)
 {
 	char *line = NULL;
-	size_t len;
+	size_t len = 0;
 
 	errno = 0;
 	ssize_t res = getline(&line, &len, rtable);
@@ -423,7 +423,7 @@ static void handle_rip_msg(struct queued_ipx_msg *msg, struct if_entry *in_if,
 					/* new, previously unknown route, mark
 					 * for propagation */
 					if (route_status == 0) {
-						prop_route_bits |= (1 << i);
+						prop_route_bits |= (1ULL << i);
 					}
 				}
 			}
@@ -524,7 +524,7 @@ static bool per_iface_rip_propagate(struct if_entry *iface, void *ctx)
 		}
 
 		/* route is already known, don't propagate */
-		if (((1 << i) & per_if_ctx->in_prop_route_bits) == 0) {
+		if (((1ULL << i) & per_if_ctx->in_prop_route_bits) == 0) {
 			continue;
 		}
 

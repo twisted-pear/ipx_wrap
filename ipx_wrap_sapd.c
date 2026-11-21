@@ -724,7 +724,7 @@ void service_cleanup_and_exit(void *ctx)
 static int parse_next_line_from_cfg(FILE *cfg, struct srv_entry *e)
 {
 	char *line = NULL;
-	size_t len;
+	size_t len = 0;
 
 	errno = 0;
 	ssize_t res = getline(&line, &len, cfg);
