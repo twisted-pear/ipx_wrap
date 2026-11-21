@@ -431,12 +431,8 @@ static void handle_rip_msg(struct queued_ipx_msg *msg, struct if_entry *in_if,
 			fprintf(stderr, "added %lu of %lu routes", ninserted,
 					nentries);
 
-			if (memcmp(msg->addr.sipx_node, IPX_BCAST_NODE,
-						IPX_ADDR_NODE_BYTES) == 0) {
-				prepare_rip_propagate(in_if, msg, prefix,
-						nentries, prop_route_bits,
-						epoll_fd);
-			}
+			prepare_rip_propagate(in_if, msg, prefix, nentries,
+					prop_route_bits, epoll_fd);
 
 			break;
 		} else if (rip_rsp_pkt->rip_type == RIP_PKT_TYPE_REQUEST) {
@@ -570,6 +566,7 @@ static void prepare_rip_propagate(struct if_entry *in_if, struct queued_ipx_msg
 }
 
 struct per_iface_update_ctx {
+	struct if_entry *excluded_if;
 	__be32 prefix;
 	int epoll_fd;
 };
@@ -577,6 +574,10 @@ struct per_iface_update_ctx {
 static bool per_iface_rip_update(struct if_entry *iface, void *ctx)
 {
 	struct per_iface_update_ctx *per_if_ctx = ctx;
+
+	if(iface == per_if_ctx->excluded_if) {
+		return true;
+	}
 
 	struct ipx_addr daddr = {
 		.net = iface->addr.net,
@@ -597,6 +598,7 @@ static void prepare_rip_updates(__be32 prefix, int epoll_fd)
 	printf("Sending RIP update.\n");
 
 	struct per_iface_update_ctx ctx = {
+		.excluded_if = NULL,
 		.prefix = prefix,
 		.epoll_fd = epoll_fd
 	};
@@ -610,9 +612,19 @@ void service_cleanup_and_exit([[maybe_unused]] void *ctx)
 	/* do nothing */
 }
 
-void service_ifup(struct if_entry *iface, int epoll_fd, [[maybe_unused]] void
-		*ctx)
+void service_ifup(struct if_entry *iface, int epoll_fd, void *ctx)
 {
+	struct rip_service_context *service_ctx = ctx;
+
+	struct per_iface_update_ctx pi_ctx = {
+		.excluded_if = NULL,
+		.prefix = service_ctx->prefix,
+		.epoll_fd = epoll_fd
+	};
+
+	/* prepare broadcast for all interfaces */
+	for_each_iface(per_iface_rip_update, &pi_ctx);
+
 	struct queued_ipx_msg *msg = mk_rip_request_for_iface(iface,
 			IPX_NET_ALL_ROUTES);
 	if (msg == NULL) {
@@ -626,10 +638,16 @@ void service_ifup(struct if_entry *iface, int epoll_fd, [[maybe_unused]] void
 
 void service_ifdown(struct if_entry *iface, int epoll_fd, void *ctx)
 {
-	// TODO
-	(void)(iface);
-	(void)(epoll_fd);
-	(void)(ctx);
+	struct rip_service_context *service_ctx = ctx;
+
+	struct per_iface_update_ctx pi_ctx = {
+		.excluded_if = iface,
+		.prefix = service_ctx->prefix,
+		.epoll_fd = epoll_fd
+	};
+
+	/* prepare broadcast for all interfaces (except the downed one) */
+	for_each_iface(per_iface_rip_update, &pi_ctx);
 }
 
 bool service_maintenance(void *ctx, time_t now_secs, int epoll_fd)
