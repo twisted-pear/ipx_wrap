@@ -130,7 +130,7 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 }
 
 #define ENTER_INGRESS(state_var) \
-	bpf_printk("%s: begin", __func__); \
+	DBG_printk("%s: begin", __func__); \
 	\
 	struct ethhdr *eth; \
 	struct ipv6hdr *ip6h; \
@@ -140,7 +140,7 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	void *data_end; \
 	if (!get_ingress_pointers(skb, &eth, &ip6h, &udph, &ipxh, &spxh, \
 				&data_end)) { \
-		bpf_printk("%s: shot, failed to get pointers", __func__); \
+		DBG_printk("%s: shot, failed to get pointers", __func__); \
 		return TC_ACT_SHOT; \
 	} \
 	\
@@ -149,14 +149,14 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	\
 	struct spx_conn_key conn_key; \
 	if (!fill_conn_key(skb, &conn_key)) { \
-		bpf_printk("%s: shot, failed to get connection key", \
+		DBG_printk("%s: shot, failed to get connection key", \
 				__func__); \
 		return TC_ACT_SHOT; \
 	} \
 	\
 	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
-		bpf_printk("%s: [%04x] shot, failed to get state", __func__, \
+		DBG_printk("%s: [%04x] shot, failed to get state", __func__, \
 				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
@@ -165,13 +165,13 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 		 * it was selected in the main program but before the \
 		 * tail-call is called. There is nothing we can do here. */ \
 		put_kspx_state(spx_state); \
-		bpf_printk("%s: [%04x] shot, unexpected state", __func__, \
+		DBG_printk("%s: [%04x] shot, unexpected state", __func__, \
 				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
 
 #define EXIT_UNLOCKED_INGRESS(verdict, message) \
-	bpf_printk("%s: [%04x] " message, __func__, \
+	DBG_printk("%s: [%04x] " message, __func__, \
 			bpf_ntohs(conn_key.conn_id)); \
 	return verdict;
 
@@ -180,7 +180,7 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	EXIT_UNLOCKED_INGRESS(verdict, message)
 
 #define ENTER_EGRESS(state_var) \
-	bpf_printk("%s: begin", __func__); \
+	DBG_printk("%s: begin", __func__); \
 	\
 	struct ethhdr *eth; \
 	struct ipv6hdr *ip6h; \
@@ -190,13 +190,13 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	void *data_end; \
 	if (!get_egress_pointers(skb, &eth, &ip6h, &sctph, &chunk1, &chunk2, \
 				&data_end)) { \
-		bpf_printk("%s: shot, failed to get pointers", __func__); \
+		DBG_printk("%s: shot, failed to get pointers", __func__); \
 		return TC_ACT_SHOT; \
 	} \
 	\
 	struct spx_conn_key conn_key; \
 	if (!fill_conn_key(skb, &conn_key)) { \
-		bpf_printk("%s: shot, failed to get connection key", \
+		DBG_printk("%s: shot, failed to get connection key", \
 				__func__); \
 		return TC_ACT_SHOT; \
 	} \
@@ -204,7 +204,7 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	struct bpf_kspx_state *spx_state = get_kspx_state(&conn_key); \
 	if (spx_state == NULL) { \
 		/* SPX connection is already closed, the conn_key is stale */ \
-		bpf_printk("%s: [%04x] shot, failed to get state", __func__, \
+		DBG_printk("%s: [%04x] shot, failed to get state", __func__, \
 				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
@@ -214,7 +214,7 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 		 * it was selected in the main program but before the \
 		 * tail-call is called. There is nothing we can do here. */ \
 		put_kspx_state(spx_state); \
-		bpf_printk("%s: [%04x] shot, unexpected state", __func__, \
+		DBG_printk("%s: [%04x] shot, unexpected state", __func__, \
 				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	} \
@@ -223,13 +223,13 @@ static __always_inline bool is_conn_req_for_conn(const struct bpf_kspx_state
 	 * any state. */ \
 	if (check_abort(chunk1, data_end)) { \
 		abort_assoc(spx_state, &conn_key); \
-		bpf_printk("%s: [%04x] connection aborted", __func__, \
+		DBG_printk("%s: [%04x] connection aborted", __func__, \
 				bpf_ntohs(conn_key.conn_id)); \
 		return TC_ACT_SHOT; \
 	}
 
 #define EXIT_UNLOCKED_EGRESS(verdict, message) \
-	bpf_printk("%s: [%04x] " message, __func__, \
+	DBG_printk("%s: [%04x] " message, __func__, \
 			bpf_ntohs(conn_key.conn_id)); \
 	return verdict;
 
@@ -1542,7 +1542,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 		case SCTP_CID_SHUTDOWN_ACK:
 			break;
 		default:
-			bpf_printk("unknown chunk type %d", chunk1->type);
+			DBG_printk("unknown chunk type %d", chunk1->type);
 			return false;
 	}
 
@@ -1623,7 +1623,7 @@ static __always_inline bool transform_egress_ESTABLISHED(struct __sk_buff *skb,
 
 		__builtin_sub_overflow(bpf_ntohl(datah->tsn),
 				info->local_sequence_offset, &seq_no);
-		bpf_printk("tsn: %u", bpf_ntohl(datah->tsn));
+		DBG_printk("tsn: %u", bpf_ntohl(datah->tsn));
 	}
 
 	/* make room for the new headers */
@@ -2004,14 +2004,14 @@ static __always_inline bool transform_egress_SHUTDOWN_RCVD(struct __sk_buff
 SEC("tc/ingress")
 int kspx_state_ingress_INVALID(struct __sk_buff *skb)
 {
-	bpf_printk("%s: shot", __func__);
+	DBG_printk("%s: shot", __func__);
 	return TC_ACT_SHOT;
 }
 
 SEC("tc/egress")
 int kspx_state_egress_INVALID(struct __sk_buff *skb)
 {
-	bpf_printk("%s: shot", __func__);
+	DBG_printk("%s: shot", __func__);
 	return TC_ACT_SHOT;
 }
 

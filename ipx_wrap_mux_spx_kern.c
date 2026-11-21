@@ -529,7 +529,7 @@ int ipx_wrap_spx_demux(struct __sk_buff *skb)
 	mark_spx_ingress(skb, &conn_key);
 	bpf_tail_call(skb, &kspx_states_ingress, spx_state->state);
 
-	bpf_printk("no ingress state program found");
+	DBG_printk("no ingress state program found");
 	return TC_ACT_SHOT;
 }
 
@@ -595,7 +595,7 @@ int ipx_wrap_spx_mux(struct __sk_buff *skb)
 
 	bpf_tail_call(skb, &kspx_states_egress, spx_state->state);
 
-	bpf_printk("no egress state program found");
+	DBG_printk("no egress state program found");
 	return TC_ACT_SHOT;
 }
 

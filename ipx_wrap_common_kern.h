@@ -58,6 +58,12 @@ _Static_assert(sizeof(struct bpf_cb_mark_info) == (sizeof(__u32) * 5),
 #define ETH_P_IPV6 0x86DD
 #define ETH_P_IPX 0x8137
 
+#ifdef NDEBUG
+#define DBG_printk(...)
+#else
+#define DBG_printk(...) bpf_printk(__VA_ARGS__)
+#endif
+
 struct hdr_cursor {
 	void *pos;
 };
