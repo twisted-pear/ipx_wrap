@@ -563,8 +563,6 @@ _Noreturn void run_service(void *service_ctx, const struct if_bind_config
 				if (err < 0) {
 					/* get rid of the interface */
 					perror("sending msg");
-					cleanup_iface(iface, epoll_fd,
-							service_ctx);
 					continue;
 				} else if (err == 0) {
 					/* nothing happened */
