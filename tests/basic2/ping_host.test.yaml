@@ -1,0 +1,74 @@
+include:
+  - ./network.yaml
+
+services:
+  pongdrtr:
+    image: ipx-host
+    network_mode: "service:ipxrtr"
+    depends_on:
+      ipxrtr:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    command: /bin/sh -c "./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
+  pongd001:
+    image: ipx-host
+    network_mode: "service:ipxhost001"
+    depends_on:
+      ipxhost001:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    cap_add:
+      - NET_ADMIN
+    user: root
+    command: /bin/sh -c "\
+                         ip route add $${IPX_PREFIX}:0000:0002::/64 via $${IPX_PREFIX}:0000:0001:00de:adff:fe00:010f &&\
+                         ip route add $${IPX_PREFIX}:0000:0003::/64 via $${IPX_PREFIX}:0000:0001:00de:adff:fe00:010f &&\
+                         ./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
+  pongd002:
+    image: ipx-host
+    network_mode: "service:ipxhost002"
+    depends_on:
+      ipxhost002:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    cap_add:
+      - NET_ADMIN
+    user: root
+    command: /bin/sh -c "\
+                         ip route add $${IPX_PREFIX}:0000:0001::/64 via $${IPX_PREFIX}:0000:0002:00de:adff:fe00:020f &&\
+                         ip route add $${IPX_PREFIX}:0000:0003::/64 via $${IPX_PREFIX}:0000:0002:00de:adff:fe00:020f &&\
+                         ./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
+  pongd003:
+    image: ipx-host
+    network_mode: "service:ipxhost003"
+    depends_on:
+      ipxhost003:
+        condition: service_healthy
+    environment:
+      - IPX_PREFIX
+    cap_add:
+      - NET_ADMIN
+    user: root
+    command: /bin/sh -c "\
+                         ip route add $${IPX_PREFIX}:0000:0000::/32 via $${IPX_PREFIX}:0000:0003:00de:adff:fe00:030f &&\
+                         ./ipx_wrap_pongd 0x`echo $${IPX_PREFIX} | tr -d ':'`"
+
+  test_runner:
+    image: ipx-host
+    network_mode: "service:ipxhost001"
+    depends_on:
+      pongdrtr:
+        condition: service_started
+      pongd001:
+        condition: service_started
+      pongd002:
+        condition: service_started
+      pongd003:
+        condition: service_started
+    command: bats tests/basic2/ping_host.bats
