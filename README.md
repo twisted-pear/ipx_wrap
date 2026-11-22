@@ -510,6 +510,12 @@ SPX packet. This value is ignored and is always 534.
 
 The `-v` flag will cause the program to print more detailed information.
 
+## Presentations & Additional Documentation
+
+A presentation describing the architecture of `ipx_wrap` can be found here:
+
+[In-Kernel Necromancy: Resurrecting IPX with eBPF](https://speakerdeck.com/twistedpear/in-kernel-necromancy-resurrecting-ipx-with-ebpf)
+
 ## Acknowledgements
 
 ### uthash
