@@ -516,6 +516,10 @@ A presentation describing the architecture of `ipx_wrap` can be found here:
 
 [In-Kernel Necromancy: Resurrecting IPX with eBPF](https://speakerdeck.com/twistedpear/in-kernel-necromancy-resurrecting-ipx-with-ebpf)
 
+A second presentation going into the SPX to SCTP translation is here:
+
+[In-Kernel Necromancy 2: Sequenced Boogaloo](https://speakerdeck.com/twistedpear/in-kernel-necromancy-2-slidev)
+
 ## Acknowledgements
 
 ### uthash
