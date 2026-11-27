@@ -1360,7 +1360,7 @@ void ipxw_mux_spx_handle_close(struct ipxw_mux_spx_handle *h)
 
 	h->spx_sock = -1;
 	h->conf_sock = -1;
-	h->conf_sock = SPX_CONN_ID_UNKNOWN;
+	h->conn_id = SPX_CONN_ID_UNKNOWN;
 }
 
 static struct ipxw_mux_spx_handle ipxw_mux_spx_mk_handle(struct ipxw_mux_handle

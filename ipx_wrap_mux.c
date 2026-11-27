@@ -227,7 +227,7 @@ static __be16 find_next_free_dyn_sock(struct if_entry *iface)
 
 static __be16 find_next_free_spx_conn_id(struct bind_entry *e)
 {
-	size_t range = USHRT_MAX;
+	size_t range = USHRT_MAX + 1;
 	__u16 offset;
 
 	/* if getting a random number fails, act as if no socket is free, the
@@ -241,6 +241,10 @@ static __be16 find_next_free_spx_conn_id(struct bind_entry *e)
 	offset = offset % range;
 	for (unsigned int i = 0; i < range; i++) {
 		__u16 candidate = ((offset + i) % range);
+
+		if (htons(candidate) == SPX_CONN_ID_UNKNOWN) {
+			continue;
+		}
 
 		c = get_spx_conn_by_conn_id(e, htons(candidate));
 		if (c == NULL) {
